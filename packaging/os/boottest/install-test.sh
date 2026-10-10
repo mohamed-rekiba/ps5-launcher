@@ -152,6 +152,9 @@ screenshot "boot1"
 # ssh joins its arguments into one remote command, so the command is one quoted string.
 vm "sudo -S -p '' sh -c 'echo \"tester ALL=(ALL) NOPASSWD: ALL\" > /etc/sudoers.d/90-install-test && chmod 440 /etc/sudoers.d/90-install-test'" \
     <<<"$password"
+vm "sudo -n sshd -T | grep -qx 'passwordauthentication no'" ||
+    die "SSH in the test VM takes passwords: the kickstart's sshd drop-in is missing"
+echo "ok   SSH in the test VM takes keys only"
 expect_digest "$MAIN_DIGEST" "the installed candidate"
 check_system boot1-check.log main --session
 screenshot "boot1-session"

@@ -57,7 +57,7 @@ for lib in libmpv.so.2 libarchive.so.13 libasound.so.2; do
     ldconfig -p | grep -q "$lib " || fail "missing $lib"
 done
 ok "run-time libraries"
-for tool in skopeo mokutil pkexec bootc xdotool xrandr; do
+for tool in skopeo mokutil pkexec bootc xdotool xrandr lspci; do
     command -v "$tool" >/dev/null || fail "missing $tool"
 done
 ok "tools"
@@ -69,6 +69,14 @@ done
 [ "$(systemctl is-enabled bootc-fetch-apply-updates.timer || true)" = masked ] ||
     fail "bootc-fetch-apply-updates.timer is not masked"
 ok "services, and the bootc update timer masked"
+# SSH is off, not masked: an owner or a kickstart may turn it on. The preset keeps it off when
+# systemd applies the presets at the first start (the image has an empty /etc/machine-id).
+for unit in sshd.service sshd.socket; do
+    [ "$(systemctl is-enabled "$unit" || true)" = disabled ] || fail "$unit is not disabled"
+done
+grep -qx "disable sshd.service" /usr/lib/systemd/system-preset/10-ps5-launcher-os.preset ||
+    fail "no preset keeps sshd off at the first start"
+ok "SSH server off (sshd.service, sshd.socket, and the preset)"
 printf "IMAGE=%s\nIMAGE_REF=%s\n" "$VARIANT" "$IMAGE_REF" | cmp -s - /usr/lib/ps5-launcher/os-release ||
     fail "the OS marker is not IMAGE=$VARIANT, IMAGE_REF=$IMAGE_REF"
 ok "OS marker: IMAGE=$VARIANT IMAGE_REF=$IMAGE_REF"

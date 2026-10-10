@@ -8,10 +8,22 @@ network --bootproto=dhcp --device=link --activate
 zerombr
 clearpart --all --initlabel --disklabel=gpt
 autopart --type=plain --nohome --noswap
+# The release image has SSH off. The test turns it on, key only: the password is only for the
+# first sudo in install-test.sh, never for SSH.
 user --name=tester --groups=wheel --password=@PASSWORD@ --plaintext
 sshkey --username=tester "@SSHKEY@"
 services --enabled=sshd
 poweroff
+
+# CI only: SSH takes the key, never a password. sshd uses the first value it reads, and this file
+# sorts before Fedora's 50-redhat.conf.
+%post --erroronfail --log=/tmp/ps5-launcher-os-test-post.log
+set -eu
+mkdir -p /etc/ssh/sshd_config.d
+printf 'PasswordAuthentication no\nKbdInteractiveAuthentication no\nPermitRootLogin no\n' \
+    > /etc/ssh/sshd_config.d/10-ps5-launcher-os-test.conf
+chmod 0600 /etc/ssh/sshd_config.d/10-ps5-launcher-os-test.conf
+%end
 
 # Runs after the release kickstart's %pre (they run in file order), so this source wins: the
 # candidate by digest, following the test's upgrade tag.

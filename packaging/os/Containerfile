@@ -45,7 +45,7 @@ RUN set -eux; \
         NetworkManager NetworkManager-wifi bluez \
         pipewire pipewire-alsa pipewire-pulseaudio wireplumber \
         udisks2 polkit \
-        skopeo mokutil; \
+        skopeo mokutil pciutils; \
     dnf -y install --setopt=install_weak_deps=False --allowerasing \
         ffmpeg-libs mesa-va-drivers-freeworld intel-media-driver; \
     # The fallback desktop behind "Switch to desktop": Plasma with what it needs to be usable.
@@ -82,6 +82,10 @@ RUN set -eux; \
     # Updates go only through the launcher's helper, which checks the NVIDIA signing key and
     # never restarts the PC by itself; bootc's own timer would apply and reboot.
     systemctl mask bootc-fetch-apply-updates.timer; \
+    # No SSH server on a console. Off, not masked, so an owner or a kickstart can turn it on.
+    # The preset files/usr/lib/systemd/system-preset/10-ps5-launcher-os.preset keeps it off at
+    # the first start too.
+    systemctl disable sshd.service sshd.socket; \
     # Tells the launcher it runs in the OS, which image this is, and the channel it follows.
     # src/system.rs reads the IMAGE line; the NVIDIA image rewrites both lines.
     mkdir -p /usr/lib/ps5-launcher; \

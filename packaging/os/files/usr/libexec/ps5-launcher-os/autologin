@@ -3,11 +3,17 @@
 # which user to log in automatically: the installer creates that user, so the image cannot know
 # the name. If the installer finished without a user, it makes one, so the PC still logs in.
 # The session (PS5 Launcher) and Relogin come from /usr/lib/sddm/sddm.conf.d/.
+#
+# The fallback user has a locked password and is not in wheel. SDDM's automatic login needs no
+# password (its PAM stack, sddm-autologin, uses pam_permit), and the launcher's root helper is
+# allowed for the active local session by polkit, not by group. With a locked password, wheel
+# would give nothing but password prompts no one can answer, and an empty password would let
+# anyone log in at a console as an administrator.
 set -eu
 user=$(getent passwd | awk -F: '$3 >= 1000 && $3 < 60000 { print $1; exit }')
 if [ -z "$user" ]; then
-    useradd -m -G wheel -c "Player" player
-    passwd -d player
+    # useradd without a password leaves it locked.
+    useradd -m -c "Player" player
     user=player
     echo "created user 'player' for automatic login"
 fi

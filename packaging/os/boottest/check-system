@@ -30,6 +30,18 @@ check "the OS marker names the $want channel" grep -Eqx "IMAGE_REF=[a-z0-9./_-]+
 check "bootc's own update timer is masked" \
     test "$(systemctl is-enabled bootc-fetch-apply-updates.timer 2>/dev/null)" = masked
 check "the launcher runs (--version)" /usr/bin/ps5-launcher --version
+# SSH is off in the release image, also after systemd's first-start presets. Only the install
+# test's kickstart turns it on, with its own drop-in: then it must take keys only.
+ci_ssh=/etc/ssh/sshd_config.d/10-ps5-launcher-os-test.conf
+if [ -e "$ci_ssh" ]; then
+    check "SSH (install test only) takes no password" \
+        sh -c "sshd -T | grep -qx 'passwordauthentication no'"
+else
+    for unit in sshd.service sshd.socket; do
+        check "$unit is disabled" test "$(systemctl is-enabled "$unit" 2>/dev/null)" = disabled
+        check "$unit is not running" not systemctl is-active "$unit"
+    done
+fi
 for tool in skopeo mokutil pkexec bootc; do
     check "$tool is installed" command -v "$tool"
 done
@@ -65,6 +77,12 @@ if [ "$session" = --session ]; then
     user=$(sed -n 's/^User=//p' /etc/sddm.conf.d/10-ps5-launcher-os-user.conf 2>/dev/null)
     check "SDDM logs a user in automatically (${user:-none})" test -n "$user"
     check "SDDM runs" systemctl is-active sddm.service
+    if [ "$user" = player ]; then
+        # The fallback user (no user from the installer): logged in by SDDM with no password.
+        check "the fallback user's password is locked" \
+            sh -c "getent shadow player | cut -d: -f2 | grep -q '^!'"
+        check "the fallback user is not in wheel" not sh -c "id -nG player | grep -qw wheel"
+    fi
     home=$(getent passwd "${user:-nobody}" | cut -d: -f6)
     log="$home/.cache/ps5-launcher-session.log"
     next=/etc/sddm.conf.d/90-ps5-launcher-os-next-session.conf

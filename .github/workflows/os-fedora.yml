@@ -22,17 +22,23 @@ name: PS5 Launcher OS (Fedora)
 # 4. Gates, all on a runner with KVM (no KVM fails them):
 #    boot-test     a qcow2 of the main candidate boots, and its checks pass (session included)
 #    install-test  the netinstaller installs the candidate with no one at the keyboard, then
-#                  bootc upgrade, bootc rollback, and the switch to NVIDIA and back
-# 5. promote: copies the tested digests to the release tags. Only when asked (input promote),
+#                  bootc upgrade, bootc rollback, and the switch to NVIDIA and back. It also
+#                  makes the candidate-iso artifact for the hardware tests: an ISO that installs
+#                  this run's tested digests, its checksum, manifest.txt, and the test kit.
+# 5. release-guard: fails every run with promote or attach_iso on, until image signing exists
+#    (OS_IMAGE_SIGNING below). So nothing unsigned is ever promoted or published.
+# 6. promote: copies the tested digests to the release tags. Only when asked (input promote),
 #    only from main, and only after the environment os-fedora-release approves it: its reviewers
-#    confirm the hardware tests in packaging/os/README.md, which CI cannot run (Secure Boot,
-#    real GPUs). Scheduled runs never promote.
-# 6. iso: after promotion, and only when asked (input attach_iso), attaches
+#    confirm the hardware tests (packaging/os/hardware-test.md), which CI cannot run (Secure
+#    Boot, real GPUs). The approval must cite hardware results for this exact run id, attempt and
+#    pair of digests. Scheduled runs never promote.
+# 7. iso: after promotion, and only when asked (input attach_iso), attaches
 #    ps5-launcher-fedora-x86_64.iso to the launcher release.
 #
-# TODO(release): sign the images with sigstore/cosign and ship a containers policy that requires
-# the signature (/etc/containers/policy.json and registries.d), so bootc and the helper refuse
-# unsigned images. Until then the images are unsigned: this blocks a public release.
+# TODO(release): sign the images with sigstore/cosign, verify the signature in promote, and ship
+# a containers policy that requires it (/etc/containers/policy.json and registries.d), so bootc
+# and the helper refuse unsigned images. Until then the images are unsigned, and release-guard
+# blocks promotion and the release ISO.
 # TODO: delete old testing-* tags from the registry.
 
 on:
@@ -83,6 +89,11 @@ env:
   FEDORA_BASE: quay.io/fedora/fedora-bootc:44
   CERT: packaging/os/secureboot/public_key.der
   RUN_ID: ${{ github.run_id }}
+  # The public-release guard (job release-guard). It is in this file, not a repository variable,
+  # so only a reviewed change can lift it. Set it to "enabled" only in the change that adds all
+  # three parts of the TODO(release) above: signing, its check in promote, and the policy in the
+  # image.
+  OS_IMAGE_SIGNING: disabled
 
 defaults:
   run:
@@ -413,6 +424,9 @@ jobs:
       MAIN_TAG: testing-main-${{ github.run_id }}
       NVIDIA_TAG: testing-nvidia-${{ github.run_id }}
       UPGRADE_TAG: testing-upgrade-${{ github.run_id }}
+      BASE: ${{ needs.prepare.outputs.base }}
+      LAUNCHER_TAG: ${{ needs.prepare.outputs.launcher_tag }}
+      CERT_SHA256: ${{ needs.prepare.outputs.cert_sha256 }}
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
@@ -461,19 +475,62 @@ jobs:
           sudo apt-get install -y -qq qemu-system-x86 qemu-utils ovmf socat jq >/dev/null
           OUT=$PWD/install-test packaging/os/boottest/install-test.sh 2>&1 | tee install-test.log
 
-      # For the hardware tests before promotion: the installer ISO, set to install this run's
-      # candidates (and to follow the release tags afterwards).
-      - name: Build the candidate ISO
+      # For the hardware tests before promotion (packaging/os/hardware-test.md): the installer
+      # ISO, set to install this run's tested digests, never a tag (a rerun of this run id moves
+      # the testing tags). After the install the PC follows the release tag, main or nvidia.
+      - name: Build the candidate ISO and the hardware test kit
+        env:
+          UPGRADE_DIGEST: ${{ steps.upgrade.outputs.digest }}
         run: |
+          for digest in "$MAIN_DIGEST" "$NVIDIA_DIGEST" "$UPGRADE_DIGEST"; do
+            [[ $digest =~ ^sha256:[0-9a-f]{64}$ ]] || { echo "::error::Not a digest: $digest"; exit 1; }
+          done
           cat > candidate.ks <<EOF
-          # Candidate ISO: install this run's candidate of the chosen image (main or nvidia).
+          # Candidate ISO: install this run's tested digest of the chosen image (main or nvidia).
           %pre --erroronfail --log=/tmp/ps5-launcher-os-candidate.log
           tag=\$(cat /tmp/ps5-launcher-os-tag)
-          echo "bootc --source-imgref=registry:$IMAGE:testing-\$tag-$GITHUB_RUN_ID --target-imgref=$IMAGE:\$tag" > /tmp/ps5-launcher-os-source.ks
+          case \$tag in
+          main) digest=$MAIN_DIGEST ;;
+          nvidia) digest=$NVIDIA_DIGEST ;;
+          *) echo "unknown image: \$tag" >&2; exit 1 ;;
+          esac
+          echo "Installing $IMAGE@\$digest, following $IMAGE:\$tag"
+          echo "bootc --source-imgref=registry:$IMAGE@\$digest --target-imgref=$IMAGE:\$tag" > /tmp/ps5-launcher-os-source.ks
           %end
           EOF
+          iso=ps5-launcher-fedora-candidate-x86_64.iso
           docker run --rm --privileged -v "$PWD:/src" -w /src -e IMAGE="$IMAGE" -e ISO_CACHE=/src/install-test \
-            quay.io/fedora/fedora:44 packaging/os/build-iso.sh ps5-launcher-fedora-candidate-x86_64.iso candidate.ks
+            quay.io/fedora/fedora:44 packaging/os/build-iso.sh "$iso" candidate.ks
+          kit=candidate-iso
+          mkdir -p "$kit"
+          sudo mv "$iso" "$kit/"
+          sudo chown -R "$(id -u):$(id -g)" "$kit"
+          (cd "$kit" && sha256sum "$iso" > "$iso.sha256")
+          # One KEY=VALUE per line, so a tester can load it in a shell: . manifest.txt
+          {
+            echo "RUN_ID=$GITHUB_RUN_ID"
+            echo "RUN_ATTEMPT=$GITHUB_RUN_ATTEMPT"
+            echo "COMMIT=$GITHUB_SHA"
+            echo "IMAGE=$IMAGE"
+            echo "MAIN_DIGEST=$MAIN_DIGEST"
+            echo "NVIDIA_DIGEST=$NVIDIA_DIGEST"
+            echo "UPGRADE_DIGEST=$UPGRADE_DIGEST"
+            echo "BASE_IMAGE=$BASE"
+            echo "LAUNCHER_VERSION=${LAUNCHER_TAG#v}"
+            echo "SECUREBOOT_CERT_SHA256=$CERT_SHA256"
+            echo "ISO_SHA256=$(cut -d' ' -f1 "$kit/$iso.sha256")"
+          } > "$kit/manifest.txt"
+          cp packaging/os/hardware-test.md packaging/os/collect-hardware-logs.sh "$kit/"
+          {
+            echo "### Candidate for the hardware tests"
+            echo "Artifact \`candidate-iso\`: the ISO, its \`.sha256\`, \`manifest.txt\`, \`hardware-test.md\` and \`collect-hardware-logs.sh\`."
+            echo
+            echo '```'
+            cat "$kit/manifest.txt"
+            echo '```'
+            echo
+            echo "**Approve a promotion of this run only with hardware results that cite run $GITHUB_RUN_ID, attempt $GITHUB_RUN_ATTEMPT, main \`$MAIN_DIGEST\` and nvidia \`$NVIDIA_DIGEST\`.**"
+          } >> "$GITHUB_STEP_SUMMARY"
 
       - if: always()
         run: sudo chown -R "$(id -u):$(id -g)" . || true
@@ -489,16 +546,33 @@ jobs:
       - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         with:
           name: candidate-iso
-          path: ps5-launcher-fedora-candidate-x86_64.iso
+          path: candidate-iso/
+          if-no-files-found: error
           retention-days: 14
 
+  # The public-release guard: promotion and the release ISO publish what installed PCs trust, so
+  # they wait for image signing (OS_IMAGE_SIGNING at the top). It has no environment, so it fails
+  # before anyone is asked to approve.
+  release-guard:
+    if: inputs.promote || inputs.attach_iso
+    runs-on: ubuntu-24.04
+    timeout-minutes: 5
+    steps:
+      - name: Refuse to publish unsigned images
+        run: |
+          if [ "$OS_IMAGE_SIGNING" != enabled ]; then
+            echo "::error::Promotion and the release ISO are blocked: the images are not signed yet. See TODO(release) at the top of .github/workflows/os-fedora.yml and in packaging/os/README.md. Run without promote and attach_iso to get the candidates."
+            exit 1
+          fi
+          echo "Image signing is enabled"
+
   promote:
-    needs: [prepare, main, nvidia, boot-test, install-test]
+    needs: [prepare, main, nvidia, boot-test, install-test, release-guard]
     if: inputs.promote && github.ref == 'refs/heads/main'
     runs-on: ubuntu-24.04
     timeout-minutes: 20
-    # The owner adds required reviewers to this environment. They approve only after the
-    # hardware tests in packaging/os/README.md passed on the candidate ISO.
+    # The owner adds required reviewers to this environment. They approve only with hardware
+    # results (packaging/os/hardware-test.md) for this exact run id, attempt and digest pair.
     environment: os-fedora-release
     env:
       IMAGE: ${{ needs.prepare.outputs.image }}
@@ -506,6 +580,19 @@ jobs:
       MAIN_DIGEST: ${{ needs.main.outputs.digest }}
       NVIDIA_DIGEST: ${{ needs.nvidia.outputs.digest }}
     steps:
+      - name: Record what the approval covers
+        run: |
+          {
+            echo "### Promotion"
+            echo "Run $GITHUB_RUN_ID, attempt $GITHUB_RUN_ATTEMPT, commit \`$GITHUB_SHA\`"
+            echo
+            echo "| | Digest |"
+            echo "|---|---|"
+            echo "| main | \`$MAIN_DIGEST\` |"
+            echo "| nvidia | \`$NVIDIA_DIGEST\` |"
+            echo
+            echo "**The approval of this deployment must cite hardware results (packaging/os/hardware-test.md) for run $GITHUB_RUN_ID, attempt $GITHUB_RUN_ATTEMPT, and exactly these two digests.** Results for another run or another digest do not count."
+          } >> "$GITHUB_STEP_SUMMARY"
       # TODO(release): verify and attach the cosign signature here; see the top of this file.
       - name: Copy the tested digests to the release tags
         run: |
@@ -523,7 +610,7 @@ jobs:
           promote "$NVIDIA_DIGEST" nvidia
 
   iso:
-    needs: [prepare, promote]
+    needs: [prepare, release-guard, promote]
     if: inputs.attach_iso
     runs-on: ubuntu-24.04
     timeout-minutes: 30

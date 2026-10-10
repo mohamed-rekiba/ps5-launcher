@@ -5,7 +5,9 @@ one container image, updated as a whole, with the previous version kept for roll
 replaces the Bazzite image in [os/](../../os/README.md), which keeps being built by
 `.github/workflows/os.yml` until the migration.
 
-**Not ready for a public release:** the images are not signed yet (see [TODOs](#todos)).
+**Not ready for a public release:** the images are not signed yet (see [TODOs](#todos)). Until
+they are, the workflow refuses to promote them or to publish the ISO (see
+[the public-release guard](#the-public-release-guard)).
 
 ## Images
 
@@ -41,7 +43,7 @@ the same SHA-256 in the label `io.github.ps5-launcher.secureboot-cert-sha256`. O
 |---|---|
 | [Containerfile](Containerfile) | The main image: `fedora-bootc:44` by digest, SDDM, gamescope, Mesa, RPM Fusion's video decoders, a minimal Plasma desktop, `skopeo` and `mokutil` for the helper, and the launcher rpm. |
 | [Containerfile.nvidia](Containerfile.nvidia) | The NVIDIA image. Its first stage builds the kernel modules for the main image's kernel and signs them; the key is a build secret, never in a layer. |
-| [files/](files) | Copied into both images: SDDM's automatic login into the PS5 Launcher session, the service that picks the user, the root helper and its polkit policy, Plasma's autostart that ends a one-time "Switch to desktop". |
+| [files/](files) | Copied into both images: SDDM's automatic login into the PS5 Launcher session, the service that picks the user, the root helper and its polkit policy, Plasma's autostart that ends a one-time "Switch to desktop", and the preset that keeps the SSH server off. |
 | [nvidia/](nvidia) | Copied into the NVIDIA image: kernel arguments (`kargs.d`) and the nouveau block. |
 | [secureboot/](secureboot/README.md) | The certificate of the signing key, and how the owner makes it. |
 | [ps5-launcher-os.ks](ps5-launcher-os.ks) | The kickstart for Fedora's network installer. |
@@ -51,6 +53,8 @@ the same SHA-256 in the label `io.github.ps5-launcher.secureboot-cert-sha256`. O
 | [make-test-key.sh](make-test-key.sh) | **Tests only:** a throwaway Secure Boot key. Never publish an image built with it. |
 | [boottest/](boottest) | **CI only, never published:** the boot test image, the install test and its kickstart, the upgrade target, and `check-system`, the checks that run inside the VM. |
 | [test-helper.sh](test-helper.sh) | Tests the root helper (CI runs it with the Linux build). |
+| [hardware-test.md](hardware-test.md) | The hardware tests before a promotion: the checklist and the results form. |
+| [collect-hardware-logs.sh](collect-hardware-logs.sh) | Saves the logs of one hardware test stage into a dated tarball. |
 | [../../.github/workflows/os-fedora.yml](../../.github/workflows/os-fedora.yml) | Builds, tests and publishes the images. |
 
 ## The installer
@@ -71,6 +75,17 @@ screen asks to enroll the key: choose *Enroll MOK*, *Continue*, *Yes*, type `123
 *Reboot*. This screen runs before Linux, so it needs a USB keyboard. When the launcher starts an
 enrolment later, it uses a new random password each time.
 
+**The installed system:**
+
+- **No SSH server.** `sshd.service` and `sshd.socket` are disabled, and a preset
+  (`files/usr/lib/systemd/system-preset/10-ps5-launcher-os.preset`) keeps them off when systemd
+  applies its presets at the first start. They are not masked: an owner can turn SSH on with
+  `sudo systemctl enable --now sshd`. Only CI's install test turns it on, for its key only.
+- **The fallback user.** If the installer finished without a user, the PC makes `player` at the
+  next start, so it still logs in. Its password is locked and it is not in `wheel`: SDDM's
+  automatic login needs no password, and the launcher's helper is allowed for the user at the
+  PC by polkit, not by group. An administrator needs a user made in the installer.
+
 ## Build it yourself
 
 From the repository root, on Linux with podman (or `ENGINE=docker`). On an Apple Silicon Mac the
@@ -82,7 +97,7 @@ build there (akmods fails under emulation).
 gh release download v1.14.3 --pattern 'ps5-launcher-linux-x86_64.tar.gz*' --dir /tmp/release
 (cd /tmp/release && sha256sum -c ps5-launcher-linux-x86_64.tar.gz.sha256)
 tar -C /tmp/release -xzf /tmp/release/ps5-launcher-linux-x86_64.tar.gz
-mkdir -p target/os/bin && cp /tmp/release/ps5-launcher-linux-x86_64/ps5-launcher target/os/bin/
+mkdir -p target/os/bin target/os/dist && cp /tmp/release/ps5-launcher-linux-x86_64/ps5-launcher target/os/bin/
 docker run --rm --platform linux/amd64 -v "$PWD:/w" -w /w -e VERSION=1.14.3 \
     -e BINARY=target/os/bin/ps5-launcher goreleaser/nfpm:v2.47.0 \
     package -f packaging/linux/nfpm.yaml -p rpm -t target/os/dist
@@ -127,21 +142,47 @@ Fedora's updates. Both go into the job summary and the image labels.
 
    | Gate | Passes when |
    |---|---|
-   | boot-test | A qcow2 of the main candidate (made with `image-builder`) boots, and `check-system main --session` passes: the OS marker, the masked update timer, the tools, the certificate, no NVIDIA kernel arguments, and the session. |
+   | boot-test | A qcow2 of the main candidate (made with `image-builder`) boots, and `check-system main --session` passes: the OS marker, the masked update timer, the SSH server off, the tools, the certificate, no NVIDIA kernel arguments, and the session. |
    | install-test | The ISO installs the candidate with no one at the keyboard (an extra kickstart via `build-iso.sh`'s second argument), and `check-system` passes after each step: first boot; `bootc upgrade` to a newer image, then `bootc rollback`; `bootc switch` to the NVIDIA candidate (kernel arguments and modules present); `bootc switch` back to main (no `nvidia` or `nouveau` kernel argument, no nouveau block, no NVIDIA module). Each step checks the booted digest. |
 
    The session check passes when the launcher runs, or when gamescope failed only because the VM
    has no usable Vulkan device ("Failed to initialize Vulkan", "not a valid physical device"),
    the launcher did not crash, and the session wrapper fell back to Plasma through the root
    helper, and Plasma cleared the one-time login.
-4. **promote**, only when the run was started with `promote` on, from `main`, after every gate
-   passed, and after a reviewer of the environment `os-fedora-release` approved it. The
-   reviewer approves only after the hardware tests below passed on this run's
-   `candidate-iso` artifact. It copies the tested digests to `main-YYYYMMDD`,
-   `nvidia-YYYYMMDD`, `main` and `nvidia`, and checks that the tags point at them. **Scheduled
-   runs and release runs never promote; they only push candidates.**
-5. **iso**, only with `attach_iso` on and after promotion: attaches
+   The install test also makes the `candidate-iso` artifact for the hardware tests: an ISO that
+   installs this run's tested **digests** (never a testing tag, which a rerun of the same run id
+   would move), its `.sha256`, `manifest.txt` (run id and attempt, commit, the main, NVIDIA and
+   upgrade digests, the Fedora base digest, the launcher version, the certificate and ISO
+   checksums), [hardware-test.md](hardware-test.md) and
+   [collect-hardware-logs.sh](collect-hardware-logs.sh). The job summary shows the manifest.
+4. **release-guard**, in every run with `promote` or `attach_iso` on: fails until image signing
+   exists (see below). Promotion and the ISO wait for it.
+5. **promote**, only when the run was started with `promote` on, from `main`, after every gate
+   passed, and after a reviewer of the environment `os-fedora-release` approved it. It copies
+   the tested digests to `main-YYYYMMDD`, `nvidia-YYYYMMDD`, `main` and `nvidia`, and checks
+   that the tags point at them. **Scheduled runs and release runs never promote; they only push
+   candidates.**
+6. **iso**, only with `attach_iso` on and after promotion: attaches
    `ps5-launcher-fedora-x86_64.iso` and its `.sha256` to the launcher release, under 2 GiB.
+
+**Promotion stays manual.** A reviewer approves only with hardware results
+([hardware-test.md](hardware-test.md), filled in, with the log tarballs) that cite **this exact
+run id and attempt, and this exact pair of main and NVIDIA digests**, as the install test's and
+the promote job's summaries show them. Results for another run, another attempt or another
+digest do not count: a rerun builds new digests.
+
+### The public-release guard
+
+Promotion and the release ISO publish images that installed PCs trust and update from. The
+images are not signed yet, so the job `release-guard` fails every run with `promote` or
+`attach_iso` on, with a message that points to the TODO. It has no environment, so it fails
+before anyone is asked to approve.
+
+The guard is the value `OS_IMAGE_SIGNING: disabled` at the top of
+`.github/workflows/os-fedora.yml`. It is in the workflow file, not a repository variable, so a
+settings click cannot lift it: only a reviewed change can. Set it to `enabled` only in the change
+that adds all three parts of the signing TODO: the signature in the workflow, its check in
+`promote`, and the containers policy in the image.
 
 ## The owner's setup
 
@@ -162,26 +203,36 @@ Fedora's updates. Both go into the job summary and the image labels.
 
 ## Hardware tests before promotion
 
-CI has no GPU and no Secure Boot. Before approving a promotion, install this run's
-`candidate-iso` artifact (it installs the run's candidates, then follows the release tags).
-Write down the PC, the GPU and the result.
+CI has no GPU and no Secure Boot. Before approving a promotion, run
+[hardware-test.md](hardware-test.md) with the run's `candidate-iso` artifact, on an AMD or Intel
+PC and on an NVIDIA RTX 20 or newer PC (RTX 40 or 50 too, if you have one). It covers the
+install, the first start, a controller, sound over HDMI, an upgrade and a rollback, the NVIDIA
+driver with MOK enrolment, the ISO's NVIDIA entry, and Switch to desktop.
 
-| # | Test | Pass when |
+The commands use the exact digests from `manifest.txt`, never a tag. Load it with
+`. manifest.txt`, then:
+
+| Step | Command, then restart | The booted digest must be |
 |---|---|---|
-| 1 | Install on an AMD or Intel PC, plain entry. | The PC restarts into PS5 Launcher full screen, with no login screen. |
-| 2 | On that PC: `sudo bootc upgrade` to a newer image, then `sudo bootc rollback`. | Both work, and the PC starts into the launcher after each. |
-| 3 | Install on an NVIDIA RTX 20 or newer PC, plain entry (open-source driver), Secure Boot on or off. | The launcher shows. Note whether it is smooth. Repeat on an RTX 40 or 50 card if you have one. |
-| 4 | Install with "Install with the NVIDIA driver", Secure Boot **on**. | The blue MOK screen appears after the install; enrolling with `12345678` works; then `lsmod \| grep nvidia` lists the driver, `nvidia-smi` works, and the launcher shows. |
-| 5 | On an NVIDIA PC installed from the plain entry: queue the key (`sudo mokutil --import /usr/share/ps5-launcher/secureboot/*.der`), restart, enroll, then `sudo bootc switch ghcr.io/<owner>/ps5-launcher-fedora:testing-nvidia-<run>`, restart. | The driver loads and the launcher shows. Note the download size `bootc switch` printed. |
-| 6 | Switch back: `sudo bootc switch ghcr.io/<owner>/ps5-launcher-fedora:testing-main-<run>`, restart. | nouveau loads again; `cat /proc/cmdline` has no `nouveau` or `nvidia-drm` argument. |
-| 7 | Skip the blue screen on purpose (choose "Continue boot"), then boot the ISO's "Enroll the Secure Boot key again". | The PC restarts into the blue screen, and enrolling works. |
+| Upgrade | `sudo bootc switch "$IMAGE@$UPGRADE_DIGEST"` | `UPGRADE_DIGEST` |
+| Rollback | `sudo bootc rollback` | `MAIN_DIGEST` |
+| To NVIDIA (key enrolled first, with Secure Boot on) | `sudo bootc switch "$IMAGE@$NVIDIA_DIGEST"` | `NVIDIA_DIGEST` |
+| Back to main | `sudo bootc switch "$IMAGE@$MAIN_DIGEST"` | `MAIN_DIGEST` |
+
+**After every restart, record the booted digest**: `sudo bash collect-hardware-logs.sh <stage>`
+prints it and saves the logs (or read `.status.booted.image.imageDigest` from
+`sudo bootc status --json`). `UPGRADE_DIGEST` is the install test's upgrade target: the
+candidate plus one marker file, `/usr/lib/ps5-launcher/upgrade-test`. The launcher's NVIDIA
+offer and `helper switch nvidia` use the release tag `nvidia`, not the candidate, so the test
+switches to the candidate by digest.
 
 ## TODOs
 
 - **Image signing (blocks a public release):** sign the images with sigstore/cosign in the
   workflow, verify the signature before promotion, and ship a containers policy
   (`/etc/containers/policy.json` and `registries.d`) that requires it, so bootc and the helper
-  refuse unsigned images.
+  refuse unsigned images. Then set `OS_IMAGE_SIGNING: enabled` in the workflow (see
+  [the public-release guard](#the-public-release-guard)).
 - The recovery boot entry in the installed system (switch to the other image in text mode) is
   not built yet.
 - Samba and firewalld (file sharing), the power key's udev rule, and the boot health check with
