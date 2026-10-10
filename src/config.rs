@@ -365,18 +365,19 @@ impl Config {
         if json.is_empty() {
             return;
         }
+        // One save at a time in this process, so two threads never race the backup and the file.
+        static SAVING: std::sync::Mutex<()> = std::sync::Mutex::new(());
+        let _saving = SAVING.lock().unwrap_or_else(|e| e.into_inner());
         if let Some(read) = self.read.as_mut().filter(|r| r.version == 0) {
             let mut backup = path.as_os_str().to_owned();
             backup.push(".legacy");
             let backup = PathBuf::from(backup);
-            match path.exists() && !backup.exists() {
-                true => match std::fs::copy(path, &backup) {
-                    Ok(_) => read.version = CONFIG_VERSION,
-                    // The next save tries again.
-                    Err(e) => crate::log!("could not keep the old config as {}: {e}", backup.display()),
-                },
-                false => read.version = CONFIG_VERSION,
+            if let Err(e) = keep_backup(path, &backup) {
+                // The old file stays as it is; the next save tries again.
+                crate::log!("config not saved: could not keep the old config as {}: {e}", backup.display());
+                return;
             }
+            read.version = CONFIG_VERSION;
         }
         if let Err(e) = atomic_write(path, &json) {
             crate::log!("could not save config: {e}");
@@ -436,6 +437,38 @@ impl Preferences for Config {
 
 /// The old `emulator` text as a build: blank, or a path in the managed folder, is the managed
 /// KytyPS5 (blank looks for one, as before); anything else is the user's, found or not.
+/// Copy the file at `path` (if there is one) to `backup`, which must not exist yet: written in
+/// full and flushed to disk before the caller replaces `path`. A backup already there, from an
+/// earlier start, is kept as it is; anything else in its place is an error.
+fn keep_backup(path: &Path, backup: &Path) -> std::io::Result<()> {
+    use std::io::Write;
+    let old = match std::fs::read(path) {
+        Ok(old) => old,
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(()),
+        Err(e) => return Err(e),
+    };
+    let mut file = match std::fs::OpenOptions::new().write(true).create_new(true).open(backup) {
+        Ok(file) => file,
+        Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => {
+            return match std::fs::symlink_metadata(backup) {
+                Ok(m) if m.is_file() => Ok(()),
+                _ => Err(std::io::Error::new(std::io::ErrorKind::AlreadyExists, "something that is not a file is in its place")),
+            };
+        }
+        Err(e) => return Err(e),
+    };
+    let written = file.write_all(&old).and_then(|()| file.sync_all());
+    if written.is_err() {
+        // A partial backup must not count as one at the next try.
+        let _ = std::fs::remove_file(backup);
+        return written;
+    }
+    if let Some(dir) = backup.parent().and_then(|d| std::fs::File::open(d).ok()) {
+        let _ = dir.sync_all();
+    }
+    Ok(())
+}
+
 /// The user's text is kept exactly, spaces too; the launcher trims it where it uses it.
 fn kyty_source(text: &str, kyty_root: &Path) -> BuildSource {
     let trimmed = text.trim();
@@ -794,6 +827,60 @@ mod tests {
         c.save_at(&path);
         assert_eq!(std::fs::read(&backup).unwrap(), old, "a later save never replaces the backup");
         assert!(Config::from_json_with(&std::fs::read(&path).unwrap(), Path::new(KYTY_ROOT)).width == 640);
+    }
+
+    #[test]
+    fn without_its_backup_an_old_file_is_not_replaced() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("config.json");
+        let old = br#"{"emulator": "/k/kyty_emulator", "width": 1280}"#;
+        std::fs::write(&path, old).unwrap();
+        // Something that is not a backup is in the way: the backup cannot be made.
+        let backup = dir.path().join("config.json.legacy");
+        std::fs::create_dir(&backup).unwrap();
+        let mut c = Config::from_json_with(old, Path::new(KYTY_ROOT));
+        c.save_at(&path);
+        assert_eq!(std::fs::read(&path).unwrap(), old, "config.json stays as it was");
+        // Once the way is clear, the next save makes the backup, then saves.
+        std::fs::remove_dir(&backup).unwrap();
+        c.save_at(&path);
+        assert_eq!(std::fs::read(&backup).unwrap(), old);
+        assert_eq!(Config::from_json_with(&std::fs::read(&path).unwrap(), Path::new(KYTY_ROOT)).config_version, 1);
+    }
+
+    #[test]
+    fn an_existing_backup_is_never_overwritten() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("config.json");
+        let old = br#"{"width": 1280}"#;
+        std::fs::write(&path, old).unwrap();
+        let backup = dir.path().join("config.json.legacy");
+        std::fs::write(&backup, b"an earlier backup").unwrap();
+        Config::from_json_with(old, Path::new(KYTY_ROOT)).save_at(&path);
+        assert_eq!(std::fs::read(&backup).unwrap(), b"an earlier backup");
+        assert_eq!(Config::from_json_with(&std::fs::read(&path).unwrap(), Path::new(KYTY_ROOT)).config_version, 1);
+    }
+
+    #[test]
+    fn migration_saves_at_the_same_time_keep_the_old_file() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("config.json");
+        let old = br#"{"width": 1280}"#;
+        std::fs::write(&path, old).unwrap();
+        let threads: Vec<_> = (0..8).map(|i| {
+            let path = path.clone();
+            std::thread::spawn(move || {
+                let mut c = Config::from_json_with(old, Path::new(KYTY_ROOT));
+                c.height = 700 + i;
+                c.save_at(&path);
+            })
+        }).collect();
+        for t in threads {
+            t.join().unwrap();
+        }
+        assert_eq!(std::fs::read(dir.path().join("config.json.legacy")).unwrap(), old);
+        let saved: Config = serde_json::from_slice(&std::fs::read(&path).unwrap()).expect("a whole file");
+        assert_eq!(saved.width, 1280);
     }
 }
 
