@@ -54,9 +54,16 @@ fn deployment(v: &serde_json::Value) -> Option<Deployment> {
     })
 }
 
-/// bootc status needs root on a booted system, so it goes through the helper.
+/// The launcher waits this much longer than the helper's own deadline for a task (packaging/os:
+/// every task runs under `timeout` as root). The user cannot stop the helper once it is root, so
+/// the helper's deadline must fire first, and the answer then says what really happened.
+const HELPER_MARGIN: u32 = 30;
+/// The same for the tasks that may take two hours, where the helper's SIGKILL comes later.
+const LONG_HELPER_MARGIN: u32 = 5 * 60;
+
+/// bootc status needs root on a booted system, so it goes through the helper (30 s).
 pub fn status_call() -> Call {
-    Call::new("pkexec", &[HELPER, "status"], 30)
+    Call::new("pkexec", &[HELPER, "status"], 30 + HELPER_MARGIN)
 }
 
 /// A task of the root helper, through pkexec (polkit allows it for the user at the PC).
@@ -68,13 +75,14 @@ pub enum Task {
     QueueKey,
 }
 
+/// A helper task's call. Its time is the helper's own deadline for the task, plus a margin.
 pub fn helper_call(task: Task) -> Call {
     let (name, secs) = match task {
-        Task::UpdateCheck => ("update-check", 120),
+        Task::UpdateCheck => ("update-check", 120 + HELPER_MARGIN),
         // Downloads the new system image: it may take a long time on a slow line.
-        Task::Update => ("update", 2 * 60 * 60),
-        Task::Rollback => ("rollback", 120),
-        Task::QueueKey => ("queue-key", 60),
+        Task::Update => ("update", 2 * 60 * 60 + LONG_HELPER_MARGIN),
+        Task::Rollback => ("rollback", 120 + HELPER_MARGIN),
+        Task::QueueKey => ("queue-key", 60 + HELPER_MARGIN),
     };
     Call::new("pkexec", &[HELPER, name], secs)
 }
@@ -260,6 +268,18 @@ mod tests {
         assert_eq!(helper_call(Task::QueueKey).args, [HELPER, "queue-key"]);
         assert_eq!(helper_call(Task::Update).program, "pkexec");
         assert!(helper_call(Task::Update).secs >= 3600, "a download takes time");
+    }
+
+    #[test]
+    fn the_helper_stops_itself_before_the_launcher_gives_up() {
+        // The user cannot stop the helper once it is root, so the helper's own deadline must
+        // fire first. These are the helper's deadlines.
+        let helper = [(Task::UpdateCheck, 120), (Task::Update, 2 * 60 * 60), (Task::Rollback, 120), (Task::QueueKey, 60)];
+        for (task, secs) in helper {
+            assert!(helper_call(task).secs > secs, "{task:?}");
+            assert_eq!(helper_call(task).deadline(), std::time::Duration::from_secs(helper_call(task).secs.into()), "{task:?}");
+        }
+        assert!(status_call().secs > 30);
     }
 
     #[test]
