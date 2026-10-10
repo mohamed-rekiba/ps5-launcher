@@ -38,6 +38,7 @@ use std::collections::BTreeMap;
 use std::fs::{self, File};
 use std::io::{self, Write};
 use std::os::unix::ffi::OsStrExt;
+use std::os::unix::fs::OpenOptionsExt;
 use std::os::unix::io::AsRawFd;
 use std::path::{Path, PathBuf};
 use std::time::{Duration, Instant};
@@ -102,15 +103,19 @@ fn collect(dir: &Path, prefix: &[u8], found: &mut Vec<(Vec<u8>, PathBuf)>) -> io
 
 // ------------------------------------------------------------------ file operations
 
-/// The file changes the lifecycle makes, so a test can stop it at any step.
+/// The file changes the lifecycle makes, one primitive each, so a test can stop it at any step
+/// or change the disk between two steps. Nothing here flushes by itself: the lifecycle calls
+/// `sync_dir` where the order of changes must survive a power loss.
 pub trait FileOps {
-    fn create_dir_all(&self, path: &Path) -> io::Result<()>;
-    /// Write a new file (in a staging folder).
-    fn write(&self, path: &Path, data: &[u8]) -> io::Result<()>;
-    /// Replace a file in one step: readers see the old content or the new, never a part.
-    fn write_atomic(&self, path: &Path, data: &[u8]) -> io::Result<()>;
+    /// Make one folder; its parent exists.
+    fn create_dir(&self, path: &Path) -> io::Result<()>;
+    /// Write a file that must not exist yet, without following a link, and flush it.
+    fn write_new(&self, path: &Path, data: &[u8]) -> io::Result<()>;
     fn rename(&self, from: &Path, to: &Path) -> io::Result<()>;
+    /// Flush a folder's entries (new, renamed and removed names) to the disk.
+    fn sync_dir(&self, path: &Path) -> io::Result<()>;
     fn remove_file(&self, path: &Path) -> io::Result<()>;
+    /// Remove a folder and everything in it, without following links.
     fn remove_dir_all(&self, path: &Path) -> io::Result<()>;
     /// Take the lock file's exclusive lock; None when another process holds it.
     fn lock(&self, path: &Path) -> io::Result<Option<Lock>>;
@@ -121,48 +126,40 @@ pub struct Lock {
     _file: File,
 }
 
-/// The real file system. Writes and renames are flushed to the disk before they count.
+/// The real file system.
 pub struct RealFiles {
     /// How long `lock` waits for another process.
     pub lock_wait: Duration,
+    /// Flush files and folders to the disk. Only tests turn it off, for speed.
+    pub durable: bool,
 }
 
 impl Default for RealFiles {
     fn default() -> Self {
-        RealFiles { lock_wait: Duration::from_secs(5) }
-    }
-}
-
-fn sync_parent(path: &Path) -> io::Result<()> {
-    match path.parent() {
-        Some(dir) => File::open(dir)?.sync_all(),
-        None => Ok(()),
+        RealFiles { lock_wait: Duration::from_secs(5), durable: true }
     }
 }
 
 impl FileOps for RealFiles {
-    fn create_dir_all(&self, path: &Path) -> io::Result<()> {
-        fs::create_dir_all(path)
+    fn create_dir(&self, path: &Path) -> io::Result<()> {
+        fs::create_dir(path)
     }
 
-    fn write(&self, path: &Path, data: &[u8]) -> io::Result<()> {
-        let mut f = File::create(path)?;
+    fn write_new(&self, path: &Path, data: &[u8]) -> io::Result<()> {
+        let mut f = fs::OpenOptions::new().write(true).create_new(true).mode(0o644).custom_flags(libc::O_NOFOLLOW | libc::O_CLOEXEC).open(path)?;
         f.write_all(data)?;
-        f.sync_all()
-    }
-
-    fn write_atomic(&self, path: &Path, data: &[u8]) -> io::Result<()> {
-        let name = path.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_default();
-        let tmp = path.with_file_name(format!(".{name}.tmp"));
-        self.write(&tmp, data)?;
-        fs::rename(&tmp, path)?;
-        sync_parent(path)
+        if self.durable { f.sync_all() } else { Ok(()) }
     }
 
     fn rename(&self, from: &Path, to: &Path) -> io::Result<()> {
-        fs::rename(from, to)?;
-        sync_parent(to)?;
-        sync_parent(from)
+        fs::rename(from, to)
+    }
+
+    fn sync_dir(&self, path: &Path) -> io::Result<()> {
+        if !self.durable {
+            return Ok(());
+        }
+        fs::OpenOptions::new().read(true).custom_flags(libc::O_DIRECTORY | libc::O_NOFOLLOW | libc::O_CLOEXEC).open(path)?.sync_all()
     }
 
     fn remove_file(&self, path: &Path) -> io::Result<()> {
@@ -170,11 +167,12 @@ impl FileOps for RealFiles {
     }
 
     fn remove_dir_all(&self, path: &Path) -> io::Result<()> {
+        // std removes a link itself, never what it points to.
         fs::remove_dir_all(path)
     }
 
     fn lock(&self, path: &Path) -> io::Result<Option<Lock>> {
-        let file = fs::OpenOptions::new().read(true).write(true).create(true).truncate(false).open(path)?;
+        let file = fs::OpenOptions::new().read(true).write(true).create(true).truncate(false).mode(0o644).custom_flags(libc::O_NOFOLLOW | libc::O_CLOEXEC).open(path)?;
         let start = Instant::now();
         loop {
             // SAFETY: flock only reads the descriptor, which `file` keeps open.
@@ -337,7 +335,7 @@ struct Run<'a> {
 
 /// Take the lock, run `action`, and return its problems.
 fn locked(root: &Path, files: &dyn FileOps, action: impl FnOnce(&mut Run) -> Result<(), Stopped>) -> Vec<Problem> {
-    if let Err(e) = files.create_dir_all(root) {
+    if let Err(e) = fs::create_dir_all(root) {
         return vec![Problem::new("addons", format!("the folder cannot be made: {e}"))];
     }
     let _lock = match files.lock(&root.join(LOCK)) {
@@ -346,7 +344,7 @@ fn locked(root: &Path, files: &dyn FileOps, action: impl FnOnce(&mut Run) -> Res
         Err(e) => return vec![Problem::new("addons", format!("the lock file cannot be used: {e}"))],
     };
     let mut run = Run { root, files, state: BTreeMap::new(), problems: Vec::new() };
-    let _ = action(&mut run);
+    let _ = run.tidy().and_then(|()| action(&mut run));
     run.problems
 }
 
@@ -357,6 +355,15 @@ fn present(path: &Path) -> bool {
 /// A path under the root as the user sees it, for messages.
 fn shown(root: &Path, path: &Path) -> String {
     path.strip_prefix(root).unwrap_or(path).to_string_lossy().into_owned()
+}
+
+fn parent(path: &Path) -> &Path {
+    path.parent().expect("every path here is under the root")
+}
+
+/// The temporary file `write_atomic` writes first.
+fn temporary(root: &Path, name: &str) -> PathBuf {
+    root.join(format!(".{name}.tmp"))
 }
 
 impl Run<'_> {
@@ -381,24 +388,69 @@ impl Run<'_> {
         self.root.join("emulators").join(".staging").join(name)
     }
 
+    /// Remove the temporary files an interrupted write left.
+    fn tidy(&mut self) -> Result<(), Stopped> {
+        for name in [STATE, JOURNAL] {
+            self.remove(&temporary(self.root, name))?;
+        }
+        Ok(())
+    }
+
+    /// The folder under the root, made where it is missing.
+    fn ensure(&mut self, parts: &[&str]) -> Result<PathBuf, Stopped> {
+        let mut at = self.root.to_path_buf();
+        for part in parts {
+            at.push(part);
+            if !present(&at) {
+                self.mkdir(&at)?;
+            }
+        }
+        Ok(at)
+    }
+
+    /// Make one folder and flush its name in the parent.
+    fn mkdir(&mut self, path: &Path) -> Result<(), Stopped> {
+        let subject = shown(self.root, path);
+        let result = self.files.create_dir(path).and_then(|()| self.files.sync_dir(parent(path)));
+        self.check(&subject, "the folder cannot be made", result)
+    }
+
+    /// Rename, then flush both folders' entries.
+    fn rename(&mut self, from: &Path, to: &Path, subject: &str, what: &str) -> Result<(), Stopped> {
+        let mut result = self.files.rename(from, to).and_then(|()| self.files.sync_dir(parent(to)));
+        if parent(from) != parent(to) {
+            result = result.and_then(|()| self.files.sync_dir(parent(from)));
+        }
+        self.check(subject, what, result)
+    }
+
+    /// Remove a file or a folder (a link itself, not what it points to), and flush the parent.
+    fn remove(&mut self, path: &Path) -> Result<(), Stopped> {
+        let result = match fs::symlink_metadata(path) {
+            Ok(m) if m.is_dir() => self.files.remove_dir_all(path).and_then(|()| self.files.sync_dir(parent(path))),
+            Ok(_) => self.files.remove_file(path).and_then(|()| self.files.sync_dir(parent(path))),
+            Err(_) => Ok(()),
+        };
+        let subject = shown(self.root, path);
+        self.check(&subject, "cannot be removed", result)
+    }
+
+    /// Replace a file under the root in one step: a temporary file, a rename, a flush.
+    fn write_atomic(&mut self, name: &str, data: &[u8]) -> Result<(), Stopped> {
+        let tmp = temporary(self.root, name);
+        self.remove(&tmp)?;
+        let result = self.files.write_new(&tmp, data);
+        self.check(name, "the file cannot be written", result)?;
+        self.rename(&tmp, &self.root.join(name), name, "the file cannot be written")
+    }
+
     fn save(&mut self) -> Result<(), Stopped> {
         let file = StateFile { state_version: STATE_VERSION, emulators: self.state.clone() };
         let text = format!(
             "# Written by the launcher: the default each addon folder came from. Do not edit.\n{}",
             serde_norway::to_string(&file).expect("the state is plain data")
         );
-        let result = self.files.write_atomic(&self.root.join(STATE), text.as_bytes());
-        self.check(STATE, "the file cannot be written", result)
-    }
-
-    fn remove(&mut self, path: &Path) -> Result<(), Stopped> {
-        let result = match fs::symlink_metadata(path) {
-            Ok(m) if m.is_dir() => self.files.remove_dir_all(path),
-            Ok(_) => self.files.remove_file(path),
-            Err(_) => Ok(()),
-        };
-        let subject = shown(self.root, path);
-        self.check(&subject, "cannot be removed", result)
+        self.write_atomic(STATE, text.as_bytes())
     }
 
     fn begin(&mut self, step: Step, id: &str, revision: &str) -> Result<(), Stopped> {
@@ -408,29 +460,40 @@ impl Run<'_> {
         };
         let journal = Journal { step, id: id.to_string(), revision: revision.into() };
         let text = serde_norway::to_string(&journal).expect("the journal is plain data");
-        let result = self.files.write_atomic(&self.root.join(JOURNAL), text.as_bytes());
-        self.check(JOURNAL, "the file cannot be written", result)
+        self.write_atomic(JOURNAL, text.as_bytes())
     }
 
     fn end(&mut self) -> Result<(), Stopped> {
-        let result = self.files.remove_file(&self.root.join(JOURNAL));
-        self.check(JOURNAL, "the file cannot be removed", result)
+        self.remove(&self.root.join(JOURNAL))
     }
 
-    /// Write the addon's files into a fresh staging folder and check the copy's digest.
+    /// Write the addon's files into a fresh staging folder, flush every file and folder, and
+    /// check the copy's digest.
     fn stage(&mut self, name: &str, addon: &ShippedAddon, revision: &str) -> Result<PathBuf, Stopped> {
-        let dir = self.staging(name);
+        let staging = self.ensure(&["emulators", ".staging"])?;
+        let dir = staging.join(name);
         self.remove(&dir)?;
         let subject = format!("emulators/{}", addon.id);
         let result = (|| {
-            self.files.create_dir_all(&dir)?;
+            self.files.create_dir(&dir)?;
+            let mut made = vec![dir.clone()];
             for (path, content) in &addon.files {
                 RelPath::try_from(path.clone()).map_err(io::Error::other)?;
-                let file = dir.join(path);
-                if let Some(parent) = file.parent() {
-                    self.files.create_dir_all(parent)?;
+                let mut at = dir.clone();
+                let parts: Vec<&str> = path.split('/').collect();
+                for part in &parts[..parts.len() - 1] {
+                    at.push(part);
+                    if !made.contains(&at) {
+                        self.files.create_dir(&at)?;
+                        made.push(at.clone());
+                    }
                 }
-                self.files.write(&file, content)?;
+                self.files.write_new(&dir.join(path), content)?;
+            }
+            // Deepest first, then the staging folder that holds the new name.
+            made.sort_by_key(|p| std::cmp::Reverse(p.components().count()));
+            for folder in made.iter().chain([&staging]) {
+                self.files.sync_dir(folder)?;
             }
             if digest_folder(&dir)? != revision {
                 return Err(io::Error::other("the copy does not match the default"));
@@ -443,10 +506,10 @@ impl Run<'_> {
 
     /// Copy a default into its missing folder.
     fn copy(&mut self, addon: &ShippedAddon, revision: &str) -> Result<(), Stopped> {
+        let subject = format!("emulators/{}", addon.id);
         self.begin(Step::Copy, &addon.id, revision)?;
         let staged = self.stage(&addon.id, addon, revision)?;
-        let result = self.files.rename(&staged, &self.target(&addon.id));
-        self.check(&format!("emulators/{}", addon.id), "the default cannot be put in place", result)?;
+        self.rename(&staged, &self.target(&addon.id), &subject, "the default cannot be put in place")?;
         self.state.insert(addon.id.clone(), Record::clean(revision));
         self.save()?;
         self.end()
@@ -460,10 +523,8 @@ impl Run<'_> {
         let old = self.staging(&format!("{}.old", addon.id));
         self.remove(&old)?;
         let target = self.target(&addon.id);
-        let result = self.files.rename(&target, &old);
-        self.check(&subject, "the old copy cannot be moved aside", result)?;
-        let result = self.files.rename(&staged, &target);
-        self.check(&subject, "the default cannot be put in place", result)?;
+        self.rename(&target, &old, &subject, "the old copy cannot be moved aside")?;
+        self.rename(&staged, &target, &subject, "the default cannot be put in place")?;
         self.state.insert(addon.id.clone(), Record::clean(revision));
         self.save()?;
         self.remove(&old)?;
@@ -476,10 +537,9 @@ impl Run<'_> {
         self.begin(Step::Offer, &addon.id, revision)?;
         let staged = self.stage(&format!("{}.offer", addon.id), addon, revision)?;
         let dest = proposal_folder(self.root, &addon.id, revision);
+        self.ensure(&["proposals", "emulators", &addon.id])?;
         self.remove(&dest)?;
-        let parent = dest.parent().expect("a proposal folder has a parent").to_path_buf();
-        let result = self.files.create_dir_all(&parent).and_then(|()| self.files.rename(&staged, &dest));
-        self.check(&subject, "the new default cannot be offered", result)?;
+        self.rename(&staged, &dest, &subject, "the new default cannot be offered")?;
         self.state.insert(addon.id.clone(), Record { offered: Some(revision.into()), ..record });
         self.save()?;
         self.end()?;
@@ -556,6 +616,7 @@ impl Run<'_> {
         };
         let complete = |path: &Path| digest_folder(path).ok().as_deref() == Some(journal.revision.as_str());
         let target = self.target(&id);
+        let subject = format!("emulators/{id}");
         match journal.step {
             Step::Copy | Step::Replace => {
                 let old = self.staging(&format!("{id}.old"));
@@ -564,8 +625,7 @@ impl Run<'_> {
                         s.insert(id.clone(), Record::clean(&journal.revision));
                     }
                 } else if !present(&target) && present(&old) {
-                    let result = self.files.rename(&old, &target);
-                    self.check(&format!("emulators/{id}"), "the old copy cannot be put back", result)?;
+                    self.rename(&old, &target, &subject, "the old copy cannot be put back")?;
                 }
                 self.remove(&old)?;
                 self.remove(&self.staging(&id))?;

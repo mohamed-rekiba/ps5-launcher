@@ -5,6 +5,7 @@ use super::lifecycle::*;
 use super::manifest::Defaults;
 use super::Problem;
 use std::cell::Cell;
+use std::collections::BTreeSet;
 use std::fs;
 use std::io;
 use std::path::Path;
@@ -64,7 +65,7 @@ fn root() -> tempfile::TempDir {
 }
 
 fn real() -> RealFiles {
-    RealFiles { lock_wait: Duration::ZERO }
+    RealFiles { lock_wait: Duration::ZERO, durable: true }
 }
 
 fn run(root: &Path, addons: &[ShippedAddon]) -> Vec<Problem> {
@@ -94,7 +95,7 @@ fn names(dir: &Path) -> Vec<String> {
 fn assert_tidy(root: &Path) {
     let leftovers: Vec<String> = names(&root.join("emulators/.staging"));
     assert!(leftovers.is_empty(), "staging: {leftovers:?}");
-    let stray: Vec<String> = names(root).into_iter().filter(|n| !["emulators", "proposals", "addons-state.yaml", "addons.lock"].contains(&n.as_str())).collect();
+    let stray: Vec<String> = names(root).into_iter().filter(|n| !["emulators", "proposals", "kept", "addons-state.yaml", "addons.lock"].contains(&n.as_str())).collect();
     assert!(stray.is_empty(), "{stray:?}");
 }
 
@@ -363,53 +364,77 @@ fn one_lock_serializes_changes() {
 
 // ------------------------------------------------------------------ interrupted changes
 
-/// The real file system, failing at the `fail_at`-th change (0-based), as a crash would.
-struct Crash {
+/// The kinds of file change, to say which ones a test stopped.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord)]
+enum Op {
+    CreateDir,
+    WriteNew,
+    Rename,
+    SyncDir,
+    RemoveFile,
+    RemoveDirAll,
+}
+
+type Hook<'a> = Box<dyn Fn(usize, Op, &Path) -> io::Result<()> + 'a>;
+
+/// The real file system with a hook before every change. The hook can fail the change, as a
+/// crash would, or change the disk first, as another program would.
+struct Injected<'a> {
     real: RealFiles,
     count: Cell<usize>,
-    fail_at: usize,
+    failed: Cell<Option<Op>>,
+    hook: Hook<'a>,
 }
 
-impl Crash {
-    fn at(fail_at: usize) -> Crash {
-        Crash { real: real(), count: Cell::new(0), fail_at }
+impl<'a> Injected<'a> {
+    fn new(real: RealFiles, hook: impl Fn(usize, Op, &Path) -> io::Result<()> + 'a) -> Injected<'a> {
+        Injected { real, count: Cell::new(0), failed: Cell::new(None), hook: Box::new(hook) }
     }
 
-    fn step(&self) -> io::Result<()> {
+    /// The `fail_at`-th change (0-based) fails.
+    fn crash_at(fail_at: usize, real: RealFiles) -> Injected<'a> {
+        Injected::new(real, move |n, _, _| if n == fail_at { Err(io::Error::other("the power went off")) } else { Ok(()) })
+    }
+
+    fn step(&self, op: Op, path: &Path) -> io::Result<()> {
         let n = self.count.get();
         self.count.set(n + 1);
-        if n == self.fail_at { Err(io::Error::other("the power went off")) } else { Ok(()) }
+        let result = (self.hook)(n, op, path);
+        if result.is_err() && self.failed.get().is_none() {
+            self.failed.set(Some(op));
+        }
+        result
     }
 
-    /// Whether the run got as far as the failure.
-    fn crashed(&self) -> bool {
-        self.count.get() > self.fail_at
+    /// The change a run stopped at, if it got that far.
+    fn crashed(&self) -> Option<Op> {
+        self.failed.get()
     }
 }
 
-impl FileOps for Crash {
-    fn create_dir_all(&self, path: &Path) -> io::Result<()> {
-        self.step()?;
-        self.real.create_dir_all(path)
+impl FileOps for Injected<'_> {
+    fn create_dir(&self, path: &Path) -> io::Result<()> {
+        self.step(Op::CreateDir, path)?;
+        self.real.create_dir(path)
     }
-    fn write(&self, path: &Path, data: &[u8]) -> io::Result<()> {
-        self.step()?;
-        self.real.write(path, data)
-    }
-    fn write_atomic(&self, path: &Path, data: &[u8]) -> io::Result<()> {
-        self.step()?;
-        self.real.write_atomic(path, data)
+    fn write_new(&self, path: &Path, data: &[u8]) -> io::Result<()> {
+        self.step(Op::WriteNew, path)?;
+        self.real.write_new(path, data)
     }
     fn rename(&self, from: &Path, to: &Path) -> io::Result<()> {
-        self.step()?;
+        self.step(Op::Rename, from)?;
         self.real.rename(from, to)
     }
+    fn sync_dir(&self, path: &Path) -> io::Result<()> {
+        self.step(Op::SyncDir, path)?;
+        self.real.sync_dir(path)
+    }
     fn remove_file(&self, path: &Path) -> io::Result<()> {
-        self.step()?;
+        self.step(Op::RemoveFile, path)?;
         self.real.remove_file(path)
     }
     fn remove_dir_all(&self, path: &Path) -> io::Result<()> {
-        self.step()?;
+        self.step(Op::RemoveDirAll, path)?;
         self.real.remove_dir_all(path)
     }
     fn lock(&self, path: &Path) -> io::Result<Option<Lock>> {
@@ -417,18 +442,27 @@ impl FileOps for Crash {
     }
 }
 
+/// No flush to the disk: the tests cannot see it, and the nested crash tests run hundreds of
+/// changes.
+fn fast() -> RealFiles {
+    RealFiles { lock_wait: Duration::ZERO, durable: false }
+}
+
 /// Stop `change` at every step in turn; after each stop, the next start must end where an
-/// uninterrupted run ends, and no part of a copy may ever be in place.
-fn survives_a_crash_at_every_step(prepare: impl Fn(&Path), change: impl Fn(&Path, &dyn FileOps) -> Vec<Problem>, end: impl Fn(&Path)) {
+/// uninterrupted run ends, and no part of a copy may ever be in place. Returns the kinds of
+/// change that were stopped.
+fn survives_a_crash_at_every_step(prepare: impl Fn(&Path), change: impl Fn(&Path, &dyn FileOps) -> Vec<Problem>, end: impl Fn(&Path)) -> BTreeSet<Op> {
+    let mut stopped = BTreeSet::new();
     for fail_at in 0.. {
         let r = root();
         prepare(r.path());
-        let crash = Crash::at(fail_at);
+        let crash = Injected::crash_at(fail_at, real());
         change(r.path(), &crash);
-        if !crash.crashed() {
+        let Some(op) = crash.crashed() else {
             assert!(fail_at > 3, "the change took {fail_at} steps");
             break;
-        }
+        };
+        stopped.insert(op);
         for folder in names(&r.path().join("emulators")).iter().filter(|n| !n.starts_with('.')) {
             let digest = digest_folder(&r.path().join("emulators").join(folder)).unwrap();
             assert!([V1, V2, SHAD].contains(&digest.as_str()), "step {fail_at}: a partial emulators/{folder}");
@@ -437,6 +471,7 @@ fn survives_a_crash_at_every_step(prepare: impl Fn(&Path), change: impl Fn(&Path
         end(r.path());
         assert_tidy(r.path());
     }
+    stopped
 }
 
 #[test]
@@ -454,7 +489,7 @@ fn an_interrupted_first_copy_is_finished_or_undone_at_the_next_start() {
 
 #[test]
 fn an_interrupted_update_is_finished_or_undone_at_the_next_start() {
-    survives_a_crash_at_every_step(
+    let stopped = survives_a_crash_at_every_step(
         |root| assert_eq!(run(root, &[kyty_v1(), shad_v1()]), []),
         |root, files| reconcile(root, &src(&[kyty_v2(), shad_v1()]), files),
         |root| {
@@ -463,6 +498,46 @@ fn an_interrupted_update_is_finished_or_undone_at_the_next_start() {
             assert_eq!(record(root, "kyty"), Some(clean(V2)), "never counted as deleted or edited");
         },
     );
+    // Inside the atomic writes too (a temporary file written, not yet renamed), and a flush
+    // that fails after a rename succeeded.
+    let all = [Op::CreateDir, Op::WriteNew, Op::Rename, Op::SyncDir, Op::RemoveFile, Op::RemoveDirAll];
+    assert_eq!(stopped, BTreeSet::from(all));
+}
+
+#[test]
+fn an_interrupted_recovery_is_finished_at_the_next_start() {
+    let prepare = |root: &Path| assert_eq!(reconcile(root, &src(&[kyty_v1(), shad_v1()]), &fast()), []);
+    let mut recoveries = 0;
+    for first in 0.. {
+        let r = root();
+        prepare(r.path());
+        let crash = Injected::crash_at(first, fast());
+        reconcile(r.path(), &src(&[kyty_v2(), shad_v1()]), &crash);
+        if crash.crashed().is_none() {
+            break;
+        }
+        if !r.path().join("addons-journal.yaml").exists() {
+            continue;
+        }
+        // The next start stops again, at each step of its own recovery and update in turn.
+        for second in 0.. {
+            let r = root();
+            prepare(r.path());
+            reconcile(r.path(), &src(&[kyty_v2(), shad_v1()]), &Injected::crash_at(first, fast()));
+            let again = Injected::crash_at(second, fast());
+            reconcile(r.path(), &src(&[kyty_v2(), shad_v1()]), &again);
+            if again.crashed().is_none() {
+                break;
+            }
+            recoveries += 1;
+            assert_eq!(reconcile(r.path(), &src(&[kyty_v2(), shad_v1()]), &fast()), [], "steps {first}, {second}");
+            assert_eq!(names(&r.path().join("emulators/kyty")), ["emulator.yaml"], "steps {first}, {second}");
+            assert_eq!(read(r.path(), "emulators/kyty/emulator.yaml"), "kyty v2\n");
+            assert_eq!(record(r.path(), "kyty"), Some(clean(V2)), "steps {first}, {second}");
+            assert_tidy(r.path());
+        }
+    }
+    assert!(recoveries > 20, "{recoveries}");
 }
 
 #[test]
@@ -474,9 +549,9 @@ fn an_interrupted_offer_is_finished_or_undone_at_the_next_start() {
     for fail_at in 0.. {
         let r = root();
         edited(r.path());
-        let crash = Crash::at(fail_at);
+        let crash = Injected::crash_at(fail_at, real());
         reconcile(r.path(), &src(&[kyty_v2(), shad_v1()]), &crash);
-        if !crash.crashed() {
+        if crash.crashed().is_none() {
             break;
         }
         // Finished, the offer was made; undone, the next start makes it.
@@ -496,9 +571,9 @@ fn an_interrupted_reset_leaves_the_edit_or_the_default() {
         let r = root();
         run(r.path(), &[kyty_v2()]);
         fs::write(r.path().join("emulators/kyty/emulator.yaml"), "edited\n").unwrap();
-        let crash = Crash::at(fail_at);
+        let crash = Injected::crash_at(fail_at, real());
         reset_to_default(r.path(), &src(&[kyty_v2()]), &crash, "kyty");
-        if !crash.crashed() {
+        if crash.crashed().is_none() {
             break;
         }
         run(r.path(), &[kyty_v2()]);
