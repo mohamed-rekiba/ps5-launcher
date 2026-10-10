@@ -626,6 +626,89 @@ fn a_recovery_that_finds_another_folder_keeps_both() {
     assert_tidy(r.path());
 }
 
+// ------------------------------------------------------------------ the order of changes
+
+/// The real file system, writing down every change with its paths under the root.
+struct Recorder<'a> {
+    real: RealFiles,
+    root: &'a Path,
+    log: std::cell::RefCell<Vec<String>>,
+}
+
+impl Recorder<'_> {
+    fn note(&self, op: &str, paths: &[&Path]) {
+        let shown: Vec<String> = paths.iter().map(|p| p.strip_prefix(self.root).unwrap().to_string_lossy().into_owned()).map(|p| if p.is_empty() { ".".into() } else { p }).collect();
+        self.log.borrow_mut().push(format!("{op} {}", shown.join(" -> ")));
+    }
+}
+
+impl FileOps for Recorder<'_> {
+    fn create_dir(&self, path: &Path) -> io::Result<()> {
+        self.note("create_dir", &[path]);
+        self.real.create_dir(path)
+    }
+    fn write_new(&self, path: &Path, data: &[u8]) -> io::Result<()> {
+        self.note("write_new", &[path]);
+        self.real.write_new(path, data)
+    }
+    fn rename(&self, from: &Path, to: &Path) -> io::Result<()> {
+        self.note("rename", &[from, to]);
+        self.real.rename(from, to)
+    }
+    fn sync_dir(&self, path: &Path) -> io::Result<()> {
+        self.note("sync_dir", &[path]);
+        self.real.sync_dir(path)
+    }
+    fn remove_file(&self, path: &Path) -> io::Result<()> {
+        self.note("remove_file", &[path]);
+        self.real.remove_file(path)
+    }
+    fn remove_dir_all(&self, path: &Path) -> io::Result<()> {
+        self.note("remove_dir_all", &[path]);
+        self.real.remove_dir_all(path)
+    }
+    fn lock(&self, path: &Path) -> io::Result<Option<Lock>> {
+        self.real.lock(path)
+    }
+}
+
+#[test]
+fn an_update_flushes_each_change_before_the_next_one_depends_on_it() {
+    let r = root();
+    run(r.path(), &[kyty_v1()]);
+    let recorder = Recorder { real: real(), root: r.path(), log: Default::default() };
+    assert_eq!(reconcile(r.path(), &src(&[kyty_v2()]), &recorder), []);
+    assert_eq!(
+        recorder.log.into_inner(),
+        [
+            // The journal, on the disk before anything it describes.
+            "write_new .addons-journal.yaml.tmp",
+            "rename .addons-journal.yaml.tmp -> addons-journal.yaml",
+            "sync_dir .",
+            // The staged copy and its name, on the disk before it is published.
+            "create_dir emulators/.staging/kyty",
+            "write_new emulators/.staging/kyty/emulator.yaml",
+            "sync_dir emulators/.staging/kyty",
+            "sync_dir emulators/.staging",
+            // The old copy aside, then the new one in place; both folders flushed each time.
+            "rename emulators/kyty -> emulators/.staging/kyty.old",
+            "sync_dir emulators/.staging",
+            "sync_dir emulators",
+            "rename emulators/.staging/kyty -> emulators/kyty",
+            "sync_dir emulators",
+            "sync_dir emulators/.staging",
+            // The record, then the backup's removal, then the journal's.
+            "write_new .addons-state.yaml.tmp",
+            "rename .addons-state.yaml.tmp -> addons-state.yaml",
+            "sync_dir .",
+            "remove_dir_all emulators/.staging/kyty.old",
+            "sync_dir emulators/.staging",
+            "remove_file addons-journal.yaml",
+            "sync_dir .",
+        ]
+    );
+}
+
 // ------------------------------------------------------------------ links out of the folder
 
 /// Every file under `dir`, with its content: to show that nothing was written there.

@@ -199,3 +199,31 @@ impl Dir {
         Ok(out)
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::sync::mpsc;
+    use std::time::Duration;
+
+    #[test]
+    fn a_file_that_became_a_fifo_is_refused_without_blocking() {
+        // The open is the check: whatever passed an earlier look, a FIFO in its place is opened
+        // without blocking (no writer is there) and refused by fstat.
+        let dir = tempfile::Builder::new().prefix("addons-").tempdir().unwrap();
+        std::fs::write(dir.path().join("icon.svg"), "<svg/>").unwrap();
+        let handle = Dir::open(dir.path()).unwrap();
+        assert!(handle.file(OsStr::new("icon.svg"), 1024).is_ok(), "a regular file passes");
+        std::fs::remove_file(dir.path().join("icon.svg")).unwrap();
+        let c = CString::new(dir.path().join("icon.svg").as_os_str().as_bytes()).unwrap();
+        // SAFETY: a valid C string; the result is checked.
+        assert_eq!(unsafe { libc::mkfifo(c.as_ptr(), 0o644) }, 0);
+        let (send, receive) = mpsc::channel();
+        std::thread::spawn(move || {
+            let result = handle.file(OsStr::new("icon.svg"), 1024).map(|_| ()).map_err(|e| e.to_string());
+            send.send(result).unwrap();
+        });
+        let result = receive.recv_timeout(Duration::from_secs(5)).expect("the open blocked on the FIFO");
+        assert_eq!(result, Err("is not a file".to_string()));
+    }
+}
