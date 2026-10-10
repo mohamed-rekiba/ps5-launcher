@@ -28,6 +28,11 @@
 //! Every copy is a transaction: write the journal, stage the whole folder, check its digest,
 //! publish it with a rename, write the state, remove the journal. The first failed step stops
 //! the whole run, as a crash would; the next start reads the journal first.
+//!
+//! Links: every read below the root goes through folder handles and never follows a link
+//! (safefs.rs). The changes (making folders, staging writes, renames, removals) go by path after
+//! an lstat check of each parent, so a parent swapped for a link between that check and the
+//! change is not caught. See the TODOs in `real_parents` and `stage`.
 
 use super::bundle::{DefaultSource, ShippedAddon};
 use super::manifest::{EmulatorId, RelPath};
@@ -470,6 +475,10 @@ impl Run<'_> {
 
     /// Check that no folder between the root and `path` is a link, before a change there.
     /// What is missing is fine: the change itself then fails.
+    ///
+    /// TODO: this is check-then-act. The change after it goes by path, so a parent swapped for
+    /// a link between the check and the change is followed. Fix: make the changes with
+    /// mkdirat, renameat and unlinkat through the folder handles of safefs.rs.
     fn real_parents(&mut self, path: &Path) -> Result<(), Stopped> {
         let rel = path.strip_prefix(self.root).unwrap_or(path);
         let mut at = self.root.to_path_buf();
@@ -485,7 +494,8 @@ impl Run<'_> {
         Ok(())
     }
 
-    /// The folder under the root, made where it is missing; never through a link.
+    /// The folder under the root, made where it is missing. An existing part that is a link
+    /// stops the run; the making itself goes by path (see the TODO in `real_parents`).
     fn ensure(&mut self, parts: &[&str]) -> Result<PathBuf, Stopped> {
         let mut at = self.root.to_path_buf();
         for part in parts {
@@ -565,6 +575,10 @@ impl Run<'_> {
 
     /// Write the addon's files into a fresh staging folder, flush every file and folder, and
     /// check the copy's digest.
+    ///
+    /// TODO: the staging writes go by path. `write_new` refuses a link at the file itself, but
+    /// a staging folder swapped for a link after `ensure` checked it is followed. Fix: create
+    /// the folders and files with mkdirat and openat through a handle on the staging folder.
     fn stage(&mut self, name: &str, addon: &ShippedAddon, revision: &str) -> Result<PathBuf, Stopped> {
         let staging = self.ensure(&["emulators", ".staging"])?;
         let dir = staging.join(name);

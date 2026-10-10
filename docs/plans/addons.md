@@ -7,6 +7,10 @@ Progress: the revised Phase 1 (below) is **done** for emulators, slices 1 to 5, 
 `src/emulators/`. Not done yet: themes, the Settings actions in the UI, the on/off and choice
 preferences (Phase 2), the startup call (Phase 2), image size and SVG loading, and the "Show the
 folder" route. Addon files have size limits (16 MiB a file, 64 MiB a folder).
+Also not done: the lifecycle's changes (making folders, staging writes, renames, removals) go
+by path after an lstat check of each parent, so a parent swapped for a link between the check
+and the change is not caught. Reads already go through folder handles. The fix is mkdirat,
+renameat and unlinkat through handles (TODOs in `lifecycle.rs`).
 
 ## Decisions
 1. Emulators and themes are addons: one folder per addon, each with its own YAML file. The launcher finds them by scanning folders.
