@@ -72,6 +72,9 @@ static void track(FILE *f, off_t end) {
 }
 
 static off_t forget(FILE *f) {
+    // Checked here, not in fclose: newer glibc declares fclose's argument non-null, so GCC
+    // rejects a NULL check there. NULL would otherwise match an empty slot.
+    if (!f) return -1;
     off_t end = -1;
     pthread_mutex_lock(&lock);
     for (int i = 0; i < TRACKED; i++)
@@ -137,7 +140,7 @@ int ftruncate(int fd, off_t length) {
 int fclose(FILE *f) {
     static int (*next)(FILE *);
     if (!next) next = real("fclose");
-    off_t end = f && active() ? forget(f) : -1;
+    off_t end = active() ? forget(f) : -1;
     if (end >= 0) {
         // Everything written must have reached the file: flush, then compare its real size.
         static int (*flush)(FILE *);
