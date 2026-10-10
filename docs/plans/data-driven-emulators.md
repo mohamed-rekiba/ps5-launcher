@@ -8,8 +8,10 @@ section (§3) where they differ:
 3. **Schema: `schemars`** generates `assets/emulators.schema.json` from the Rust structs, so the
    schema never drifts from the code (a test fails when the committed file differs).
 
-The embedded default is `assets/emulators.yaml`; the user override is
-`~/.config/ps5-launcher/emulators.yaml`. Everything else below is the advisor's design as written.
+**Changed by [addons.md](addons.md):** each emulator is an addon folder with its own
+`emulator.yaml` in the user's data folder; the defaults in the binary are copied there. The single
+embedded manifest and the override file are replaced. Phase 1 follows addons.md. Everything else
+below is the advisor's design as written.
 
 ---
 
