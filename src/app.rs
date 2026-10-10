@@ -473,7 +473,10 @@ pub fn run(ui: AppWindow, monitors: Vec<Monitor>, target_monitor: Option<Monitor
     let stale = catalog.stale();
     let first_run = catalog.games.is_empty() || !Config::path().exists();
     if !Config::path().exists() {
-        cfg.lock().unwrap().save(); // remember detected defaults
+        // Remember detected defaults, the KytyPS5 found as the user's choice.
+        let mut c = cfg.lock().unwrap();
+        c.remember_found_emulator();
+        c.save();
     }
     APP.with(|a| *a.borrow_mut() = Some(app));
     with_app(move |app| app.boot_start(first_run));

@@ -204,6 +204,13 @@ impl Config {
         }
     }
 
+    /// On the first start (no config.json yet), the KytyPS5 that `use_fallback_emulator` found
+    /// becomes the user's choice, so it is not looked for at every start.
+    pub fn remember_found_emulator(&mut self) {
+        let found = self.emulator.clone();
+        self.set_kyty_executable(&found);
+    }
+
     /// Fill the per-emulator form from the old fields where it has no value (an older file, or a
     /// key a hand edit left out), then set the old fields from it. Running it again changes
     /// nothing.
@@ -630,6 +637,24 @@ mod tests {
         assert_eq!(again(&mut back).emulators["shadps4"].source, custom("/opt/shad/AppRun"));
         back.set_shad_executable("");
         assert_eq!(again(&mut back).emulators["shadps4"].source, Some(BuildSource::Managed));
+    }
+
+    #[test]
+    fn the_first_start_keeps_the_kyty_it_found_as_the_users() {
+        let mut c = read("");
+        c.use_fallback_emulator(|| Some(PathBuf::from("/home/u/KytyPS5/_Build/kyty_emulator")));
+        c.remember_found_emulator();
+        let back = again(&mut c);
+        assert_eq!(back.emulators["kyty"].source, custom("/home/u/KytyPS5/_Build/kyty_emulator"), "found once, not looked for at every start");
+        assert_eq!(back.emulator, "/home/u/KytyPS5/_Build/kyty_emulator");
+        let mut c = read("");
+        c.use_fallback_emulator(|| Some(PathBuf::from(format!("{KYTY_ROOT}/current/kyty_emulator"))));
+        c.remember_found_emulator();
+        assert_eq!(again(&mut c).emulators["kyty"].source, Some(BuildSource::Managed));
+        let mut c = read("");
+        c.use_fallback_emulator(|| None);
+        c.remember_found_emulator();
+        assert_eq!(again(&mut c).emulators["kyty"].source, Some(BuildSource::Managed), "nothing found: the managed build");
     }
 
     #[test]
