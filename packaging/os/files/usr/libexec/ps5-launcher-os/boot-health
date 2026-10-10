@@ -1,0 +1,383 @@
+#!/usr/bin/bash
+# PS5 Launcher OS's boot health check, with one automatic rollback (ps5-boot-health.service).
+#
+# At every start it checks that the PC reached a working launcher:
+#   (a) the GPU that drives the screen has the right driver: on the NVIDIA image (OS marker
+#       IMAGE=nvidia) "nvidia", on the main image any bound GPU driver that is not "nvidia";
+#   (b) gamescope runs for the automatic-login user;
+#   (c) the launcher answers "ok" on its health socket for $stable seconds in a row. Plasma, the
+#       fallback desktop, does not count.
+# All three must hold before $budget seconds have passed.
+#
+# Healthy: the booted digest becomes last-good. Unhealthy: bootc rollback, then a restart, only
+# when all of these hold:
+#   - this is the first attempt of the booted digest (it had no attempt record; the record is
+#     written before the checks, so a power cut during the checks also counts as the attempt);
+#   - no recovery transaction is active (it is recorded before bootc rollback, so a power cut
+#     between the record and the rollback never leads to a second try);
+#   - bootc's rollback deployment is the recorded last-good digest, and nothing is staged.
+# On the rollback's destination it never rolls back again. A bootc status it cannot read, or
+# state it does not know, changes nothing.
+#
+# State (root-owned, version 1, in $health_dir):
+#   last-good            the last digest that passed
+#   attempts/<hex>       one record for each digest that started: boot ID, result, reason
+#   transaction          the active recovery: failed_digest, destination_digest, rollback_attempts
+#   history/             closed transactions
+#   notice.json          for the launcher to show (0644); helper health-ack deletes it
+#   logs/                the journal of the last failed starts (the newest $keep_logs)
+#
+# It shares a lock with the root helper's update, switch and rollback, and reads bootc's status
+# again under that lock before it changes anything.
+#
+# The fixed paths and times below are changed only by test-boot-health.sh, on a copy.
+set -uo pipefail
+health_dir=/var/lib/ps5-launcher-os/health
+lock_file=/run/ps5-launcher-os.lock
+os_release=/usr/lib/ps5-launcher/os-release
+sddm_user_conf=/etc/sddm.conf.d/10-ps5-launcher-os-user.conf
+drm_dir=/sys/class/drm
+run_user=/run/user
+boot_id_file=/proc/sys/kernel/random/boot_id
+launcher_exe=/usr/bin/ps5-launcher
+# Seconds: the whole check, the healthy stretch it needs, the wait for the shared lock.
+budget=140
+stable=10
+lock_wait=20
+keep_logs=5
+keep_attempts=30
+PATH=/usr/sbin:/usr/bin
+export PATH
+umask 022
+
+log() { echo "ps5-boot-health: $*"; }
+now_iso() { date -u +%Y-%m-%dT%H:%M:%SZ; }
+valid_digest() { [[ ${1:-} =~ ^sha256:[0-9a-f]{64}$ ]]; }
+
+# Write stdin to PATH atomically and durably: a file next to it, fsync, rename, fsync the folder.
+put() { # PATH MODE
+    local tmp
+    tmp=$(mktemp "$(dirname "$1")/.tmp.XXXXXX") || return 1
+    if ! { cat > "$tmp" && chmod "$2" "$tmp" && sync "$tmp" && mv -f "$tmp" "$1"; }; then
+        rm -f "$tmp"
+        return 1
+    fi
+    sync "$(dirname "$1")"
+}
+
+# A field of one of our version-1 JSON files; empty when the file is missing. A file that is not
+# version-1 JSON makes the state unknown (exit 2).
+field() { # FILE FIELD
+    [ -e "$1" ] || return 0
+    jq -er --arg f "$2" 'if .version == 1 then (.[$f] // "" | tostring) else error("version") end' "$1" ||
+        return 2
+}
+
+# bootc's status, as JSON, into $status. Empty when bootc fails or prints something else.
+read_status() {
+    status=$(timeout -k 5 30 bootc status --json --format-version=1 2>/dev/null |
+        sed -n '/{/,$p' | sed '1s/^[^{]*//')
+    if ! jq -e '.apiVersion == "org.containers.bootc/v1" and .kind == "BootcHost"' <<<"$status" >/dev/null 2>&1; then
+        status=""
+    fi
+}
+status_get() { jq -r "$1 // \"\"" <<<"$status"; }
+
+attempt_file() { echo "$health_dir/attempts/${1#sha256:}"; }
+
+# The attempt record of DIGEST: result, reason and what happened.
+record_attempt() { # DIGEST RESULT REASON ACTION
+    jq -n --arg d "$1" --arg b "$boot_id" --arg t "$(now_iso)" --arg r "$2" --arg why "$3" --arg a "$4" \
+        '{version: 1, digest: $d, boot_id: $b, time: $t, result: $r, reason: $why, action: $a}' |
+        put "$(attempt_file "$1")" 0644
+}
+
+# The notice the launcher shows. OUTCOME is one word; the rest explains it.
+notice() { # OUTCOME REASON ACTION [FAILED DESTINATION]
+    jq -n --arg t "$(now_iso)" --arg o "$1" --arg why "$2" --arg a "$3" --arg booted "$booted" \
+        --arg failed "${4:-}" --arg dest "${5:-}" --arg lg "$last_good" \
+        '{version: 1, time: $t, outcome: $o, reason: $why, action: $a, booted_digest: $booted,
+          failed_digest: $failed, destination_digest: $dest, last_good_digest: $lg}' |
+        put "$health_dir/notice.json" 0644
+    log "notice: $1: $2 ($3)"
+}
+
+# Move the active transaction to history/, with how it ended.
+close_transaction() { # OUTCOME
+    local name
+    name="$health_dir/history/$(date -u +%Y%m%dT%H%M%SZ)-$1.json"
+    jq --arg o "$1" --arg t "$(now_iso)" '. + {outcome: $o, closed: $t}' "$health_dir/transaction" |
+        put "$name" 0644 && rm -f "$health_dir/transaction" && sync "$health_dir"
+}
+
+# The journal of this start, bounded, for a failed check.
+save_logs() {
+    local hex=${booted#sha256:} name home=""
+    name="$health_dir/logs/$(date -u +%Y%m%dT%H%M%SZ)-${hex:0:12}.log"
+    [ -z "$user" ] || home=$(getent passwd "$user" | cut -d: -f6)
+    {
+        echo "boot $boot_id, digest $booted, $(now_iso)"
+        journalctl -b --no-pager -o short-iso 2>&1 | tail -n 3000
+        if [ -n "$home" ] && [ -f "$home/.cache/ps5-launcher-session.log" ]; then
+            echo "===== session log"
+            tail -n 200 "$home/.cache/ps5-launcher-session.log"
+        fi
+    } | put "$name" 0600
+    find "$health_dir/logs" -maxdepth 1 -name '*.log' -type f | sort | head -n "-$keep_logs" | xargs -r rm -f
+}
+
+# Old attempt records go, except those of last-good and of the active transaction.
+prune_attempts() {
+    local keep1 keep2 keep3
+    keep1=$(attempt_file "${last_good:-none}")
+    keep2=$(attempt_file "$(field "$health_dir/transaction" failed_digest 2>/dev/null || true)")
+    keep3=$(attempt_file "$(field "$health_dir/transaction" destination_digest 2>/dev/null || true)")
+    find "$health_dir/attempts" -maxdepth 1 -type f ! -name '.*' -printf '%T@ %p\n' 2>/dev/null |
+        sort -rn | tail -n "+$((keep_attempts + 1))" | cut -d' ' -f2- |
+        while read -r f; do
+            case $f in "$keep1" | "$keep2" | "$keep3" | "$(attempt_file "$booted")") ;; *) rm -f "$f" ;; esac
+        done
+}
+
+# --- The checks ------------------------------------------------------------------------------
+# (a) Sets gpu_problem, empty when the GPU that drives the screen has the expected driver.
+check_gpu() {
+    local st card driver found=""
+    gpu_problem="no connected screen"
+    for st in "$drm_dir"/card*-*/status; do
+        [ -f "$st" ] && [ "$(cat "$st" 2>/dev/null)" = connected ] || continue
+        card=$(basename "$(dirname "$st")")
+        card=${card%%-*}
+        driver=$(basename "$(readlink "$drm_dir/$card/device/driver" 2>/dev/null)" 2>/dev/null)
+        found="$found ${driver:-none}"
+        case $image in
+        nvidia) [ "$driver" = nvidia ] && { gpu_problem=""; return; } ;;
+        *)
+            case $driver in
+            "" | nvidia | simple-framebuffer | efi-framebuffer | vesa-framebuffer) ;;
+            *) gpu_problem=""; return ;;
+            esac
+            ;;
+        esac
+    done
+    [ -n "$found" ] || return
+    if [ "$image" = nvidia ]; then
+        gpu_problem="the screen's GPU does not use the NVIDIA driver (drivers:$found)"
+    else
+        gpu_problem="the screen's GPU has no usable driver (drivers:$found)"
+    fi
+}
+
+# (c) Whether the launcher answers on its socket. It must be a socket of the user, mode 0600,
+# not a symlink; the process that listens on it (SO_PEERCRED) must be the user's ps5-launcher.
+probe_py='
+import os, socket, struct, sys, time
+path, uid, exe = sys.argv[1], int(sys.argv[2]), sys.argv[3]
+deadline = time.monotonic() + 2
+s = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+s.settimeout(2)
+s.connect(path)
+pid, puid, _ = struct.unpack("3i", s.getsockopt(socket.SOL_SOCKET, socket.SO_PEERCRED, 12))
+if puid != uid:
+    sys.exit("the socket belongs to uid %d" % puid)
+with open("/proc/%d/comm" % pid) as f:
+    if f.read().strip() != "ps5-launcher":
+        sys.exit("another program listens on the socket")
+if os.readlink("/proc/%d/exe" % pid) != exe:
+    sys.exit("another program listens on the socket")
+s.sendall(b"ping\n")
+data = b""
+while not data.endswith(b"\n") and len(data) < 16:
+    s.settimeout(max(0.01, deadline - time.monotonic()))
+    chunk = s.recv(16)
+    if not chunk:
+        break
+    data += chunk
+sys.exit(0 if data == b"ok\n" else "the launcher answered %r" % data)
+'
+launcher_answers() {
+    local sock="$run_user/$uid/ps5-launcher-health.sock" meta
+    [ -S "$sock" ] && [ ! -L "$sock" ] || return 1
+    meta=$(stat -c '%u %a' "$sock") || return 1
+    [ "$meta" = "$uid 600" ] || return 1
+    timeout -k 1 3 python3 -I -c "$probe_py" "$sock" "$uid" "$launcher_exe" >/dev/null 2>&1
+}
+
+# Runs (a), (b) and (c) until they all pass for $stable seconds, or the budget ends. Sets
+# problems (empty when healthy).
+run_checks() {
+    local start ok_since="" t gamescope_ok launcher_ok
+    start=$(date +%s)
+    while :; do
+        t=$(date +%s)
+        check_gpu
+        gamescope_ok=0 launcher_ok=0
+        # gamescope's main thread may name itself gamescope-wl.
+        pgrep -u "$uid" -x 'gamescope|gamescope-wl' >/dev/null 2>&1 && gamescope_ok=1
+        if [ "$gamescope_ok" = 1 ] && launcher_answers; then launcher_ok=1; fi
+        if [ -z "$gpu_problem" ] && [ "$gamescope_ok" = 1 ] && [ "$launcher_ok" = 1 ]; then
+            ok_since=${ok_since:-$t}
+            if [ $((t - ok_since)) -ge "$stable" ]; then
+                problems=""
+                return
+            fi
+        else
+            ok_since=""
+            # The fallback desktop runs and the launcher does not: that will not change.
+            if pgrep -u "$uid" -x plasmashell >/dev/null 2>&1 && ! pgrep -u "$uid" -x ps5-launcher >/dev/null 2>&1; then
+                break
+            fi
+        fi
+        [ $((t - start)) -lt "$budget" ] || break
+        sleep 1
+    done
+    problems=""
+    [ -z "$gpu_problem" ] || problems="$gpu_problem"
+    [ "$gamescope_ok" = 1 ] || problems="${problems:+$problems; }gamescope is not running"
+    if [ "$launcher_ok" != 1 ]; then
+        if pgrep -u "$uid" -x plasmashell >/dev/null 2>&1; then
+            problems="${problems:+$problems; }launcher not healthy (Plasma fallback)"
+        else
+            problems="${problems:+$problems; }launcher not healthy (no answer on its health socket)"
+        fi
+    fi
+}
+
+# --- Main ------------------------------------------------------------------------------------
+mkdir -p "$health_dir/attempts" "$health_dir/history" "$health_dir/logs"
+chmod 0755 "$health_dir" "$health_dir/attempts" "$health_dir/history"
+chmod 0700 "$health_dir/logs"
+boot_id=$(cat "$boot_id_file" 2>/dev/null)
+[[ $boot_id =~ ^[0-9a-f-]{36}$ ]] || { log "no boot ID: no change"; exit 0; }
+image=$(sed -n 's/^IMAGE=//p' "$os_release" 2>/dev/null | head -1)
+user=$(sed -n 's/^User=//p' "$sddm_user_conf" 2>/dev/null | head -1)
+uid=$(id -u "$user" 2>/dev/null) || uid=""
+booted="" last_good=""
+
+exec 9>>"$lock_file"
+take_lock() { flock -w "$lock_wait" 9; }
+
+# 1. Under the lock: read the state, and record the attempt before checking anything.
+if ! take_lock; then
+    log "another system task holds the lock: no change"
+    exit 0
+fi
+read_status
+booted=$(status_get .status.booted.image.imageDigest)
+if [ -z "$status" ] || ! valid_digest "$booted"; then
+    log "bootc status is unknown: no change"
+    exit 0
+fi
+if ! last_good=$(field "$health_dir/last-good" digest) ||
+    ! tx_failed=$(field "$health_dir/transaction" failed_digest) ||
+    ! tx_dest=$(field "$health_dir/transaction" destination_digest) ||
+    ! field "$(attempt_file "$booted")" result >/dev/null; then
+    log "the health state in $health_dir is not version 1: no change"
+    exit 0
+fi
+{ [ -z "$last_good" ] || valid_digest "$last_good"; } || { log "last-good is not a digest: no change"; exit 0; }
+first_attempt=0
+[ -e "$(attempt_file "$booted")" ] || first_attempt=1
+role=normal
+if [ -e "$health_dir/transaction" ]; then
+    if [ "$booted" = "$tx_dest" ]; then
+        role=destination
+    elif [ "$booted" = "$tx_failed" ]; then
+        # The rollback did not happen (a power cut, or bootc failed): never try again.
+        role=interrupted
+    else
+        # Someone started another image by hand: that recovery is over.
+        close_transaction superseded
+        tx_failed="" tx_dest=""
+    fi
+fi
+log "booted $booted (image ${image:-unknown}, user ${user:-none}), first attempt: $first_attempt, last-good: ${last_good:-none}, recovery: $role"
+record_attempt "$booted" pending "" checking || { log "cannot write the attempt record: no change"; exit 0; }
+flock -u 9
+
+# 2. The checks, without the lock (the launcher may run the helper meanwhile).
+if [ -z "$uid" ]; then
+    problems="no automatic-login user"
+else
+    run_checks
+fi
+
+# 3. The decision.
+if [ -z "$problems" ]; then
+    log "healthy"
+    jq -n --arg d "$booted" --arg b "$boot_id" --arg t "$(now_iso)" '{version: 1, digest: $d, boot_id: $b, time: $t}' |
+        put "$health_dir/last-good" 0644
+    last_good=$booted
+    record_attempt "$booted" healthy "" none
+    if [ "$role" = destination ]; then
+        notice rolled-back "$(field "$health_dir/transaction" reason)" "the previous system started and works" "$tx_failed" "$tx_dest"
+        close_transaction completed
+    fi
+    prune_attempts
+    exit 0
+fi
+
+log "unhealthy: $problems"
+save_logs
+# Under the lock, on a fresh bootc status: the helper may have staged or rolled back meanwhile.
+if ! take_lock; then
+    record_attempt "$booted" unhealthy "$problems" "none: another system task held the lock"
+    notice unhealthy "$problems" "another system task held the lock: no automatic rollback"
+    exit 0
+fi
+read_status
+now_booted=$(status_get .status.booted.image.imageDigest)
+rollback_digest=$(status_get .status.rollback.image.imageDigest)
+staged=$(status_get .status.staged)
+why=""
+if [ "$role" = destination ]; then
+    why="this is the start after an automatic rollback: no second rollback"
+elif [ "$role" = interrupted ]; then
+    why="an automatic rollback of this system was already started once: not retried"
+elif [ -z "$status" ] || [ "$now_booted" != "$booted" ]; then
+    why="bootc status is unknown"
+elif [ "$first_attempt" != 1 ]; then
+    why="not the first start of this system"
+elif [ -e "$health_dir/transaction" ]; then
+    why="a recovery is already active"
+elif [ -z "$last_good" ]; then
+    why="no system has passed this check yet (no last-good)"
+elif [ "$rollback_digest" != "$last_good" ]; then
+    why="the rollback entry (${rollback_digest:-none}) is not the last good system"
+elif [ -n "$staged" ] || [ "$(status_get .status.rollbackQueued)" = true ]; then
+    why="another deployment is staged or queued"
+fi
+
+if [ -n "$why" ]; then
+    log "no automatic rollback: $why"
+    record_attempt "$booted" unhealthy "$problems" "none: $why"
+    case $role in
+    destination) notice rollback-unhealthy "$problems" "$why" "$tx_failed" "$tx_dest" ;;
+    interrupted) notice rollback-interrupted "$problems" "$why" "$tx_failed" "$tx_dest" ;;
+    *) notice unhealthy "$problems" "$why" ;;
+    esac
+    exit 0
+fi
+
+# The rollback: recorded durably first, so it is never tried twice.
+jq -n --arg f "$booted" --arg d "$last_good" --arg b "$boot_id" --arg t "$(now_iso)" --arg why "$problems" \
+    '{version: 1, failed_digest: $f, destination_digest: $d, rollback_attempts: 1, boot_id: $b,
+      time: $t, reason: $why, state: "recorded"}' | put "$health_dir/transaction" 0644 ||
+    { log "cannot record the recovery: no rollback"; record_attempt "$booted" unhealthy "$problems" "none: cannot record"; exit 0; }
+tx_failed=$booted tx_dest=$last_good
+record_attempt "$booted" unhealthy "$problems" "rollback to $last_good"
+log "rolling back to $last_good"
+if ! timeout -k 10 60 bootc rollback; then
+    notice rollback-failed "$problems" "bootc rollback failed; the PC stays on this system" "$tx_failed" "$tx_dest"
+    exit 0
+fi
+read_status
+if [ "$(status_get .status.rollbackQueued)" != true ] ||
+    [ "$(status_get .status.rollback.image.imageDigest)" != "$last_good" ]; then
+    notice rollback-failed "$problems" "bootc did not confirm the rollback; no restart" "$tx_failed" "$tx_dest"
+    exit 0
+fi
+jq '.state = "rollback-queued"' "$health_dir/transaction" | put "$health_dir/transaction" 0644
+notice rolling-back "$problems" "restarting into the last good system" "$tx_failed" "$tx_dest"
+log "restarting"
+systemctl --no-block reboot

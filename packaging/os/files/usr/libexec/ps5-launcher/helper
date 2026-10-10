@@ -15,6 +15,11 @@
 #   helper switch main|nvidia        change to the main or the NVIDIA image (next restart)
 #   helper queue-key                 queue the next NVIDIA image's Secure Boot key; prints the
 #                                    password the blue MOK screen asks for, or key-enrolled
+#   helper health-ack                delete the boot health check's notice (the launcher showed it)
+#
+# update, switch and rollback hold $lock_file while they run, and so does the boot health check
+# (/usr/libexec/ps5-launcher-os/boot-health) before it rolls back: the two never change the
+# deployments at the same time. A task that cannot get the lock within $short seconds fails.
 #
 # With Secure Boot on, the NVIDIA image's driver only loads when its signing key is enrolled.
 # So update and switch nvidia first check the new image's key, and stage it by digest only
@@ -26,6 +31,8 @@ sddm_dir=/etc/sddm.conf.d
 os_release=/usr/lib/ps5-launcher/os-release
 cert_dir=/usr/share/ps5-launcher/secureboot
 state_dir=/var/lib/ps5-launcher
+health_dir=/var/lib/ps5-launcher-os/health
+lock_file=/run/ps5-launcher-os.lock
 # How long a task may run, in seconds. timeout runs as root here, so it can stop the work; the
 # launcher's own deadline cannot stop a process pkexec started as root.
 short=30
@@ -37,13 +44,20 @@ next_session="$sddm_dir/90-ps5-launcher-os-next-session.conf"
 cert_label=io.github.ps5-launcher.secureboot-cert-sha256
 
 usage() {
-    echo "usage: helper set-next-session plasma | clear-next-session | status | update-check | update | rollback | switch main|nvidia | queue-key" >&2
+    echo "usage: helper set-next-session plasma | clear-next-session | status | update-check | update | rollback | switch main|nvidia | queue-key | health-ack" >&2
     exit 2
 }
 
 fail() {
     echo "helper: $*" >&2
     exit 1
+}
+
+# Waits for the lock that update, switch, rollback and the boot health check share. It stays
+# held until the helper (or the bootc it execs) ends.
+lock() {
+    exec 9>>"$lock_file"
+    flock -w "$short" 9 || fail "another system task is running; try again later"
 }
 
 # A value from the OS marker ("IMAGE", "IMAGE_REF").
@@ -150,6 +164,7 @@ case "$task $#" in
     exec timeout -k 10 "$check" bootc upgrade --check
     ;;
 "update 0")
+    lock
     # The NVIDIA image is always staged by digest (after the key check when Secure Boot is on),
     # and bootc then follows that digest, not a tag. So its channel comes from the marker.
     if [ "$(marker IMAGE)" = nvidia ]; then
@@ -157,8 +172,13 @@ case "$task $#" in
     fi
     exec timeout -k 10 "$long" bootc upgrade
     ;;
-"rollback 0") exec timeout -k 10 "$check" bootc rollback ;;
+"rollback 0")
+    lock
+    exec timeout -k 10 "$check" bootc rollback
+    ;;
 "switch 1")
+    case "$1" in main | nvidia) ;; *) usage ;; esac
+    lock
     ref=$(marker IMAGE_REF)
     [ -n "$ref" ] || fail "$os_release has no IMAGE_REF"
     case "$1" in
@@ -189,5 +209,6 @@ case "$task $#" in
         fail "mokutil could not queue the key"
     echo "$password"
     ;;
+"health-ack 0") rm -f "$health_dir/notice.json" ;;
 *) usage ;;
 esac

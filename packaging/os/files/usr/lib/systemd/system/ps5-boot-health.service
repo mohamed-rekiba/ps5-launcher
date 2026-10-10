@@ -1,0 +1,18 @@
+[Unit]
+Description=PS5 Launcher OS boot health check, with one automatic rollback
+Documentation=file:/usr/libexec/ps5-launcher-os/boot-health
+# The automatic-login user is known once ps5-launcher-os-autologin.service has run. The check runs
+# beside the graphical start, never before it: Type=exec does not hold multi-user.target back.
+After=local-fs.target systemd-user-sessions.service ps5-launcher-os-autologin.service
+# Not in recovery mode (ps5-recovery.target also conflicts with this unit).
+ConditionKernelCommandLine=!systemd.unit=ps5-recovery.target
+
+[Service]
+Type=exec
+ExecStart=/usr/libexec/ps5-launcher-os/boot-health
+Restart=no
+# The script decides within about 140 s; this is the hard deadline.
+RuntimeMaxSec=180
+
+[Install]
+WantedBy=multi-user.target
