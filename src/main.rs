@@ -9,6 +9,7 @@ mod platform;
 mod sfo;
 mod shad;
 mod shad_ui;
+mod sound;
 mod pkgx;
 #[cfg(target_os = "linux")]
 mod sandbox;
