@@ -333,7 +333,7 @@ impl App {
                 if !self.live.is_empty() {
                     crate::sessions::show_launcher();
                 }
-                self.start_countdown(PowerAction::PowerOff, 3);
+                self.start_countdown(PowerAction::PowerOff, system::COUNTDOWN_SECS);
             }
             WaitState::Failed(name) => {
                 self.power.wait = None;

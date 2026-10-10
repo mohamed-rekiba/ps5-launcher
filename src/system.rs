@@ -218,7 +218,7 @@ pub enum Guard {
 }
 
 /// Seconds of the countdown when nothing is lost.
-const COUNTDOWN_SECS: u8 = 3;
+pub const COUNTDOWN_SECS: u8 = 3;
 
 /// How to confirm `action` while `work` runs. Downloads never count: they continue at the next
 /// start.
