@@ -871,7 +871,7 @@ impl App {
         match &pairing.stage {
             Stage::Ready => card(0, 0, "Put the controller in pairing mode", &["Hold its buttons until the light flashes, then choose Start scanning.", "Pair one controller at a time."], true),
             Stage::Scanning => card(1, 0, "Looking for controllers…", &[&format!("Keep the light flashing. The scan takes up to {} seconds.", bluetooth::SCAN_SECS)], true),
-            Stage::Results if pairing.found.is_empty() => card(1, 1, "No controllers found", &["Hold the buttons until the light flashes, then choose Scan again."], true),
+            Stage::Results if pairing.found.is_empty() => card(1, 0, "No controllers found", &["Hold the buttons until the light flashes, then choose Scan again."], true),
             Stage::Results => card(2, 0, "Choose your controller", &["It stays in pairing mode for a short while only. Choose it now."], false),
             Stage::Running { mac, step } => {
                 let at = if *step == Step::Connect { 3 } else { 2 };

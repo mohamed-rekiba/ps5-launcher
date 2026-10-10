@@ -15,7 +15,7 @@ advisor (Codex) and are recorded here and in the commit messages.
 | 3. Power menu, Quick Menu, PS button, power key | Done. |
 | 4. Settings with the side rail | Done. |
 | 5. On-screen keyboard | Done. |
-| 6. System pages | Network, Sound, Storage, Updates done. Display (with the NVIDIA offer) and Time in progress. Controllers/Bluetooth, File sharing and formatting not built. |
+| 6. System pages | Network, Sound, Storage, Updates done. Display (with the NVIDIA offer) and Time in progress. Controllers (battery, Bluetooth pairing, Forget) built, not yet tried with a real adapter. File sharing and formatting not built. |
 | 7. First-start setup | Not started. |
 | 8. Docs, migration, release | Not started. |
 
