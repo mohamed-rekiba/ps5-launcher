@@ -105,7 +105,11 @@ fn check_launcher(value: &serde_norway::Value, launcher: Version) -> Result<(), 
     let text = min.as_str().unwrap_or_default();
     let needed = LauncherVersion::try_from(text.to_string()).ok().and_then(|v| Version::parse(v.as_str()));
     match needed {
-        None => Err(Issue::new("min_launcher_version", format!("{text:?} is not a version like 1.14.0"))),
+        None => {
+            // A number such as 1.14 is not text: show it as written.
+            let shown = min.as_str().map_or_else(|| serde_norway::to_string(min).unwrap_or_default().trim().to_string(), |s| format!("{s:?}"));
+            Err(Issue::new("min_launcher_version", format!("{shown} is not a version like 1.14.0")))
+        }
         Some(needed) if needed > launcher => Err(Issue::new("min_launcher_version", format!("the addon needs launcher {text} or newer; this is {launcher}"))),
         Some(_) => Ok(()),
     }

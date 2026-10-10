@@ -378,7 +378,7 @@ fn min_launcher_version_compares_as_a_semantic_version() {
     for bad in ["1.14", "v1.14.0", "1.14.0-beta", "01.14.0", "1.14.0.1", "\"\""] {
         assert!(parse_at(&with(bad), "1.14.3").unwrap_err().contains("is not a version like 1.14.0"), "{bad}");
     }
-    assert!(parse_at(&with("1.14"), "1.14.3").unwrap_err().starts_with("min_launcher_version: "));
+    assert_eq!(parse_at(&with("1.14"), "1.14.3").unwrap_err(), "min_launcher_version: 1.14 is not a version like 1.14.0", "a number is shown as written");
 }
 
 #[test]
