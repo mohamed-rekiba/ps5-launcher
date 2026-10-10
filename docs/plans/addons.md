@@ -4,9 +4,9 @@ Status: **approved**. The owner wrote the plan below; the advisor (Codex) review
 open points. The advisor's fixes and decisions follow the plan and win where they differ.
 
 Progress: the revised Phase 1 (below) is **done** for emulators, slices 1 to 5, in
-`src/emulators/`. Not done yet: themes, the Settings actions in the UI, the on/off and choice
-preferences (Phase 2), the startup call (Phase 2), image size and SVG loading, and the "Show the
-folder" route. Addon files have size limits (16 MiB a file, 64 MiB a folder).
+`src/emulators/`. Phase 2 stored the on/off and choice preferences and added the startup call
+(see data-driven-emulators.md). Not done yet: themes, the Settings actions in the UI, image size
+and SVG loading, and the "Show the folder" route. Addon files have size limits (16 MiB a file, 64 MiB a folder).
 Also not done: the lifecycle's changes (making folders, staging writes, renames, removals) go
 by path after an lstat check of each parent, so a parent swapped for a link between the check
 and the change is not caught. Reads already go through folder handles. The fix is mkdirat,

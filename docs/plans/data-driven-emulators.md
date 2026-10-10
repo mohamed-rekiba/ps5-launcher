@@ -13,6 +13,27 @@ section (§3) where they differ:
 embedded manifest and the override file are replaced. Phase 1 follows addons.md. Everything else
 below is the advisor's design as written.
 
+**Progress.** Phase 1 is done (see addons.md). Phase 2 is done:
+
+- `config.json` version 1 keeps each emulator's on/off switch, build (`managed`, or `custom`
+  with the text as typed) and settings under `emulators`, the user's emulator for each console
+  under `console_emulators`, and single-game choices under `game_emulators`. `Config` implements
+  the registry's `Preferences` (`src/config.rs`, `src/preferences.rs`).
+- The old KytyPS5 and shadPS4 fields stay in the file and in `Config`: the old launch path and
+  Settings still use them, and an older launcher can still read the file. Reading fills the new
+  form from them where it has no value (new keys win), then sets them from it; a save stores
+  their edits. The first save over a version-0 file keeps it as `config.json.legacy`.
+- Fullscreen and the three update switches stay app-wide fields, with their old rule.
+- Ratings and skips record the emulator id and its build (`MyResult.kyty` is now
+  `emulator_version`; old files still load). Old records take the emulator from the title id.
+  They are still keyed by title id; keying by emulator comes with phase 6.
+- A launch records the emulator id and its build in `Session` and `Ended`; a rating after play
+  uses them.
+- `main` loads the addons once, on its own thread (`startup::shared`, `startup::snapshot`).
+
+Not done in phase 2: the registry does not choose the emulator yet (phase 3), and nothing in
+the UI sets the new choices or the on/off switch (phase 5).
+
 ---
 
 **Use an embedded JSON manifest, a validated user override, and a small set of compiled Rust adapters.** Adding an emulator should require only data when its release, installation, launch, and compatibility conventions match an existing adapter. New conventions require a Rust adapter.
