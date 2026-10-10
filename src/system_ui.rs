@@ -699,8 +699,8 @@ impl App {
             return;
         }
         audio::play(Sound::Select);
+        // No toast yet: on the NVIDIA image the helper may stop at the key before downloading.
         self.sys.os.busy = Some("Downloading…");
-        self.toast("Downloading the system update", "You can keep playing. It installs when you restart.", 0);
         self.sys_show();
         bg(|| osupdate::update_flow(&system::call_status), |app, end| {
             app.sys.os.busy = None;
