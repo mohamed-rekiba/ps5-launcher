@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# CI only: the install test (the "install-test" job in .github/workflows/os-fedora.yml). Run it
+# CI only: the install test (the "install-test" job in .github/workflows/os.yml). Run it
 # from the repository root on an x86_64 Linux host with KVM, QEMU, OVMF, socat, jq and docker.
 #
 # 1. Points FOLLOW_TAG at the main candidate, builds the installer ISO with an extra kickstart

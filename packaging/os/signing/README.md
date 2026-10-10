@@ -11,7 +11,7 @@ images ship.
 | Its password | The owner's safe backup, and the secret `COSIGN_PASSWORD` of the same environment. |
 | Public key (`cosign.pub`, PEM) | `packaging/os/signing/cosign.pub`, committed. Both images ship it as `/usr/share/ps5-launcher/signing/cosign.pub`. |
 
-Until `cosign.pub` exists, every run of `.github/workflows/os-fedora.yml` and every image build
+Until `cosign.pub` exists, every run of `.github/workflows/os.yml` and every image build
 fails with a message that points here. The workflow's `sign` job checks that the secret is the
 private half of `cosign.pub` before it signs anything.
 

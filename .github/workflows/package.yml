@@ -1,13 +1,13 @@
 name: Package
 
 # Builds the release files for a tag, attaches them to its draft release, checks them, and
-# publishes the release. It starts when a v* tag is pushed: Release Please pushes one when its
-# release pull request is merged (release.yml). The published release then starts os-fedora.yml.
+# publishes the release; then OS (os.yml) builds the OS image with it. It starts when a v* tag is
+# pushed, or from release.yml on the tag Release Please made (see release.yml for which and why).
 # By hand (workflow_dispatch), choose the release tag under "Use workflow from": it builds that
 # tag again. It never changes a release that is already published.
 #
-# Publishing uses the secret RELEASE_PLEASE_TOKEN, only in the publish job: a release published
-# with the workflow's own token would start no workflow, so os-fedora.yml would not run.
+# The publish job uses RELEASE_PLEASE_TOKEN when it exists, so the published release starts
+# os.yml; without it, it publishes with the workflow's token and starts os.yml on the tag itself.
 on:
   push:
     tags: ["v*"]
@@ -146,16 +146,15 @@ jobs:
     needs: [linux-x86_64, macos-universal]
     runs-on: ubuntu-24.04
     timeout-minutes: 10
+    permissions:
+      contents: write
+      actions: write   # to start os.yml without RELEASE_PLEASE_TOKEN
     steps:
       - name: Check the files and publish
         env:
-          GH_TOKEN: ${{ secrets.RELEASE_PLEASE_TOKEN }}
+          GH_TOKEN: ${{ secrets.RELEASE_PLEASE_TOKEN || github.token }}
           GH_REPO: ${{ github.repository }}
         run: |
-          if [ -z "$GH_TOKEN" ]; then
-            echo "::error::The secret RELEASE_PLEASE_TOKEN is missing, so the release stays a draft. See the top of .github/workflows/release.yml."
-            exit 1
-          fi
           read -r draft assets < <(gh release view "$TAG" --json isDraft,assets --jq '"\(.isDraft) \([.assets[].name] | join(","))"')
           if [ "$draft" != true ]; then
             echo "::error::$TAG is already published; nothing to do"
@@ -172,3 +171,17 @@ jobs:
           [ "$missing" = 0 ] || exit 1
           gh release edit "$TAG" --draft=false
           echo "Published $TAG"
+      - name: Start OS on the tag
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
+          PAT: ${{ secrets.RELEASE_PLEASE_TOKEN }}
+        run: |
+          if [ -n "$PAT" ]; then
+            echo "Published with RELEASE_PLEASE_TOKEN, so the published release starts OS"
+          elif [ "$(gh release view "$TAG" --json isPrerelease --jq .isPrerelease)" = true ]; then
+            echo "$TAG is a prerelease: OS skips it"
+          else
+            gh workflow run os.yml --ref "$TAG"
+            echo "Started OS on $TAG"
+          fi

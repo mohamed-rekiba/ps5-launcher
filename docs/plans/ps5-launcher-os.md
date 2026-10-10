@@ -10,7 +10,7 @@ advisor (Codex) and are recorded here and in the commit messages.
 |---|---|
 | 0a. Image and installer spike | Done in CI: Fedora 44 bootc builds and boots under KVM, the signed NVIDIA modules build, the helper and SDDM fallback work. Real-hardware questions are open. |
 | 0b. UI prototype | Done; picks below. |
-| 1. OS image | Built: `packaging/os/`, `.github/workflows/os-fedora.yml` with VM gates and manual promotion. Not run yet: needs the owner's Secure Boot key, a public GHCR package and the release environment. **Image signing is built, not run yet: it needs the owner's signing key and one green end-to-end run, then a reviewed change lifts the release guard.** |
+| 1. OS image | Built: `packaging/os/`, `.github/workflows/os.yml` with VM gates and manual promotion. Not run yet: needs the owner's Secure Boot key, a public GHCR package and the release environment. **Image signing is built, not run yet: it needs the owner's signing key and one green end-to-end run, then a reviewed change lifts the release guard.** |
 | 2. System layer and session | Done. |
 | 3. Power menu, Quick Menu, PS button, power key | Done. |
 | 4. Settings with the side rail | Done; then the side rail was replaced by the old right-side sheet at the owner's request. The System areas open as sub-sheets in the same panel. |
@@ -209,7 +209,7 @@ image before the migration (Phase 8), and the Fedora image is not released yet.
 | `packaging/os/ps5-launcher-os.ks` | The kickstart for the network installer. |
 | `packaging/os/build-iso.sh` | Fedora's netinstall ISO with the kickstart. |
 | `packaging/os/README.md` | How it is built and tested. |
-| `.github/workflows/os-fedora.yml` | Build, check, sign, push to a testing tag, then promote the tested digest. |
+| `.github/workflows/os.yml` | Build, check, sign, push to a testing tag, then promote the tested digest. |
 
 ### NVIDIA kmod build (first stage of `Containerfile.nvidia`)
 

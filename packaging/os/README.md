@@ -66,7 +66,7 @@ and a containers policy that requires it (see
 | [test-signature-policy.sh](test-signature-policy.sh) | Tests the first start's signature enforcement with a fake `bootc`. |
 | [hardware-test.md](hardware-test.md) | The hardware tests before a promotion: the checklist and the results form. |
 | [collect-hardware-logs.sh](collect-hardware-logs.sh) | Saves the logs of one hardware test stage into a dated tarball. |
-| [../../.github/workflows/os-fedora.yml](../../.github/workflows/os-fedora.yml) | Builds, tests and publishes the images. |
+| [../../.github/workflows/os.yml](../../.github/workflows/os.yml) | Builds, tests and publishes the images. |
 
 ## The installer
 
@@ -278,7 +278,7 @@ Find the current base digest with
 
 ## The workflow and its gates
 
-`.github/workflows/os-fedora.yml` (**PS5 Launcher OS**) runs when a launcher release is
+`.github/workflows/os.yml` (**OS**) runs when a launcher release is
 published (Package publishes it after its `v*` tag; prereleases are skipped) and by hand. Its
 daily schedule is off until the keys exist (a TODO in the file). It resolves its inputs once:
 the launcher release (the published release, the tag picked under "Use workflow from", or the
@@ -353,7 +353,7 @@ every run with `promote` or `attach_iso` on, with a message that says what is le
 environment, so it fails before anyone is asked to approve.
 
 The guard is the value `OS_IMAGE_SIGNING: disabled` at the top of
-`.github/workflows/os-fedora.yml`. It is in the workflow file, not a repository variable, so a
+`.github/workflows/os.yml`. It is in the workflow file, not a repository variable, so a
 settings click cannot lift it: only a reviewed change can. What is left before that change:
 
 1. The owner's signing key and environments ([signing/README.md](signing/README.md)).

@@ -12,7 +12,7 @@ screen. Both images ship the certificate at
 | Certificate (DER) | `packaging/os/secureboot/public_key.der`, committed. |
 
 Until `public_key.der` exists, every image build fails with a message that points here. The
-workflow `.github/workflows/os-fedora.yml` checks that the secret and the certificate belong
+workflow `.github/workflows/os.yml` checks that the secret and the certificate belong
 together before it builds anything, and mounts the key only for the signing step.
 
 ## Make the key (the project owner, once)
