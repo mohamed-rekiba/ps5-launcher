@@ -1,22 +1,28 @@
 //! The emulator addons' tests: the default documents against today's code, one document's
 //! checks, and resolution.
 
-use super::bundle::{DefaultSource, Embedded};
+use super::bundle::{DefaultSource, Embedded, ShippedAddon};
 use super::document::{self, Version, MAX_ITEMS};
 use super::manifest::*;
-use super::registry::{Registry, ResolveError};
+use super::registry::{ChosenBy, Preferences, Registry, ResolveError, Unavailable};
 use std::path::PathBuf;
 
-fn embedded() -> Registry {
-    Registry::embedded().unwrap_or_else(|(id, e)| panic!("{id}: {e:?}"))
+/// The default addons' documents as they ship.
+fn shipped() -> Vec<Emulator> {
+    let read = |a: &ShippedAddon| document::parse(a.document().unwrap(), Version::current()).unwrap_or_else(|e| panic!("{}: {e:?}", a.id));
+    Embedded.emulators().iter().map(read).collect()
+}
+
+fn shipped_one(id: &str) -> Emulator {
+    shipped().into_iter().find(|e| e.id.as_str() == id).unwrap()
 }
 
 fn kyty() -> Emulator {
-    embedded().get("kyty").unwrap().clone()
+    shipped_one("kyty")
 }
 
 fn shad() -> Emulator {
-    embedded().get("shadps4").unwrap().clone()
+    shipped_one("shadps4")
 }
 
 fn github(e: &Emulator) -> &GithubRelease {
@@ -40,13 +46,13 @@ fn path_of(root: &DataRoot) -> PathBuf {
 
 #[test]
 fn the_default_documents_load_and_are_within_the_limits() {
-    let r = embedded();
     for addon in Embedded.emulators() {
         assert!(addon.document().unwrap().len() <= super::yaml::MAX_BYTES, "{}", addon.id);
     }
-    let ids: Vec<&str> = r.emulators().iter().map(|e| e.id.as_str()).collect();
+    let all = shipped();
+    let ids: Vec<&str> = all.iter().map(|e| e.id.as_str()).collect();
     assert_eq!(ids, ["kyty", "shadps4"]);
-    assert!(r.emulators().iter().all(|e| e.enabled && e.min_launcher_version.is_none()));
+    assert!(all.iter().all(|e| e.enabled && e.min_launcher_version.is_none()));
 }
 
 #[test]
@@ -68,11 +74,10 @@ fn the_bundle_holds_every_file_of_the_default_folders() {
 
 #[test]
 fn the_console_defaults_name_default_addons_for_their_console() {
-    let r = embedded();
     let defaults = Embedded.console_defaults();
     for console in Console::ALL {
         let id = defaults.get(console).unwrap();
-        assert!(r.get(id.as_str()).unwrap().consoles.contains(&console), "{id} for {console:?}");
+        assert!(shipped_one(id.as_str()).consoles.contains(&console), "{id} for {console:?}");
     }
     assert_eq!((defaults.ps5.unwrap().as_str(), defaults.ps4.unwrap().as_str()), ("kyty", "shadps4"));
 }
@@ -439,20 +444,118 @@ fn every_problem_in_a_document_is_listed() {
 
 // ------------------------------------------------------------------ resolution
 
-#[test]
-fn each_console_resolves_to_its_default() {
-    let r = embedded();
-    assert_eq!(r.resolve(Console::Ps5, None).unwrap().id.as_str(), "kyty");
-    assert_eq!(r.resolve(Console::Ps4, None).unwrap().id.as_str(), "shadps4");
-    assert_eq!(r.resolve(crate::platform::Platform::Ps4.into(), None).unwrap().id.as_str(), "shadps4");
+/// The user's choices, as Phase 2's preferences will hold them.
+#[derive(Default)]
+struct Prefs {
+    games: Vec<(&'static str, &'static str)>,
+    consoles: Vec<(Console, &'static str)>,
+    off: Vec<&'static str>,
+}
+
+impl Preferences for Prefs {
+    fn game_choice(&self, title_id: &str) -> Option<String> {
+        self.games.iter().find(|(t, _)| *t == title_id).map(|(_, id)| id.to_string())
+    }
+    fn console_choice(&self, console: Console) -> Option<String> {
+        self.consoles.iter().find(|(c, _)| *c == console).map(|(_, id)| id.to_string())
+    }
+    fn enabled(&self, id: &str) -> bool {
+        !self.off.contains(&id)
+    }
+}
+
+/// A data folder after the first start, with the test folders `extra` dropped in.
+fn installed(extra: &[&str]) -> (tempfile::TempDir, Registry) {
+    let root = tempfile::Builder::new().prefix("addons-").tempdir().unwrap();
+    assert_eq!(super::lifecycle::reconcile(root.path(), &Embedded, &super::lifecycle::RealFiles::default()), []);
+    for name in extra {
+        let from = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("testdata/addons/emulators").join(name);
+        let to = root.path().join("emulators").join(name);
+        std::fs::create_dir_all(&to).unwrap();
+        for entry in std::fs::read_dir(from).unwrap().flatten() {
+            std::fs::copy(entry.path(), to.join(entry.file_name())).unwrap();
+        }
+    }
+    let registry = registry_of(root.path(), Embedded.console_defaults());
+    (root, registry)
+}
+
+fn registry_of(root: &std::path::Path, defaults: Defaults) -> Registry {
+    Registry::new(super::discovery::scan(root, Version::current()), defaults)
+}
+
+fn resolved(r: &Registry, console: Console, title: &str, prefs: &Prefs) -> Result<String, ResolveError> {
+    r.resolve(console, title, prefs).map(|e| e.id.to_string())
+}
+
+fn unavailable(id: &str, console: Console, chosen_by: ChosenBy, reason: Unavailable) -> Result<String, ResolveError> {
+    Err(ResolveError::Unavailable { id: id.into(), console, chosen_by, reason })
 }
 
 #[test]
-fn a_games_own_choice_wins_and_never_falls_back() {
-    let r = embedded();
-    assert_eq!(r.resolve(Console::Ps5, Some("kyty")).unwrap().id.as_str(), "kyty");
-    assert_eq!(r.resolve(Console::Ps5, Some("gone")), Err(ResolveError::Unknown("gone".into())));
-    let shad = EmulatorId::try_from("shadps4".to_string()).unwrap();
-    assert_eq!(r.resolve(Console::Ps5, Some("shadps4")), Err(ResolveError::WrongConsole(shad, Console::Ps5)));
+fn each_console_resolves_to_the_shipped_default() {
+    let (_root, r) = installed(&[]);
+    let none = Prefs::default();
+    assert_eq!(resolved(&r, Console::Ps5, "PPSA01234", &none), Ok("kyty".into()));
+    assert_eq!(resolved(&r, Console::Ps4, "CUSA01234", &none), Ok("shadps4".into()));
+    assert_eq!(resolved(&r, crate::platform::Platform::Ps4.into(), "CUSA01234", &none), Ok("shadps4".into()));
+}
+
+#[test]
+fn a_second_ps4_emulator_from_a_folder_resolves_when_chosen() {
+    let (_root, r) = installed(&["ps4-lab"]);
+    assert_eq!(r.emulators().iter().map(|e| e.id.as_str()).collect::<Vec<_>>(), ["kyty", "ps4-lab", "shadps4"]);
+    let game = Prefs { games: vec![("CUSA00001", "ps4-lab")], ..Prefs::default() };
+    assert_eq!(resolved(&r, Console::Ps4, "CUSA00001", &game), Ok("ps4-lab".into()));
+    assert_eq!(resolved(&r, Console::Ps4, "CUSA00002", &game), Ok("shadps4".into()), "other PS4 games keep the default");
+    let console = Prefs { consoles: vec![(Console::Ps4, "ps4-lab")], ..Prefs::default() };
+    assert_eq!(resolved(&r, Console::Ps4, "CUSA00002", &console), Ok("ps4-lab".into()));
+    assert_eq!(resolved(&r, Console::Ps5, "PPSA00001", &console), Ok("kyty".into()), "the other console keeps its default");
+}
+
+#[test]
+fn the_games_choice_comes_first_then_the_users_then_the_shipped_default() {
+    let (_root, r) = installed(&["ps4-lab"]);
+    let both = Prefs { games: vec![("CUSA00001", "shadps4")], consoles: vec![(Console::Ps4, "ps4-lab")], ..Prefs::default() };
+    assert_eq!(resolved(&r, Console::Ps4, "CUSA00001", &both), Ok("shadps4".into()));
+    assert_eq!(resolved(&r, Console::Ps4, "CUSA00002", &both), Ok("ps4-lab".into()));
+}
+
+#[test]
+fn an_unavailable_choice_is_said_and_never_replaced() {
+    let (root, r) = installed(&["ps4-lab"]);
+    let game = |id: &'static str| Prefs { games: vec![("CUSA00001", id)], ..Prefs::default() };
+    assert_eq!(resolved(&r, Console::Ps4, "CUSA00001", &game("gone")), unavailable("gone", Console::Ps4, ChosenBy::Game, Unavailable::Missing));
+    assert_eq!(resolved(&r, Console::Ps5, "CUSA00001", &game("shadps4")), unavailable("shadps4", Console::Ps5, ChosenBy::Game, Unavailable::WrongConsole));
+    let off = Prefs { off: vec!["ps4-lab"], ..game("ps4-lab") };
+    assert_eq!(resolved(&r, Console::Ps4, "CUSA00001", &off), unavailable("ps4-lab", Console::Ps4, ChosenBy::Game, Unavailable::Off));
+    let mine = Prefs { consoles: vec![(Console::Ps4, "gone")], ..Prefs::default() };
+    assert_eq!(resolved(&r, Console::Ps4, "CUSA00001", &mine), unavailable("gone", Console::Ps4, ChosenBy::User, Unavailable::Missing), "not the shipped default");
+
+    // A broken addon keeps the user's choice, and says why it cannot run.
+    std::fs::write(root.path().join("emulators/ps4-lab/emulator.yaml"), "schema_version: 1\nid: ps4-lab\n").unwrap();
+    let r = registry_of(root.path(), Embedded.console_defaults());
+    assert_eq!(resolved(&r, Console::Ps4, "CUSA00001", &game("ps4-lab")), unavailable("ps4-lab", Console::Ps4, ChosenBy::Game, Unavailable::Broken));
+    let text = r.resolve(Console::Ps4, "CUSA00001", &game("ps4-lab")).unwrap_err().to_string();
+    assert_eq!(text, "this game's emulator, \"ps4-lab\", cannot run it: its emulator.yaml has a problem");
+}
+
+#[test]
+fn a_console_can_have_no_usable_default() {
+    let (root, _) = installed(&["ps4-lab"]);
+    std::fs::remove_dir_all(root.path().join("emulators/shadps4")).unwrap();
+    let r = registry_of(root.path(), Embedded.console_defaults());
+    let none = Prefs::default();
+    let e = r.resolve(Console::Ps4, "CUSA00001", &none).unwrap_err();
+    assert_eq!(e, ResolveError::Unavailable { id: "shadps4".into(), console: Console::Ps4, chosen_by: ChosenBy::Launcher, reason: Unavailable::Missing });
+    assert_eq!(e.to_string(), "the default PS4 emulator, \"shadps4\", cannot run it: it is not installed");
+    // Scan order never decides: with no default at all, ps4-lab is not picked.
+    let r = registry_of(root.path(), Defaults { ps5: None, ps4: None });
+    assert_eq!(resolved(&r, Console::Ps4, "CUSA00001", &none), Err(ResolveError::NoDefault(Console::Ps4)));
     assert_eq!(ResolveError::NoDefault(Console::Ps4).to_string(), "no emulator is set for PS4 games");
+    let r = registry_of(root.path(), Embedded.console_defaults());
+    let off = Prefs { off: vec!["kyty"], ..Prefs::default() };
+    assert_eq!(r.resolve(Console::Ps5, "PPSA00001", &off).unwrap_err().to_string(), "the default PS5 emulator, \"kyty\", cannot run it: it is turned off");
+    let mine = Prefs { consoles: vec![(Console::Ps5, "ps4-lab")], ..Prefs::default() };
+    assert_eq!(r.resolve(Console::Ps5, "PPSA00001", &mine).unwrap_err().to_string(), "your PS5 emulator, \"ps4-lab\", cannot run it: it does not run PS5 games");
 }
