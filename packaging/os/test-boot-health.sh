@@ -320,11 +320,27 @@ status "$A" ""
 gpu nvidia
 health
 check "the main image with the NVIDIA driver is unhealthy" has "$(j "$(att "$A")" .reason)" "no usable driver"
+# A TV in standby: no connected screen says nothing about the new system. The start is neither
+# good nor bad, and the next start is still its first attempt.
 fresh
 status "$A" ""
-echo disconnected > "$work/drm/card1-HDMI-A-1/status"
+echo gamescope > "$work/procs"
+launcher ok
 health
-check "no connected screen is unhealthy" has "$(j "$(att "$A")" .reason)" "no connected screen"
+new_boot
+status "$B" "$A"
+echo disconnected > "$work/drm/card1-HDMI-A-1/status"
+launcher silent
+health
+check "no connected screen decides nothing" no_rollback
+check "  records no attempt, so the next start is still the first" test ! -e "$work/health/$(att "$B")"
+check "  shows no notice" test ! -e "$work/health/notice.json"
+check "  keeps last-good" is "$(j last-good .digest)" "$A"
+check "  and says why" grep -q "no connected screen" "$work/out"
+new_boot
+gpu amdgpu
+health
+check "with the TV on, a failed first start still rolls back" is "$(grep -c rollback "$work/bootc.log")" 1
 
 # --- State it does not know --------------------------------------------------------------------------
 fresh

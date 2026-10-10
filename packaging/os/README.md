@@ -116,6 +116,8 @@ the recovery (`failed_digest`, `destination_digest`, `rollback_attempts: 1`) dur
 cut at any point never leads to a second try. It restarts only when bootc confirms the rollback
 is queued to that digest. On the destination it never rolls back again, even when the check
 fails there. A `bootc status` it cannot read, or state it does not know, changes nothing.
+**No connected screen** (a TV in standby, say) decides nothing either: the attempt record is
+removed, so the next start with the screen on is still the first attempt.
 
 It shares the lock `/run/ps5-launcher-os.lock` with the helper's `update`, `switch` and
 `rollback`, and reads `bootc status` again under that lock before it rolls back.

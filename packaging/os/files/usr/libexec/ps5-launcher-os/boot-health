@@ -316,7 +316,16 @@ else
     run_checks
 fi
 
-# 3. The decision.
+# 3. The decision. With no connected screen (a TV in standby, say) nothing here says anything
+# about the new system: decide nothing, and forget the attempt, so the next start is still its
+# first one.
+if [ "$gpu_problem" = "no connected screen" ]; then
+    log "no connected screen: this start is neither good nor bad, and stays a first attempt"
+    if take_lock; then
+        rm -f "$health_dir/attempts/${booted#sha256:}"
+    fi
+    exit 0
+fi
 if [ -z "$problems" ]; then
     log "healthy"
     jq -n --arg d "$booted" --arg b "$boot_id" --arg t "$(now_iso)" '{version: 1, digest: $d, boot_id: $b, time: $t}' |
