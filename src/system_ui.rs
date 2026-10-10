@@ -883,9 +883,11 @@ impl App {
                     Some(Step::Connect) => 3,
                     Some(_) => 2,
                 };
-                card(at, 1, what, &[reason, detail], true)
+                // A failed scan shows the buttons again; after a failed step the found list matters more.
+                let lines: Vec<&str> = [*reason, detail.as_str()].into_iter().filter(|l| !l.is_empty()).collect();
+                card(at, 1, what, &lines, step.is_none())
             }
-            Stage::Done { name } => card(4, 2, "Controller connected", &[&format!("{name} is ready to play."), "Next time, press its PS or Xbox button and it connects by itself."], false),
+            Stage::Done { name } => card(4, 2, "Controller connected", &[&format!("{name} is ready to play."), "Next time, press its PS, Xbox or Home button and it connects by itself."], false),
         }
     }
 
@@ -1002,7 +1004,7 @@ impl App {
                 Err(e) => {
                     crate::log!("Bluetooth scan: {e}");
                     audio::play(Sound::Error);
-                    pairing.stage = Stage::Failed { step: None, what: "The scan failed", reason: bluetooth::explain(&e), detail: e };
+                    pairing.stage = Stage::Failed { step: None, what: "The scan failed", reason: bluetooth::explain(&e), detail: bluetooth::detail(&e) };
                 }
             }
             let focus = if pairing.found.is_empty() { SId::BtScan } else { SId::BtFound(0) };
@@ -1067,10 +1069,16 @@ impl App {
             PairEnd::Failed { step, error } => {
                 crate::log!("Pairing {}: {error}", info.mac);
                 audio::play(Sound::Error);
-                Stage::Failed { step: Some(step), what: "Pairing failed", reason: bluetooth::explain(&error), detail: error }
+                Stage::Failed { step: Some(step), what: "Pairing failed", reason: bluetooth::explain(&error), detail: bluetooth::detail(&error) }
             }
         };
-        let focus = if matches!(stage, Stage::Done { .. }) { SId::BtPairClose } else { SId::BtScan };
+        // After a failed step, focus stays on that controller: choosing it again retries.
+        let failed = self.sys.ctl.pairing.as_ref().and_then(|p| p.found.iter().position(|f| f.mac == info.mac)).filter(|_| !gone);
+        let focus = match (&stage, failed) {
+            (Stage::Done { .. }, _) => SId::BtPairClose,
+            (_, Some(i)) => SId::BtFound(i),
+            _ => SId::BtScan,
+        };
         if let Some(pairing) = self.sys.ctl.pairing.as_mut() {
             if gone {
                 // bluetoothd forgot it: choosing it again cannot work.

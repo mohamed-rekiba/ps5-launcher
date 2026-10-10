@@ -327,6 +327,12 @@ pub fn pair_flow(run: &dyn Fn(&Call) -> Result<Ran, String>, mac: &str, on_step:
     PairEnd::Connected
 }
 
+/// The short form of an error, for under its plain sentence: bluetoothctl's last line, which
+/// names BlueZ's error ("Failed to pair: org.bluez.Error.AuthenticationFailed").
+pub fn detail(error: &str) -> String {
+    error.lines().map(str::trim).rfind(|l| !l.is_empty()).unwrap_or_default().to_string()
+}
+
 /// A plain sentence for a bluetoothctl error.
 pub fn explain(error: &str) -> &'static str {
     let has = |words: &[&str]| words.iter().any(|w| error.contains(w));
@@ -644,6 +650,16 @@ Advertising Features:
     fn a_bad_mac_pairs_nothing() {
         let end = pair_flow(&|_: &Call| panic!("no call for a bad MAC"), "a0:ab:51:5f:23:1a", &|_| {});
         assert!(matches!(end, PairEnd::Failed { step: Step::Pair, .. }), "{end:?}");
+    }
+
+    #[test]
+    fn the_detail_is_bluetoothctls_last_line() {
+        let failed = "bluetoothctl pair A0:AB:51:5F:23:1A failed (exit 1): Attempting to pair with A0:AB:51:5F:23:1A\nFailed to pair: org.bluez.Error.AuthenticationFailed";
+        assert_eq!(detail(failed), "Failed to pair: org.bluez.Error.AuthenticationFailed");
+        let slow = "bluetoothctl pair A0:AB:51:5F:23:1A did not answer within 60 s";
+        assert_eq!(detail(slow), slow);
+        assert_eq!(detail("one line\n\n"), "one line");
+        assert_eq!(detail(""), "");
     }
 
     #[test]
