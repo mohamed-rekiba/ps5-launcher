@@ -10,10 +10,12 @@ chmod 755 "$work/sddm"
 sed -e "s|^sddm_dir=/etc/sddm.conf.d$|sddm_dir=$work/sddm|" \
     -e "s|^os_release=/usr/lib/ps5-launcher/os-release$|os_release=$work/os-release|" \
     -e "s|^cert_dir=/usr/share/ps5-launcher/secureboot$|cert_dir=$work/certs|" \
+    -e "s|^state_dir=/var/lib/ps5-launcher$|state_dir=$work/state|" \
     -e "s|^PATH=/usr/sbin:/usr/bin$|PATH=$work/bin:/usr/sbin:/usr/bin:/bin|" \
     "$(dirname "$0")/files/usr/libexec/ps5-launcher/helper" > "$work/helper"
 chmod +x "$work/helper"
-for fixed in "^sddm_dir=$work/sddm$" "^os_release=$work/os-release$" "^cert_dir=$work/certs$" "^PATH=$work/bin:"; do
+for fixed in "^sddm_dir=$work/sddm$" "^os_release=$work/os-release$" "^cert_dir=$work/certs$" \
+    "^state_dir=$work/state$" "^PATH=$work/bin:"; do
     if ! grep -q "$fixed" "$work/helper"; then
         echo "FAIL the helper's fixed path $fixed was not found"
         exit 1
@@ -41,10 +43,18 @@ case "\$1" in
     pending) echo "\$2 is already in the enrollment request"; exit 0 ;;
     *) echo "\$2 is not enrolled"; exit 1 ;;
     esac ;;
---import) echo "\$2" > "$work/import.file"; cat > "$work/import.stdin" ;;
+--import)
+    [ "\$(cat "$work/mok")" = pending ] && { echo "SKIP: \$2 is already in the enrollment request"; exit 0; }
+    echo "\$2" > "$work/import.file"; cat > "$work/import.stdin"; echo pending > "$work/mok" ;;
+--revoke-import) echo not > "$work/mok"; echo revoked >> "$work/revoke.log" ;;
 esac
 FAKE
 chmod +x "$work/bin/bootc" "$work/bin/skopeo" "$work/bin/mokutil"
+# macOS has no sha256sum on the helper's PATH; Fedora does.
+if ! PATH=/usr/sbin:/usr/bin:/bin command -v sha256sum >/dev/null; then
+    printf '#!/bin/sh\nexec shasum -a 256 "$@"\n' > "$work/bin/sha256sum"
+    chmod +x "$work/bin/sha256sum"
+fi
 next="$work/sddm/90-ps5-launcher-os-next-session.conf"
 
 failures=0
@@ -99,8 +109,13 @@ gate() { # EXPECTED_EXIT, then the helper's arguments; the output goes to $work/
     helper "$@" > "$work/out" || got=$?
     [ "$got" = "$want" ]
 }
-echo "SecureBoot disabled" > "$work/sb-state"
+echo "Cannot determine secure boot state." > "$work/sb-state"
 echo not > "$work/mok"
+check "an unknown Secure Boot state stops the update" gate 1 update
+check "  without touching bootc" test ! -s "$work/bootc.log"
+printf 'SecureBoot enabled\nSecureBoot validation is disabled in shim\n' > "$work/sb-state"
+check "Secure Boot with validation off in shim needs no key" gate 0 update
+echo "SecureBoot disabled" > "$work/sb-state"
 check "NVIDIA without Secure Boot needs no key" gate 0 update
 check "  but still follows its channel by digest" \
     grep -qx "switch ghcr.io/owner/ps5-launcher-fedora@sha256:aaaa" "$work/bootc.log"
@@ -122,14 +137,46 @@ check "an image signed with an unknown key is refused" gate 1 update
 check "  without touching bootc" test ! -s "$work/bootc.log"
 echo "sha256:aaaa <no value>" > "$work/registry/nvidia"
 check "an image without the label is refused" gate 1 update
+other=$(printf 'another certificate' | { sha256sum 2>/dev/null || shasum -a 256; })
+other=${other%% *}
+printf 'not what the label says' > "$work/certs/$other.der"
+echo "sha256:aaaa $other" > "$work/registry/nvidia"
+check "a certificate whose contents do not match its name is refused" gate 1 update
+rm "$work/certs/$other.der"
+printf 'another certificate' > "$work/elsewhere.der"
+ln -s "$work/elsewhere.der" "$work/certs/$other.der"
+check "a symlinked certificate is refused" gate 1 update
+check "  without touching bootc" test ! -s "$work/bootc.log"
+rm "$work/certs/$other.der"
 echo "sha256:aaaa $cert" > "$work/registry/nvidia"
 echo not > "$work/mok"
 check "queue-key queues the new image's key" gate 0 queue-key
 check "  with its certificate" grep -qx "$work/certs/$cert.der" "$work/import.file"
 check "  and prints an 8-digit password" grep -qxE "[0-9]{8}" "$work/out"
 check "  which it gives mokutil twice" diff <(cat "$work/out" "$work/out") "$work/import.stdin"
-printf 'IMAGE=main\nIMAGE_REF=ghcr.io/owner/ps5-launcher-fedora:main\n' > "$work/os-release"
+first=$(cat "$work/out")
+check "queue-key again replaces the waiting request" gate 0 queue-key
+check "  by revoking it first" grep -qx revoked "$work/revoke.log"
+check "  so the new password is the one mokutil got" diff <(cat "$work/out" "$work/out") "$work/import.stdin"
+check "  and it is a new one" test "$(cat "$work/out")" != "$first"
 echo enrolled > "$work/mok"
+check "queue-key with the key already enrolled queues nothing" gate 0 queue-key
+check "  and says key-enrolled" grep -qx key-enrolled "$work/out"
+echo not > "$work/mok"
+echo enrolled > "$work/mok"
+echo "SecureBoot enabled" > "$work/sb-state"
+gate 0 update
+check "staging remembers the digest" grep -qx "sha256:aaaa" "$work/state/nvidia-digest"
+check "update-check on NVIDIA with nothing new says up-to-date" gate 0 update-check
+check "  from the channel, not bootc" grep -qx up-to-date "$work/out"
+echo "sha256:cccc $cert" > "$work/registry/nvidia"
+check "update-check on NVIDIA with a newer image says update-available" gate 0 update-check
+check "  and its digest" grep -qx "update-available sha256:cccc" "$work/out"
+check "  without touching bootc" test ! -s "$work/bootc.log"
+echo "sha256:aaaa $cert" > "$work/registry/nvidia"
+printf 'IMAGE=main\nIMAGE_REF=ghcr.io/owner/ps5-launcher-fedora:main\n' > "$work/os-release"
+check "update-check on main asks bootc" gate 0 update-check
+check "  with upgrade --check" grep -qx "upgrade --check" "$work/bootc.log"
 check "switch nvidia from main stages the checked NVIDIA digest" gate 0 switch nvidia
 check "  on the same repository" \
     grep -qx "switch ghcr.io/owner/ps5-launcher-fedora@sha256:aaaa" "$work/bootc.log"
