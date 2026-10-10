@@ -447,16 +447,16 @@ const ABOUT_CARD: f32 = 36.0 + 30.0 + 120.0;
 /// The Secure Boot key's steps (Updates, Display), with the space under them: the setup's wide
 /// page, and the sheet, where the steps wrap more.
 const KEY_CARD: f32 = 510.0;
-const KEY_CARD_NARROW: f32 = 660.0;
+const KEY_CARD_NARROW: f32 = 560.0;
 /// The NVIDIA driver's card on Display (the stepper, a title and its text).
 const NV_CARD: f32 = 300.0;
-const NV_CARD_NARROW: f32 = 470.0;
+const NV_CARD_NARROW: f32 = 400.0;
 /// The pairing card on Controllers: the stepper, a title, its text and the pictures of the
 /// buttons to hold; and without the pictures.
 const PAIR_CARD: f32 = 560.0;
-const PAIR_CARD_NARROW: f32 = 930.0;
+const PAIR_CARD_NARROW: f32 = 830.0;
 const PAIR_CARD_TEXT: f32 = 280.0;
-const PAIR_CARD_TEXT_NARROW: f32 = 420.0;
+const PAIR_CARD_TEXT_NARROW: f32 = 360.0;
 /// The setup's page (ui/setup.slint): its rows start under the stepper, the title and the text,
 /// and end over the buttons.
 const SETUP_TOP: f32 = 330.0;
@@ -857,7 +857,6 @@ impl App {
 
     /// Back on the root sheet from a sub-sheet: focus and scroll as they were.
     pub(crate) fn settings_root(&mut self, ret: Option<Return>) {
-        audio::play(Sound::Back);
         self.settings_page();
         self.push_settings();
         match ret.and_then(|r| restore(&r, &self.settings_ids)) {
@@ -1351,7 +1350,10 @@ impl App {
                 Back::Flow => {
                     self.sys_back();
                 }
-                Back::Root(ret) => self.settings_root(ret),
+                Back::Root(ret) => {
+                    audio::play(Sound::Back);
+                    self.settings_root(ret);
+                }
                 Back::Close => self.back(),
             },
             Act::Up | Act::Down => {

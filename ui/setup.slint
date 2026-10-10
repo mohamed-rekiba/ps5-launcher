@@ -133,6 +133,8 @@ export component SetupPage inherits Rectangle {
             y: root.height - (102px * S.k);
             height: (30px * S.k);
             spacing: (24px * S.k);
+            // Side by side on the left, not spread across the page.
+            alignment: start;
             for h in root.pad
                 ? [{k: "✕", l: "Select", c: #8fb6ff, r: true}, {k: "○", l: "Back", c: #ff8f9c, r: true}]
                 : [{k: "Enter", l: "Select", c: #ffffff, r: false}, {k: "Esc", l: "Back", c: #ffffff, r: false}]

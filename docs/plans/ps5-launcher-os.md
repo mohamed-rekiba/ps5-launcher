@@ -13,7 +13,7 @@ advisor (Codex) and are recorded here and in the commit messages.
 | 1. OS image | Built: `packaging/os/`, `.github/workflows/os-fedora.yml` with VM gates and manual promotion. Not run yet: needs the owner's Secure Boot key, a public GHCR package and the release environment. **Image signing is built, not run yet: it needs the owner's signing key and one green end-to-end run, then a reviewed change lifts the release guard.** |
 | 2. System layer and session | Done. |
 | 3. Power menu, Quick Menu, PS button, power key | Done. |
-| 4. Settings with the side rail | Done. |
+| 4. Settings with the side rail | Done; then the side rail was replaced by the old right-side sheet at the owner's request. The System areas open as sub-sheets in the same panel. |
 | 5. On-screen keyboard | Done. |
 | 6. System pages | Network, Sound, Storage, Updates done. Display (with the NVIDIA offer) and Time in progress. Controllers (battery, Bluetooth pairing, Forget) built, not yet tried with a real adapter. File sharing and formatting not built. |
 | 7. First-start setup | Not started. |
