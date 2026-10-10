@@ -13,6 +13,9 @@
 #   75      restart the launcher now (Restart launcher in About); not a crash
 #   other   a crash, or a signal: restart it. The third crash within 60 seconds stops the
 #           restarts.
+# The same limit applies to the whole session: SDDM's Relogin starts it again when it ends, so
+# a session that keeps ending at once (gamescope cannot use the GPU, say) would loop. The third
+# start within 60 seconds gives up instead.
 set -u
 
 log="${XDG_CACHE_HOME:-$HOME/.cache}/ps5-launcher-session.log"
@@ -39,11 +42,12 @@ restart_code=75
 crash_limit=3
 crash_window=60
 
-# After too many crashes. In the OS, start the desktop instead (SDDM would otherwise log in to
-# this session again and again); if that is not possible, stay up without the launcher, so the
-# PC does not loop. On another PC, end the session: its login screen comes back.
+# After too many crashes or session starts ($1 says which). In the OS, start the desktop instead
+# (SDDM would otherwise log in to this session again and again); if that is not possible, stay
+# up without the launcher, so the PC does not loop. On another PC, end the session: its login
+# screen comes back.
 give_up() {
-    echo "$(date -Is) the launcher crashed $crash_limit times within $crash_window s: not restarting it"
+    echo "$(date -Is) $1 $crash_limit times within $crash_window s: giving up"
     if [ -e "$os_marker" ]; then
         if [ -e /usr/share/wayland-sessions/plasma.desktop ] &&
             pkexec /usr/libexec/ps5-launcher/helper set-next-session plasma; then
@@ -80,11 +84,25 @@ if [ "${1:-}" = --inner ]; then
         crashes="$recent $now"
         count=$(echo "$crashes" | wc -w)
         echo "$(date -Is) the launcher crashed (exit $code), $count time(s) within $crash_window s"
-        [ "$count" -ge "$crash_limit" ] && give_up
+        [ "$count" -ge "$crash_limit" ] && give_up "the launcher crashed"
     done
 fi
 
 echo "$(date -Is) session starting"
+
+# Count this start with the others of the last minute.
+state="${XDG_STATE_HOME:-$HOME/.local/state}/ps5-launcher"
+mkdir -p "$state"
+now=$(date +%s)
+previous=""
+[ -f "$state/session-starts" ] && read -r previous < "$state/session-starts"
+starts=""
+for t in $previous; do
+    [ $((now - t)) -lt "$crash_window" ] && starts="$starts $t"
+done
+starts="$starts $now"
+echo "$starts" > "$state/session-starts"
+[ "$(echo "$starts" | wc -w)" -ge "$crash_limit" ] && give_up "the session started"
 
 if ! command -v gamescope >/dev/null 2>&1; then
     if [ -n "${DISPLAY:-}${WAYLAND_DISPLAY:-}" ]; then
