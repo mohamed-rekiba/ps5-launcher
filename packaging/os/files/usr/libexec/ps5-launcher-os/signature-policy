@@ -1,0 +1,129 @@
+#!/usr/bin/bash
+# Turns on bootc's signature enforcement for this system's own image (ps5-signature-policy.service,
+# at every start; it changes something only once).
+#
+# The installer's bootc command cannot enforce signatures, so a fresh install follows its image
+# with an "unverified" origin (bootc status shows no signature). The image's containers policy
+# (/etc/containers/policy.json) already refuses an unsigned image of our repository on every
+# pull, but bootc stores the choice only with `bootc switch --enforce-container-sigpolicy`. Then
+# bootc also refuses to pull when the policy accepts anything by default. So, when the booted
+# system follows our repository without that choice, this runs, under the lock it shares with the
+# root helper and the boot health check:
+#   main:   bootc switch --enforce-container-sigpolicy <the tag it follows>
+#   nvidia: bootc switch --enforce-container-sigpolicy <repository>@<booted digest>
+#           (the NVIDIA image follows digests, so the helper's Secure Boot key check is never
+#           skipped; nothing new is downloaded)
+# The switch stages a deployment of the same image (or of a newer, signed one on main); it is
+# booted at the next restart. Without a network it fails, and the next start tries again.
+#
+# Only on a fresh install: nothing staged and no rollback deployment. After the boot health
+# check rolled back to the installed deployment (whose origin is unverified), staging again here
+# would bring back the image that just failed. There the root helper stores the enforcement at
+# its next update or switch, and the containers policy refuses unsigned images in the meantime.
+#
+# Considered and not used: `bootc switch --mutate-in-place` (hidden in bootc 1.16.13, cli.rs
+# 184-188) rewrites the newest deployment's origin without a download, but it picks the
+# deployment by mtime and writes under /sysroot, which a booted system mounts read-only.
+# `--retain` changes nothing here: it only keeps an ostree "refspec" origin (cli.rs 1573-1582),
+# which container deployments do not have.
+#
+# It writes $state (0644, for the launcher to show) with "version": 1 and "state":
+#   enforced       bootc stores the enforcement for this system's image
+#   not-our-image  the system follows another image (a local test build): nothing to do
+#   not-enforced   not a fresh install (a deployment is staged, or there is a rollback): the
+#                  helper stores the enforcement at its next update or switch
+#   failed         the switch failed; "reason" says why. The unit fails too, so systemd shows it.
+#
+# The fixed paths below are changed only by test-signature-policy.sh, on a copy.
+set -uo pipefail
+os_release=/usr/lib/ps5-launcher/os-release
+state=/var/lib/ps5-launcher-os/signature-policy.json
+lock_file=/run/ps5-launcher-os.lock
+lock_wait=60
+deadline=1800
+PATH=/usr/sbin:/usr/bin
+export PATH
+umask 022
+
+log() { echo "ps5-signature-policy: $*"; }
+marker() { sed -n "s/^$1=//p" "$os_release" | head -1; }
+
+# Write the state file atomically: STATE REASON IMAGE
+record() {
+    local tmp
+    mkdir -p "$(dirname "$state")"
+    tmp=$(mktemp "$state.XXXXXX") || return 1
+    jq -n --arg s "$1" --arg why "$2" --arg i "$3" --arg t "$(date -u +%Y-%m-%dT%H:%M:%SZ)" \
+        '{version: 1, state: $s, reason: $why, image: $i, time: $t}' > "$tmp" &&
+        chmod 0644 "$tmp" && mv -f "$tmp" "$state"
+    log "$1: $2 ($3)"
+}
+
+# bootc status as JSON (bootc may print a line before it).
+status() { timeout -k 10 60 bootc status --json --format-version=1 2>/dev/null | sed -n '/{/,$p'; }
+
+ref=$(marker IMAGE_REF)
+variant=$(marker IMAGE)
+repo=${ref%:*}
+if [ -z "$ref" ] || [ "$repo" = "$ref" ]; then
+    record failed "$os_release has no IMAGE_REF" ""
+    exit 1
+fi
+
+json=$(status) || json=""
+if ! spec=$(jq -er '.spec.image | select(.image != null) | "\(.transport) \(.signature // "none") \(.image)"' <<<"$json" 2>/dev/null); then
+    record failed "bootc status gave no image" ""
+    exit 1
+fi
+read -r transport signature image <<<"$spec"
+if [ "$signature" = containerPolicy ]; then
+    record enforced "bootc enforces the signature policy" "$image"
+    exit 0
+fi
+case $image in "$repo:"* | "$repo@"*) ;; *) image_repo=other ;; esac
+if [ "$transport" != registry ] || [ "${image_repo:-}" = other ]; then
+    record not-our-image "the system follows $transport $image, not $repo" "$image"
+    exit 0
+fi
+
+if [ "$(jq -r '(.status.staged == null) and (.status.rollback == null)' <<<"$json")" != true ]; then
+    record not-enforced "not a fresh install: the next update or switch stores the enforcement" "$image"
+    exit 0
+fi
+
+case $variant in
+nvidia)
+    booted=$(jq -er '.status.booted.image.imageDigest' <<<"$json" 2>/dev/null)
+    if ! [[ $booted =~ ^sha256:[0-9a-f]{64}$ ]]; then
+        record failed "no booted digest in bootc status" "$image"
+        exit 1
+    fi
+    target=$repo@$booted
+    ;;
+*) target=$image ;;
+esac
+
+# Up to 2 minutes for a network, before the lock; bootc says what is wrong when there is none.
+timeout -k 5 130 nm-online -q -t 120 || log "no network yet"
+exec 9>>"$lock_file"
+if ! flock -w "$lock_wait" 9; then
+    record failed "another system task held the lock; the next start tries again" "$image"
+    exit 1
+fi
+# The helper may have staged an enforced image meanwhile.
+if [ "$(status | jq -r '.spec.image.signature // "none"' 2>/dev/null)" = containerPolicy ]; then
+    record enforced "bootc enforces the signature policy" "$image"
+    exit 0
+fi
+log "bootc switch --enforce-container-sigpolicy $target"
+if ! out=$(timeout -k 10 "$deadline" bootc switch --enforce-container-sigpolicy "$target" 2>&1); then
+    log "$out"
+    record failed "bootc switch failed: $(tail -1 <<<"$out")" "$target"
+    exit 1
+fi
+# The stored choice is in bootc's spec (the staged deployment's origin).
+if [ "$(status | jq -r '.spec.image.signature // "none"' 2>/dev/null)" != containerPolicy ]; then
+    record failed "bootc switch ran, but bootc status shows no enforcement" "$target"
+    exit 1
+fi
+record enforced "bootc enforces the signature policy from the next restart on" "$target"

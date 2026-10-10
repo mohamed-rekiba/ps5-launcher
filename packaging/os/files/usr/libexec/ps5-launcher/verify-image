@@ -1,0 +1,105 @@
+#!/usr/bin/python3 -I
+"""Check one image digest against the system's signature policy, without downloading it.
+
+    verify-image NAME@sha256:<hex> [LABEL]
+
+The root helper runs it before it trusts an image (update-check, queue-key and staging). It asks
+skopeo's image proxy (`skopeo experimental-image-proxy`, the same code bootc pulls through) to
+open the image. Opening checks /etc/containers/policy.json, with the signatures that
+/etc/containers/registries.d names, before it reads anything else. So only the manifest, the
+signatures and the config are downloaded, never a layer.
+
+Exit 0: the policy accepts the image, and the manifest's digest is exactly the one asked for.
+It then prints the value of LABEL from that image's config (an empty line when the label is
+missing). Exit 1: anything else, with the reason on stderr.
+"""
+import json
+import os
+import re
+import socket
+import subprocess
+import sys
+import threading
+
+MAX_MSG = 32 * 1024
+
+
+def fail(message):
+    print(f"verify-image: {message}", file=sys.stderr)
+    sys.exit(1)
+
+
+class Proxy:
+    def __init__(self):
+        self.sock, child = socket.socketpair(socket.AF_UNIX, socket.SOCK_SEQPACKET)
+        # skopeo comes from the caller's fixed PATH (the helper sets it).
+        self.proc = subprocess.Popen(
+            ["skopeo", "experimental-image-proxy", "--sockfd", str(child.fileno())],
+            pass_fds=[child.fileno()],
+            stdin=subprocess.DEVNULL,
+        )
+        child.close()
+
+    def call(self, method, *args):
+        self.sock.send(json.dumps({"method": method, "args": list(args)}).encode())
+        data, fds, _, _ = socket.recv_fds(self.sock, MAX_MSG, 1)
+        if not data:
+            fail(f"skopeo's image proxy stopped during {method}")
+        reply = json.loads(data)
+        payload = None
+        if fds:
+            # The proxy closes its end of the pipe only in FinishPipe, and its writer waits
+            # while the pipe is full: so read beside FinishPipe, not before it.
+            chunks = []
+            pipe = os.fdopen(fds[0], "rb")
+            reader = threading.Thread(target=lambda: chunks.append(pipe.read()), daemon=True)
+            reader.start()
+            done = self.call("FinishPipe", reply["pipeid"])[0]
+            reader.join(timeout=60)
+            pipe.close()
+            if not done.get("success"):
+                fail(f"{method}: {done.get('error')}")
+            if not chunks:
+                fail(f"{method}: no data from skopeo's image proxy")
+            payload = chunks[0]
+        if not reply.get("success"):
+            fail(f"{method}: {reply.get('error')}")
+        return reply, payload
+
+    def close(self):
+        try:
+            self.sock.send(json.dumps({"method": "Shutdown", "args": []}).encode())
+        except OSError:
+            pass
+        self.sock.close()
+        self.proc.wait(timeout=30)
+
+
+def main():
+    if len(sys.argv) not in (2, 3):
+        print(__doc__.strip().splitlines()[2].strip(), file=sys.stderr)
+        sys.exit(2)
+    ref = sys.argv[1]
+    label = sys.argv[2] if len(sys.argv) == 3 else None
+    match = re.fullmatch(r"([a-z0-9][a-z0-9./_:-]*)@(sha256:[0-9a-f]{64})", ref)
+    if not match:
+        fail(f"not NAME@sha256:<digest>: {ref}")
+    want = match.group(2)
+    proxy = Proxy()
+    try:
+        proxy.call("Initialize")
+        # The policy decides here: an unsigned image, or one signed with another key, fails.
+        image = proxy.call("OpenImage", f"docker://{ref}")[0]["value"]
+        # The digest of the manifest that was checked must be the one asked for (a manifest
+        # list would resolve to an instance with another digest: refused).
+        got = proxy.call("GetManifest", image)[0]["value"]
+        if got != want:
+            fail(f"{ref} resolved to {got}")
+        config = json.loads(proxy.call("GetFullConfig", image)[1] or b"{}")
+    finally:
+        proxy.close()
+    if label is not None:
+        print(((config.get("config") or {}).get("Labels") or {}).get(label, ""))
+
+
+main()

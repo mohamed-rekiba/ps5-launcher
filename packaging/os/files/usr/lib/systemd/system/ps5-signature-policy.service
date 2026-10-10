@@ -1,0 +1,19 @@
+[Unit]
+Description=PS5 Launcher OS: make bootc enforce the image signature policy
+Documentation=file:/usr/libexec/ps5-launcher-os/signature-policy
+# A fresh install needs the network once, to stage the enforced deployment. It runs beside the
+# graphical start: Type=exec does not hold multi-user.target back, and the script waits for the
+# network itself (an After=network-online.target would hold the login screen back on a PC
+# without a network). Not in recovery mode.
+After=local-fs.target
+ConditionKernelCommandLine=!systemd.unit=ps5-recovery.target
+
+[Service]
+Type=exec
+ExecStart=/usr/libexec/ps5-launcher-os/signature-policy
+Restart=no
+# The script waits up to 130 s for a network and 60 s for the lock; bootc switch gets 1800 s.
+RuntimeMaxSec=2100
+
+[Install]
+WantedBy=multi-user.target

@@ -6,6 +6,8 @@
 #   BASE_IMAGE    fedora-bootc by digest (quay.io/fedora/fedora-bootc@sha256:...)
 #   IMAGE_REF     the channel this image follows (ghcr.io/OWNER/ps5-launcher-fedora:main)
 #   CERT_SHA256   SHA-256 of secureboot/public_key.der, the key that signs the NVIDIA modules
+# The image signing key's public half comes in as signing/cosign.pub; the containers policy
+# (signing/*.in) requires it for IMAGE_REF's repository.
 #   LAUNCHER_VERSION  the version of the launcher rpm in launcher/
 ARG BASE_IMAGE=quay.io/fedora/fedora-bootc:44
 FROM ${BASE_IMAGE}
@@ -69,16 +71,32 @@ COPY files/ /
 # The certificate the NVIDIA image's modules are signed with, named by its SHA-256. The helper
 # finds the one that matches a new image's label, so a key rotation can ship two side by side.
 COPY secureboot/public_key.der /tmp/secureboot.der
+COPY signing/ /tmp/signing/
 
 RUN set -eux; \
     case $IMAGE_REF in ?*/?*:?*) ;; *) echo "IMAGE_REF must be NAME:TAG, got '$IMAGE_REF'" >&2; exit 1 ;; esac; \
+    # The signature policy: reject by default; this image's own repository only with a signature
+    # by the shipped key (packaging/os/signing/README.md). The repository is IMAGE_REF's name.
+    # Local transports (containers-storage, oci, dir, archives) stay allowed: bootc install run
+    # from this image (image-builder) reads it from containers-storage under this very policy.
+    repo=${IMAGE_REF%:*}; \
+    printf '%s' "$repo" | grep -qxE '[a-z0-9][a-z0-9.:-]*(/[a-z0-9][a-z0-9._-]*)+'; \
+    mkdir -p /usr/share/ps5-launcher/signing; \
+    install -m 0644 /tmp/signing/cosign.pub /usr/share/ps5-launcher/signing/cosign.pub; \
+    openssl pkey -pubin -in /usr/share/ps5-launcher/signing/cosign.pub -noout; \
+    sed "s|@REPOSITORY@|$repo|" /tmp/signing/policy.json.in > /etc/containers/policy.json; \
+    sed "s|@REPOSITORY@|$repo|" /tmp/signing/registries.yaml.in > /etc/containers/registries.d/ps5-launcher.yaml; \
+    chmod 0644 /etc/containers/policy.json /etc/containers/registries.d/ps5-launcher.yaml; \
+    jq -e --arg r "$repo" '.default == [{"type": "reject"}] and (.transports.docker | keys == [$r])' \
+        /etc/containers/policy.json; \
     [ "$(sha256sum /tmp/secureboot.der | cut -d' ' -f1)" = "$CERT_SHA256" ]; \
     mkdir -p /usr/share/ps5-launcher/secureboot; \
     mv /tmp/secureboot.der "/usr/share/ps5-launcher/secureboot/$CERT_SHA256.der"; \
     chmod 0644 "/usr/share/ps5-launcher/secureboot/$CERT_SHA256.der"; \
-    chmod 0755 /usr/libexec/ps5-launcher-os/* /usr/libexec/ps5-launcher/helper; \
+    chmod 0755 /usr/libexec/ps5-launcher-os/* /usr/libexec/ps5-launcher/helper \
+        /usr/libexec/ps5-launcher/verify-image; \
     systemctl enable sddm.service ps5-launcher-os-autologin.service ps5-boot-health.service \
-        firewalld.service; \
+        ps5-signature-policy.service firewalld.service; \
     systemctl set-default graphical.target; \
     # Updates go only through the launcher's helper, which checks the NVIDIA signing key and
     # never restarts the PC by itself; bootc's own timer would apply and reboot.
@@ -93,7 +111,9 @@ RUN set -eux; \
     printf 'IMAGE=main\nIMAGE_REF=%s\n' "$IMAGE_REF" > /usr/lib/ps5-launcher/os-release; \
     /usr/bin/ps5-launcher --version; \
     # The helper needs these to check a new image's signing key before it stages the image.
-    for tool in skopeo mokutil pkexec bootc; do command -v "$tool"; done; \
+    for tool in skopeo mokutil pkexec bootc python3; do command -v "$tool"; done; \
+    # ps5-signature-policy.service needs these.
+    for tool in nm-online flock jq; do command -v "$tool"; done; \
     # The boot health check (/usr/libexec/ps5-launcher-os/boot-health) needs these.
     for tool in jq python3 flock pgrep; do command -v "$tool"; done; \
     rm -rf /var/cache/* /var/log/* /tmp/*; \

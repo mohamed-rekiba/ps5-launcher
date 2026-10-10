@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # Check a built PS5 Launcher OS image, without booting it: packages, libraries, services, the OS
-# marker, the Secure Boot certificate and the labels. CI runs it on every image before it is
+# marker, the Secure Boot certificate, the image signature policy and its key, and the labels. CI runs it on every image before it is
 # pushed; it works on a local build too.
 #
 #   packaging/os/check-image.sh main   IMAGE IMAGE_REF CERT_SHA256
@@ -8,7 +8,9 @@
 #
 # IMAGE: the image to check. IMAGE_REF: the channel it must name. CERT_SHA256: the certificate it
 # must ship and label. MAIN_IMAGE (nvidia): the main image it was built on; its kernel must be
-# the same. ENGINE: podman (default) or docker.
+# the same. ENGINE: podman (default) or docker. SIGNING_PUBKEY_FILE: the image signing public key
+# the image must ship (default packaging/os/signing/cosign.pub); its policy must require it for
+# IMAGE_REF's repository, exactly as packaging/os/signing/*.in say.
 set -euo pipefail
 variant=${1:?main or nvidia}
 image=${2:?image to check}
@@ -16,9 +18,26 @@ image_ref=${3:?the channel the image follows}
 cert_sha256=${4:?SHA-256 of the Secure Boot certificate}
 main_image=${5:-}
 engine=${ENGINE:-podman}
+signing_pub=${SIGNING_PUBKEY_FILE:-packaging/os/signing/cosign.pub}
+here=$(dirname "$0")
 
 label() { "$engine" image inspect --format "{{ index .Config.Labels \"$1\" }}" "$image"; }
 fail() { echo "FAIL $*" >&2; exit 1; }
+
+[ -f "$signing_pub" ] || fail "no image signing public key at $signing_pub (packaging/os/signing/README.md)"
+signing_sha256=$(sha256sum "$signing_pub" | cut -d' ' -f1)
+repo=${image_ref%:*}
+policy_json=$(sed "s|@REPOSITORY@|$repo|" "$here/signing/policy.json.in")
+registries_yaml=$(sed "s|@REPOSITORY@|$repo|" "$here/signing/registries.yaml.in")
+# The rules the policy must keep, whatever else the template says: reject by default, only our
+# repository under docker, only with our key, and containers-storage allowed (bootc install run
+# from the image reads it from there, under this policy).
+# shellcheck disable=SC2016 # jq variables, not shell ones
+policy_rules='.default == [{"type": "reject"}]
+    and (.transports.docker | keys == [$r])
+    and .transports.docker[$r] == [{"type": "sigstoreSigned", "keyPath": $k,
+        "signedIdentity": {"type": "matchRepository"}}]
+    and .transports["containers-storage"][""] == [{"type": "insecureAcceptAnything"}]'
 
 [ "$(label io.github.ps5-launcher.secureboot-cert-sha256)" = "$cert_sha256" ] ||
     fail "label io.github.ps5-launcher.secureboot-cert-sha256 is not $cert_sha256"
@@ -43,7 +62,9 @@ esac
 # shellcheck disable=SC2016 # the script expands its variables inside the image, on purpose
 "$engine" run --rm --platform linux/amd64 --entrypoint /usr/bin/bash \
     -e VARIANT="$variant" -e IMAGE_REF="$image_ref" -e CERT_SHA256="$cert_sha256" \
-    -e MAIN_KERNEL="${main_kernel:-}" "$image" -euo pipefail -c '
+    -e MAIN_KERNEL="${main_kernel:-}" -e REPOSITORY="$repo" -e SIGNING_SHA256="$signing_sha256" \
+    -e POLICY_JSON="$policy_json" -e POLICY_RULES="$policy_rules" -e REGISTRIES_YAML="$registries_yaml" \
+    "$image" -euo pipefail -c '
 ok() { echo "ok   $*"; }
 fail() { echo "FAIL $*" >&2; exit 1; }
 rpm -q sddm gamescope xorg-x11-server-Xwayland mesa-vulkan-drivers mesa-va-drivers-freeworld \
@@ -62,7 +83,8 @@ for tool in skopeo mokutil pkexec bootc xdotool xrandr lspci; do
 done
 ok "tools"
 ps5-launcher --version
-for unit in sddm.service ps5-launcher-os-autologin.service ps5-boot-health.service firewalld.service; do
+for unit in sddm.service ps5-launcher-os-autologin.service ps5-boot-health.service \
+    ps5-signature-policy.service firewalld.service; do
     [ "$(systemctl is-enabled "$unit")" = enabled ] || fail "$unit is not enabled"
 done
 [ "$(systemctl get-default)" = graphical.target ] || fail "the default target is not graphical"
@@ -77,11 +99,11 @@ done
 grep -qx "disable sshd.service" /usr/lib/systemd/system-preset/10-ps5-launcher-os.preset ||
     fail "no preset keeps sshd off at the first start"
 ok "SSH server off (sshd.service, sshd.socket, and the preset)"
-for unit in firewalld.service ps5-boot-health.service; do
+for unit in firewalld.service ps5-boot-health.service ps5-signature-policy.service; do
     grep -qx "enable $unit" /usr/lib/systemd/system-preset/10-ps5-launcher-os.preset ||
         fail "no preset enables $unit"
 done
-ok "the firewall and the boot health check on (units and preset)"
+ok "the firewall, the boot health check and the signature enforcement on (units and preset)"
 # The firewall: Samba waits (file sharing comes later); SSH stays allowed, for an owner who turns
 # the server on, and for the install test.
 zone=$(firewall-offline-cmd --get-default-zone)
@@ -94,7 +116,8 @@ for exe in /usr/libexec/ps5-launcher-os/boot-health /usr/libexec/ps5-launcher-os
     /usr/libexec/ps5-launcher-os/power-key-hold; do
     [ "$(stat -c %a "$exe")" = 755 ] || fail "$exe is not mode 0755"
 done
-systemd-analyze verify --man=no ps5-boot-health.service ps5-recovery.target ps5-recovery-menu.service ||
+systemd-analyze verify --man=no ps5-boot-health.service ps5-recovery.target ps5-recovery-menu.service \
+    ps5-signature-policy.service ||
     fail "systemd-analyze verify found errors in the new units"
 [ "$(systemctl is-enabled ps5-recovery-menu.service || true)" = static ] ||
     fail "ps5-recovery-menu.service must only start with ps5-recovery.target"
@@ -119,6 +142,25 @@ cert=/usr/share/ps5-launcher/secureboot/$CERT_SHA256.der
 [ -f "$cert" ] && [ "$(sha256sum "$cert" | cut -d" " -f1)" = "$CERT_SHA256" ] ||
     fail "the certificate $cert is missing or wrong"
 ok "Secure Boot certificate $cert"
+# The image signature policy (packaging/os/signing/README.md): the shipped key, a policy that
+# refuses everything by default and requires that key for this repository, and sigstore
+# attachments for it.
+key=/usr/share/ps5-launcher/signing/cosign.pub
+[ -f "$key" ] && [ "$(sha256sum "$key" | cut -d" " -f1)" = "$SIGNING_SHA256" ] &&
+    [ "$(stat -c %a "$key")" = 644 ] || fail "the signing key $key is missing, not 0644, or not the expected key"
+policy=/etc/containers/policy.json
+[ "$(jq -S . "$policy")" = "$(jq -S . <<<"$POLICY_JSON")" ] ||
+    fail "$policy is not packaging/os/signing/policy.json.in for $REPOSITORY"
+jq -e --arg r "$REPOSITORY" --arg k "$key" "$POLICY_RULES" "$policy" >/dev/null ||
+    fail "$policy does not require the signing key for $REPOSITORY only"
+printf "%s\n" "$REGISTRIES_YAML" | cmp -s - /etc/containers/registries.d/ps5-launcher.yaml ||
+    fail "registries.d/ps5-launcher.yaml is not packaging/os/signing/registries.yaml.in for $REPOSITORY"
+for exe in /usr/libexec/ps5-launcher/verify-image /usr/libexec/ps5-launcher-os/signature-policy; do
+    [ "$(stat -c %a "$exe")" = 755 ] || fail "$exe is not mode 0755"
+done
+python3 -I -c "import ast, sys; ast.parse(open(sys.argv[1]).read())" /usr/libexec/ps5-launcher/verify-image ||
+    fail "verify-image does not parse"
+ok "signature policy: reject by default; $REPOSITORY only signed by $key (sha256 $SIGNING_SHA256)"
 kver=$(ls /usr/lib/modules)
 [ "$(echo "$kver" | wc -l)" = 1 ] || fail "more than one kernel: $kver"
 case $VARIANT in

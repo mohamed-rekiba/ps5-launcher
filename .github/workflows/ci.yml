@@ -51,6 +51,8 @@ jobs:
         run: packaging/os/test-boot-health.sh
       - name: Test PS5 Launcher OS's recovery menu
         run: packaging/os/test-recovery-menu.sh
+      - name: Test PS5 Launcher OS's signature enforcement unit
+        run: packaging/os/test-signature-policy.sh
       - name: Smoke test the binary
         run: scripts/smoke-test.sh target/ci/ps5-launcher
       - if: failure()

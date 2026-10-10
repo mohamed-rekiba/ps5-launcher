@@ -14,6 +14,9 @@
 #   IMAGE:nvidia). CI sets the release channel, ghcr.io/OWNER/ps5-launcher-fedora:main.
 # SECUREBOOT_CERT_FILE: the certificate of the key that signs the NVIDIA modules (default:
 #   packaging/os/secureboot/public_key.der). Both images ship it.
+# SIGNING_PUBKEY_FILE: the public key the images are signed with (default:
+#   packaging/os/signing/cosign.pub). Both images ship it, with a containers policy that requires
+#   it for the image's own repository (the name part of IMAGE_REF).
 #
 # main only:
 # LAUNCHER_RPM: the launcher rpm (from packaging/linux/nfpm.yaml). Required.
@@ -29,6 +32,7 @@ engine=${ENGINE:-podman}
 image=${IMAGE:-localhost/ps5-launcher-fedora}
 image_ref=${IMAGE_REF:-$image:$variant}
 cert=${SECUREBOOT_CERT_FILE:-packaging/os/secureboot/public_key.der}
+signing_pub=${SIGNING_PUBKEY_FILE:-packaging/os/signing/cosign.pub}
 ctx=target/os/context
 
 case $variant in
@@ -45,10 +49,18 @@ if [ ! -f "$cert" ]; then
     exit 1
 fi
 cert_sha256=$(sha256sum "$cert" | cut -d' ' -f1)
+if [ ! -f "$signing_pub" ]; then
+    echo "No image signing public key at $signing_pub." >&2
+    echo "The project owner makes it once: see packaging/os/signing/README.md." >&2
+    echo "For a local test build, make a throwaway one with packaging/os/make-test-key.sh." >&2
+    exit 1
+fi
 
 rm -rf "$ctx"
-mkdir -p "$ctx/launcher" "$ctx/secureboot"
+mkdir -p "$ctx/launcher" "$ctx/secureboot" "$ctx/signing"
 cp "$cert" "$ctx/secureboot/public_key.der"
+cp "$signing_pub" "$ctx/signing/cosign.pub"
+cp packaging/os/signing/policy.json.in packaging/os/signing/registries.yaml.in "$ctx/signing/"
 cp -R packaging/os/files packaging/os/nvidia "$ctx/"
 
 # x86_64 images, also on an Apple Silicon Mac (emulated there, so slow, and without the lint,

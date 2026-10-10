@@ -9,7 +9,8 @@
 #   helper clear-next-session        forget that (Plasma's autostart, and every boot)
 #   helper status                    bootc status --json (it needs root on a booted system)
 #   helper update-check              is a system update available? (On the NVIDIA image it
-#                                    prints update-available <digest> or up-to-date.)
+#                                    prints update-available <digest> or up-to-date.) A channel
+#                                    whose image is not signed with our key fails.
 #   helper update                    download a system update; it installs at the next restart
 #   helper rollback                  start the previous system at the next restart
 #   helper switch main|nvidia        change to the main or the NVIDIA image (next restart)
@@ -20,6 +21,13 @@
 #   helper set-timezone <zone>       set the time zone to one that timedatectl lists
 #   helper set-ntp on|off            set the time automatically, or not
 #   helper health-ack                delete the boot health check's notice (the launcher showed it)
+#
+# Image signatures (packaging/os/signing/README.md): every image this helper trusts is checked
+# first, by its exact digest, against the system's containers policy and the shipped key, with
+# $verify (skopeo's image proxy; only the manifest, the signatures and the config are fetched).
+# Its labels are then read from that same checked digest. Every bootc switch passes
+# --enforce-container-sigpolicy, so bootc stores the choice and its later pulls require it too.
+# An image that fails the check stops the task (exit 1) before bootc or mokutil runs.
 #
 # update, switch and rollback hold $lock_file while they run, and so does the boot health check
 # (/usr/libexec/ps5-launcher-os/boot-health) before it rolls back: the two never change the
@@ -37,6 +45,7 @@ cert_dir=/usr/share/ps5-launcher/secureboot
 state_dir=/var/lib/ps5-launcher
 health_dir=/var/lib/ps5-launcher-os/health
 lock_file=/run/ps5-launcher-os.lock
+verify=/usr/libexec/ps5-launcher/verify-image
 # How long a task may run, in seconds. timeout runs as root here, so it can stop the work; the
 # launcher's own deadline cannot stop a process pkexec started as root.
 short=30
@@ -81,14 +90,20 @@ secure_boot() {
     esac
 }
 
-# The digest of `ref` in the registry, and the certificate file its label names.
-# Sets $digest and $cert.
-resolve() {
-    out=$(timeout -k 10 "$check" skopeo inspect --format "{{.Digest}} {{index .Labels \"$cert_label\"}}" "docker://$1") ||
+# The digest `ref` (NAME:TAG) points at now, checked against the signature policy. Sets $digest,
+# and $sha: the certificate label of that checked digest. skopeo inspect checks no signature, so
+# it only finds the digest; $verify then checks exactly that digest and reads its label.
+verified_digest() {
+    digest=$(timeout -k 10 "$check" skopeo inspect --format "{{.Digest}}" "docker://$1") ||
         fail "could not read $1"
-    digest=${out%% *}
-    sha=${out#* }
-    case "$digest" in sha256:*) ;; *) fail "no digest for $1" ;; esac
+    printf '%s' "$digest" | grep -qxE 'sha256:[0-9a-f]{64}' || fail "no digest for $1"
+    sha=$(timeout -k 10 "$check" "$verify" "${1%:*}@$digest" "$cert_label") ||
+        fail "${1%:*}@$digest: no valid signature by this system's image signing key"
+}
+
+# verified_digest, and the certificate file the checked label names. Sets $digest and $cert.
+resolve() {
+    verified_digest "$1"
     printf '%s' "$sha" | grep -qxE '[0-9a-f]{64}' || fail "$1 has no valid $cert_label label"
     cert="$cert_dir/$sha.der"
     # Only a real file in the system's own folder, whose contents are what the label names.
@@ -143,9 +158,17 @@ stage_nvidia() {
             ;;
         esac
     fi
-    timeout -k 10 "$long" bootc switch "${ref%:*}@$digest"
+    timeout -k 10 "$long" bootc switch --enforce-container-sigpolicy "${ref%:*}@$digest"
     remember_digest "$digest"
     exit 0
+}
+
+# Whether bootc stores the signature enforcement for the image it follows (bootc status shows
+# "signature": "containerPolicy" in its spec; a fresh install has none until
+# ps5-signature-policy.service ran).
+enforced() {
+    [ "$(timeout -k 10 "$short" bootc status --json --format-version=1 | sed -n '/{/,$p' |
+        jq -r '.spec.image.signature // empty')" = containerPolicy ]
 }
 
 [ $# -ge 1 ] || usage
@@ -182,6 +205,7 @@ case "$task $#" in
         fi
         exit 0
     fi
+    verified_digest "$(marker IMAGE_REF)"
     exec timeout -k 10 "$check" bootc upgrade --check
     ;;
 "update 0")
@@ -191,7 +215,15 @@ case "$task $#" in
     if [ "$(marker IMAGE)" = nvidia ]; then
         stage_nvidia "$(marker IMAGE_REF)"
     fi
-    exec timeout -k 10 "$long" bootc upgrade
+    # bootc upgrade follows the stored choice. Without it (a rollback to the installed system),
+    # the same channel is switched to with the enforcement, which also stages its newest image.
+    if enforced; then
+        exec timeout -k 10 "$long" bootc upgrade
+    fi
+    ref=$(marker IMAGE_REF)
+    [ -n "$ref" ] || fail "$os_release has no IMAGE_REF"
+    verified_digest "$ref"
+    exec timeout -k 10 "$long" bootc switch --enforce-container-sigpolicy "$ref"
     ;;
 "rollback 0")
     lock
@@ -203,7 +235,10 @@ case "$task $#" in
     ref=$(marker IMAGE_REF)
     [ -n "$ref" ] || fail "$os_release has no IMAGE_REF"
     case "$1" in
-    main) exec timeout -k 10 "$long" bootc switch "${ref%:*}:main" ;;
+    main)
+        verified_digest "${ref%:*}:main"
+        exec timeout -k 10 "$long" bootc switch --enforce-container-sigpolicy "${ref%:*}:main"
+        ;;
     nvidia) stage_nvidia "${ref%:*}:nvidia" ;;
     *) usage ;;
     esac
