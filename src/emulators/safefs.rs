@@ -79,6 +79,18 @@ fn stat_kind(mode: libc::mode_t) -> Kind {
     }
 }
 
+fn set_errno(value: libc::c_int) {
+    // SAFETY: the C library's errno location for this thread, always valid to write.
+    #[cfg(target_os = "macos")]
+    unsafe {
+        *libc::__error() = value;
+    }
+    #[cfg(target_os = "linux")]
+    unsafe {
+        *libc::__errno_location() = value;
+    }
+}
+
 impl Dir {
     /// Open the starting folder by its path (a link there is followed).
     pub fn open(path: &Path) -> Result<Dir, Refused> {
@@ -175,9 +187,17 @@ impl Dir {
         // SAFETY: the dup shares its position with `self.fd`; start from the beginning.
         unsafe { libc::rewinddir(dirp) };
         loop {
+            // readdir returns null both at the end and on an error; only errno tells them
+            // apart, so it is cleared first. A listing is never quietly partial.
+            set_errno(0);
             // SAFETY: readdir returns null at the end, else an entry valid until the next call.
             let entry = unsafe { libc::readdir(dirp) };
             if entry.is_null() {
+                let e = io::Error::last_os_error();
+                if e.raw_os_error().unwrap_or(0) != 0 {
+                    unsafe { libc::closedir(dirp) };
+                    return Err(e);
+                }
                 break;
             }
             let name = unsafe { CStr::from_ptr((*entry).d_name.as_ptr()) }.to_bytes();
