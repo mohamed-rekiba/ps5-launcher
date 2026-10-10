@@ -44,8 +44,8 @@ RUN set -eux; \
         amd-gpu-firmware intel-gpu-firmware nvidia-gpu-firmware \
         NetworkManager NetworkManager-wifi bluez \
         pipewire pipewire-alsa pipewire-pulseaudio wireplumber \
-        udisks2 polkit \
-        skopeo mokutil pciutils; \
+        udisks2 polkit firewalld \
+        skopeo mokutil pciutils jq python3; \
     dnf -y install --setopt=install_weak_deps=False --allowerasing \
         ffmpeg-libs mesa-va-drivers-freeworld intel-media-driver; \
     # The fallback desktop behind "Switch to desktop": Plasma with what it needs to be usable.
@@ -77,7 +77,8 @@ RUN set -eux; \
     mv /tmp/secureboot.der "/usr/share/ps5-launcher/secureboot/$CERT_SHA256.der"; \
     chmod 0644 "/usr/share/ps5-launcher/secureboot/$CERT_SHA256.der"; \
     chmod 0755 /usr/libexec/ps5-launcher-os/* /usr/libexec/ps5-launcher/helper; \
-    systemctl enable sddm.service ps5-launcher-os-autologin.service; \
+    systemctl enable sddm.service ps5-launcher-os-autologin.service ps5-boot-health.service \
+        firewalld.service; \
     systemctl set-default graphical.target; \
     # Updates go only through the launcher's helper, which checks the NVIDIA signing key and
     # never restarts the PC by itself; bootc's own timer would apply and reboot.
@@ -93,6 +94,8 @@ RUN set -eux; \
     /usr/bin/ps5-launcher --version; \
     # The helper needs these to check a new image's signing key before it stages the image.
     for tool in skopeo mokutil pkexec bootc; do command -v "$tool"; done; \
+    # The boot health check (/usr/libexec/ps5-launcher-os/boot-health) needs these.
+    for tool in jq python3 flock pgrep; do command -v "$tool"; done; \
     rm -rf /var/cache/* /var/log/* /tmp/*; \
     if [ "$LINT" = 1 ]; then bootc container lint; fi
 

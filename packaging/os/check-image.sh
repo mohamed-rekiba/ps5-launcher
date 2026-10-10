@@ -49,7 +49,7 @@ fail() { echo "FAIL $*" >&2; exit 1; }
 rpm -q sddm gamescope xorg-x11-server-Xwayland mesa-vulkan-drivers mesa-va-drivers-freeworld \
     ffmpeg-libs intel-media-driver mpv-libs yt-dlp alsa-lib plasma-workspace ps5-launcher \
     skopeo mokutil polkit NetworkManager bluez pipewire wireplumber udisks2 \
-    openssl openssh-server >/dev/null ||
+    openssl openssh-server firewalld jq python3 >/dev/null ||
     fail "a required package is missing"
 ok "required packages"
 # Loaded at run time by name (trailers, archive installs, sound).
@@ -62,7 +62,7 @@ for tool in skopeo mokutil pkexec bootc xdotool xrandr lspci; do
 done
 ok "tools"
 ps5-launcher --version
-for unit in sddm.service ps5-launcher-os-autologin.service; do
+for unit in sddm.service ps5-launcher-os-autologin.service ps5-boot-health.service firewalld.service; do
     [ "$(systemctl is-enabled "$unit")" = enabled ] || fail "$unit is not enabled"
 done
 [ "$(systemctl get-default)" = graphical.target ] || fail "the default target is not graphical"
@@ -77,6 +77,41 @@ done
 grep -qx "disable sshd.service" /usr/lib/systemd/system-preset/10-ps5-launcher-os.preset ||
     fail "no preset keeps sshd off at the first start"
 ok "SSH server off (sshd.service, sshd.socket, and the preset)"
+for unit in firewalld.service ps5-boot-health.service; do
+    grep -qx "enable $unit" /usr/lib/systemd/system-preset/10-ps5-launcher-os.preset ||
+        fail "no preset enables $unit"
+done
+ok "the firewall and the boot health check on (units and preset)"
+# The firewall: Samba waits (file sharing comes later); SSH stays allowed, for an owner who turns
+# the server on, and for the install test.
+zone=$(firewall-offline-cmd --get-default-zone)
+services=$(firewall-offline-cmd --zone="$zone" --list-services)
+case " $services " in *" samba "* | *" samba-client "*) fail "the firewall zone $zone opens Samba: $services" ;; esac
+case " $services " in *" ssh "*) ;; *) fail "the firewall zone $zone does not allow ssh: $services" ;; esac
+ok "firewall zone $zone: $services"
+# The boot health check, recovery mode and the power key.
+for exe in /usr/libexec/ps5-launcher-os/boot-health /usr/libexec/ps5-launcher-os/recovery-menu \
+    /usr/libexec/ps5-launcher-os/power-key-hold; do
+    [ "$(stat -c %a "$exe")" = 755 ] || fail "$exe is not mode 0755"
+done
+systemd-analyze verify --man=no ps5-boot-health.service ps5-recovery.target ps5-recovery-menu.service ||
+    fail "systemd-analyze verify found errors in the new units"
+[ "$(systemctl is-enabled ps5-recovery-menu.service || true)" = static ] ||
+    fail "ps5-recovery-menu.service must only start with ps5-recovery.target"
+grep -q "ConditionKernelCommandLine=!systemd.unit=ps5-recovery.target" /usr/lib/systemd/system/ps5-boot-health.service ||
+    fail "the boot health check would run in recovery mode"
+grep -qx "set timeout=5" /usr/lib/bootupd/grub2-static/configs.d/13_ps5-launcher-os.cfg ||
+    fail "no GRUB drop-in with a 5 s menu"
+[ -f /usr/lib/tmpfiles.d/ps5-launcher-os.conf ] && [ ! -e /var/lib/ps5-launcher-os ] ||
+    fail "the health folder must come from tmpfiles.d, not the image"
+ok "boot health check, recovery target and menu, GRUB menu drop-in"
+printf "%s\n" "SUBSYSTEM==\"input\", KERNEL==\"event*\", ATTRS{name}==\"Power Button\", TAG+=\"uaccess\"" |
+    cmp -s - /usr/lib/udev/rules.d/72-ps5-power-button.rules || fail "the power button udev rule is not the exact rule"
+udevadm verify /usr/lib/udev/rules.d/72-ps5-power-button.rules >/dev/null || fail "udevadm verify refuses the power button rule"
+systemd-analyze cat-config systemd/logind.conf | grep -qx "HandlePowerKey=suspend" ||
+    fail "logind does not read HandlePowerKey=suspend"
+systemd-analyze cat-config systemd/journald.conf | grep -qx "Storage=persistent" || fail "the journal is not persistent"
+ok "power key: udev rule, logind HandlePowerKey=suspend; persistent journal"
 printf "IMAGE=%s\nIMAGE_REF=%s\n" "$VARIANT" "$IMAGE_REF" | cmp -s - /usr/lib/ps5-launcher/os-release ||
     fail "the OS marker is not IMAGE=$VARIANT, IMAGE_REF=$IMAGE_REF"
 ok "OS marker: IMAGE=$VARIANT IMAGE_REF=$IMAGE_REF"

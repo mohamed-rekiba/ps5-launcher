@@ -13,6 +13,10 @@ part "checks"
 /usr/libexec/ps5-boottest-check main --session
 part "session log"
 tail -80 "$home/.cache/ps5-launcher-session.log"
+part "boot health check"
+journalctl -b --no-pager -u ps5-boot-health | tail -40
+cat /var/lib/ps5-launcher-os/health/notice.json
+echo
 part "sddm journal"
 journalctl -b --no-pager -u sddm | tail -60
 part "failed units"

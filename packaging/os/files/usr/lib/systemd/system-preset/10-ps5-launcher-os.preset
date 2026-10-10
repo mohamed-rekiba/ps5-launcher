@@ -1,5 +1,8 @@
-# PS5 Launcher OS: no SSH server by default. The image has an empty /etc/machine-id, so systemd
-# applies the presets at the first start, and Fedora's 90-default.preset would enable sshd
-# again. This file sorts first, so it wins. An owner or a kickstart can still enable sshd.
+# PS5 Launcher OS: the firewall and the boot health check on, and no SSH server by default. The
+# image has an empty /etc/machine-id, so systemd applies the presets at the first start, and
+# Fedora's 90-default.preset would enable sshd again. This file sorts first, so it wins. An owner
+# or a kickstart can still enable sshd.
 disable sshd.service
 disable sshd.socket
+enable firewalld.service
+enable ps5-boot-health.service

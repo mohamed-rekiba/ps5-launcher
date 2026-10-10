@@ -9,6 +9,12 @@
 # gamescope failed only because Vulkan has no usable device, and the session wrapper fell back to
 # Plasma through the root helper, whose one-time login Plasma then cleared.
 #
+# Every run also checks the firewall, the power key's files, the GRUB menu, and the boot health
+# check. CI has no GPU, so the session never reaches the launcher, and no start ever becomes
+# last-good: the health check must decide "unhealthy" and change nothing (no rollback queued, no
+# recovery recorded), and on a --session run that ended in Plasma, say "launcher not healthy
+# (Plasma fallback)".
+#
 # The boot test image runs it from ps5-boottest-report.service; the install test runs it over SSH.
 set -u
 want=${1:?main or nvidia}
@@ -120,6 +126,44 @@ if [ "$session" = --session ]; then
         ;;
     esac
 fi
+
+check "firewalld runs" systemctl is-active firewalld.service
+check "the firewall does not open Samba" \
+    sh -c "! firewall-cmd --list-services | grep -Eqw 'samba|samba-client'"
+check "the power button rule is installed" test -f /usr/lib/udev/rules.d/72-ps5-power-button.rules
+check "logind suspends on the power key" \
+    sh -c "systemd-analyze cat-config systemd/logind.conf | grep -qx HandlePowerKey=suspend"
+check "the journal is kept on disk" test -d /var/log/journal
+# bootupd joins the image's GRUB drop-ins into grub.cfg at install time.
+check "the GRUB menu shows for 5 seconds" grep -q "BEGIN 13_ps5-launcher-os.cfg" /boot/grub2/grub.cfg
+
+# The boot health check (ps5-boot-health.service) runs for up to 180 s after the start.
+health=/var/lib/ps5-launcher-os/health
+for _ in $(seq 60); do
+    [ "$(systemctl show -p ActiveState --value ps5-boot-health.service)" = activating ] ||
+        [ "$(systemctl show -p ActiveState --value ps5-boot-health.service)" = active ] || break
+    sleep 5
+done
+check "the boot health check ran and finished" \
+    sh -c "systemctl show -p ExecMainStartTimestampMonotonic --value ps5-boot-health.service | grep -qv '^0$' &&
+        ! systemctl is-active ps5-boot-health.service"
+check "  and exited 0" test "$(systemctl show -p ExecMainStatus --value ps5-boot-health.service)" = 0
+booted=$(bootc status --json --format-version=1 2>/dev/null | sed -n '/{/,$p' | jq -r '.status.booted.image.imageDigest')
+attempt="$health/attempts/${booted#sha256:}"
+check "  it recorded this start's attempt" test -f "$attempt"
+check "  with this boot's ID" test "$(jq -r .boot_id "$attempt" 2>/dev/null)" = "$(cat /proc/sys/kernel/random/boot_id)"
+check "  and found the start unhealthy (no GPU in a VM)" test "$(jq -r .result "$attempt" 2>/dev/null)" = unhealthy
+check "  so no start is last-good" test ! -e "$health/last-good"
+check "  and it did not roll back" sh -c "jq -r .action '$attempt' | grep -q '^none: '"
+check "  no rollback is queued" \
+    test "$(bootc status --json --format-version=1 2>/dev/null | sed -n '/{/,$p' | jq -r .status.rollbackQueued)" = false
+check "  no recovery is recorded" test ! -e "$health/transaction"
+check "  its notice is readable by the launcher" test "$(stat -c %a "$health/notice.json" 2>/dev/null)" = 644
+if [ "$session" = --session ] && [ "$outcome" = desktop ]; then
+    check "  its reason: launcher not healthy (Plasma fallback)" \
+        grep -qF "launcher not healthy (Plasma fallback)" "$attempt"
+fi
+echo "     health: $(jq -c '{result, reason, action}' "$attempt" 2>/dev/null)"
 
 if [ "$failures" = 0 ]; then
     echo "RESULT: PASS"
