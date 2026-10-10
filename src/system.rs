@@ -88,23 +88,6 @@ pub fn parse_logind_can(output: &str) -> Result<Can, String> {
     }
 }
 
-/// Run a system command and wait for it. An error names the command and carries its exit
-/// status and error output, for the UI to show. It blocks, so call it off the UI thread.
-pub fn run(cmd: &mut std::process::Command) -> Result<(), String> {
-    run_output(cmd).map(|_| ())
-}
-
-/// Same as `run`, and returns what the command printed on its standard output.
-pub fn run_output(cmd: &mut std::process::Command) -> Result<String, String> {
-    let name = format!("{cmd:?}");
-    let out = cmd.output().map_err(|e| format!("could not run {name}: {e}"))?;
-    if out.status.success() {
-        return Ok(String::from_utf8_lossy(&out.stdout).into_owned());
-    }
-    let stderr = String::from_utf8_lossy(&out.stderr);
-    Err(format!("{name} failed ({}): {}", out.status, stderr.trim()))
-}
-
 /// A password or another secret for a tool's standard input. Command-line arguments show in
 /// /proc to every process; stdin does not. It never prints: Debug shows dots, and there is no
 /// Display.
@@ -346,7 +329,7 @@ fn stop_group(group: libc::pid_t, child: &mut std::process::Child) {
     }
 }
 
-/// `run_output` with the call's time limit: what the tool printed, when it exited with 0.
+/// Run `call` within its time limit: what the tool printed, when it exited with 0.
 pub fn call(call: &Call) -> Result<String, String> {
     let ran = call_status(call)?;
     if ran.code == Some(0) { Ok(ran.stdout) } else { Err(ran.error(call)) }
@@ -604,25 +587,6 @@ mod tests {
     }
 
     #[test]
-    fn run_reports_the_exit_status() {
-        use std::process::Command;
-        assert_eq!(run(&mut Command::new("true")), Ok(()));
-        let failed = run(Command::new("sh").args(["-c", "echo refused >&2; exit 3"])).unwrap_err();
-        assert!(failed.contains("sh") && failed.contains('3') && failed.contains("refused"), "{failed}");
-        let missing = run(&mut Command::new("ps5-launcher-no-such-program")).unwrap_err();
-        assert!(missing.contains("ps5-launcher-no-such-program"), "{missing}");
-    }
-
-    #[test]
-    fn run_output_returns_what_the_command_prints() {
-        use std::process::Command;
-        assert_eq!(run_output(Command::new("sh").args(["-c", "echo 's \"yes\"'"])), Ok("s \"yes\"\n".into()));
-        let failed = run_output(Command::new("sh").args(["-c", "echo half; echo refused >&2; exit 3"])).unwrap_err();
-        assert!(failed.contains('3') && failed.contains("refused"), "{failed}");
-        assert!(run_output(&mut Command::new("ps5-launcher-no-such-program")).is_err());
-    }
-
-    #[test]
     fn a_call_runs_under_timeout() {
         let call = Call::new("nmcli", &["radio", "wifi"], 10);
         let cmd = call.command();
@@ -759,6 +723,7 @@ mod tests {
         assert_eq!(call_status(&Call::new("sh", &["-c", "exit 4"], 5)).unwrap().code, Some(4));
         let slow = call(&Call::new("sleep", &["5"], 1)).unwrap_err();
         assert!(slow.contains("did not answer within 1 s"), "{slow}");
+        assert!(call(&Call::new("ps5-launcher-no-such-program", &[], 5)).is_err());
     }
 
     fn end(id: &str, state: JobEnd) -> (String, String, JobEnd) {

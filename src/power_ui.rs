@@ -6,7 +6,6 @@ use crate::audio::{self, Sound};
 use crate::osupdate::HELPER;
 use crate::system::{self, Can, Choice, Guard, JobEnd, Mode, PowerAction, PowerCaps, WaitState, Work};
 use crate::PowerRow;
-use std::process::Command;
 use std::time::{Duration, Instant};
 
 /// Installed when Plasma is there to switch to ("Switch to desktop").
@@ -80,6 +79,30 @@ pub fn keep_selection(old: &[Row], new: &[Row], idx: usize) -> usize {
 
 /// "Switch to desktop" needs a desktop session and PS5 Launcher OS's root helper, which sets the
 /// next login. On another Linux PC there is no helper, so the row would only fail.
+/// The system command behind a power action, with its time limit; None when the launcher does
+/// it itself (Close game, Close launcher, Log out).
+pub fn power_call(action: PowerAction) -> Option<system::Call> {
+    use system::Call;
+    match action {
+        PowerAction::CloseGame | PowerAction::CloseLauncher | PowerAction::LogOut => None,
+        // systemctl only asks logind and returns; logind does the rest.
+        PowerAction::Sleep => Some(Call::new("systemctl", &["suspend"], 30)),
+        PowerAction::Restart { .. } => Some(Call::new("systemctl", &["reboot"], 30)),
+        PowerAction::PowerOff => Some(Call::new("systemctl", &["poweroff"], 30)),
+        // The helper only writes one small file.
+        PowerAction::SwitchToDesktop => Some(Call::new("pkexec", &[HELPER, "set-next-session", "plasma"], 60)),
+    }
+}
+
+/// logind's answer to "can this PC sleep?".
+pub fn can_sleep_call() -> system::Call {
+    system::Call::new(
+        "busctl",
+        &["--system", "call", "org.freedesktop.login1", "/org/freedesktop/login1", "org.freedesktop.login1.Manager", "CanSuspend"],
+        10,
+    )
+}
+
 pub fn can_switch_to_desktop(desktop_session: bool, helper: bool) -> bool {
     desktop_session && helper
 }
@@ -194,9 +217,7 @@ impl App {
             return;
         }
         std::thread::spawn(|| {
-            let mut cmd = Command::new("busctl");
-            cmd.args(["--system", "call", "org.freedesktop.login1", "/org/freedesktop/login1", "org.freedesktop.login1.Manager", "CanSuspend"]);
-            let can = system::run_output(&mut cmd).and_then(|out| system::parse_logind_can(&out)).unwrap_or_else(|e| {
+            let can = system::call(&can_sleep_call()).and_then(|out| system::parse_logind_can(&out)).unwrap_or_else(|e| {
                 crate::log!("CanSuspend: {e}");
                 Can::Na
             });
@@ -376,23 +397,20 @@ impl App {
                 Err(e) => crate::log!("Could not save the downloads to resume: {e}"),
             }
         }
-        let (program, args): (&str, &[&str]) = match action {
-            PowerAction::CloseGame => return self.stop_game(None),
-            // The normal quit path: downloads and installs shut down, and the process exits 0,
-            // which ends ps5-launcher-session (Log out).
-            PowerAction::CloseLauncher | PowerAction::LogOut => {
-                // Log out keeps its resume intent: the process ends now.
-                let _ = slint::quit_event_loop();
-                return;
+        let Some(call) = power_call(action) else {
+            match action {
+                PowerAction::CloseGame => self.stop_game(None),
+                // The normal quit path: downloads and installs shut down, and the process exits
+                // 0, which ends ps5-launcher-session (Log out). Log out keeps its resume intent:
+                // the process ends now.
+                _ => {
+                    let _ = slint::quit_event_loop();
+                }
             }
-            PowerAction::Sleep => ("systemctl", &["suspend"]),
-            PowerAction::Restart { .. } => ("systemctl", &["reboot"]),
-            PowerAction::PowerOff => ("systemctl", &["poweroff"]),
-            PowerAction::SwitchToDesktop => ("pkexec", &[HELPER, "set-next-session", "plasma"]),
+            return;
         };
-        let args: Vec<String> = args.iter().map(|a| a.to_string()).collect();
         std::thread::spawn(move || {
-            let result = system::run(Command::new(program).args(&args));
+            let result = system::call(&call).map(|_| ());
             post(move |app| match result {
                 // The next login goes to the desktop: end this session.
                 Ok(()) if action == PowerAction::SwitchToDesktop => {
@@ -488,6 +506,32 @@ mod tests {
         assert_eq!(keep_selection(&after, &before, 3), 2, "Log out moved up one row");
         assert_eq!(keep_selection(&[], &before, 0), 0);
         assert_eq!(keep_selection(&after, &[], 2), 0);
+    }
+
+    #[test]
+    fn power_actions_run_with_a_time_limit() {
+        let restart = power_call(Restart { update: true }).unwrap();
+        assert_eq!((restart.program, restart.args.clone()), ("systemctl", vec!["reboot".to_string()]));
+        assert_eq!(power_call(PowerOff).unwrap().args, ["poweroff"]);
+        assert_eq!(power_call(Sleep).unwrap().args, ["suspend"]);
+        let desktop = power_call(SwitchToDesktop).unwrap();
+        assert_eq!(desktop.program, "pkexec");
+        assert_eq!(desktop.args, [HELPER, "set-next-session", "plasma"]);
+        for action in [Sleep, Restart { update: false }, PowerOff, SwitchToDesktop] {
+            let secs = power_call(action).unwrap().secs;
+            assert!((10..=120).contains(&secs), "{action:?}: {secs} s");
+        }
+        for action in [CloseGame, CloseLauncher, LogOut] {
+            assert!(power_call(action).is_none(), "{action:?} is the launcher's own");
+        }
+    }
+
+    #[test]
+    fn the_sleep_check_asks_logind_with_a_time_limit() {
+        let call = can_sleep_call();
+        assert_eq!(call.program, "busctl");
+        assert_eq!(call.args.last().map(String::as_str), Some("CanSuspend"));
+        assert!(call.secs > 0 && call.secs <= 15);
     }
 
     #[test]
