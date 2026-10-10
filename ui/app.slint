@@ -1,10 +1,11 @@
-import { S, Theme, Icons, Zone, DownloadData, BootStep, ChipData, ActionData, TileData, HeroData, CardData, CardRow, GenreChip, Fact, FactRow, Shot, HubData, SettingData, ToastData, MenuItem, RunningData, PowerRow, QuickCard } from "theme.slint";
+import { S, Theme, Icons, Zone, DownloadData, BootStep, ChipData, ActionData, TileData, HeroData, CardData, CardRow, GenreChip, Fact, FactRow, Shot, HubData, SettingData, ToastData, MenuItem, RunningData, PowerRow, QuickCard, SettingsCat, SettingsHit } from "theme.slint";
 import { FocusRing, Chip, Btn, Kicker, Badge, Switch, KeyCap, BackButton, Shimmer, Cover } from "widgets.slint";
 import { DownloadsSheet, DownloadConsent } from "downloads.slint";
 import { LibraryFilter, LibrarySortPicker } from "library.slint";
 import { PowerMenu, PowerDialog, PowerCountdown } from "power.slint";
 import { QuickMenu } from "quick.slint";
-import { AboutSlint, Palette } from "std-widgets.slint";
+import { SettingsPage } from "settings.slint";
+import { Palette } from "std-widgets.slint";
 
 export { S, Theme, Zone }
 
@@ -236,10 +237,19 @@ export component AppWindow inherits Window {
     in-out property <length> hub-y;
     in property <length> shots-x;
 
+    // Settings: the rail's categories, the open one, and its page's rows.
+    in property <[SettingsCat]> settings-cats;
+    in property <int> settings-cat;
     in property <[SettingData]> settings;
     in-out property <length> settings-y;
     in property <int> edit-index: -1;
     in-out property <string> edit-text;
+    in-out property <string> settings-query;
+    in property <bool> settings-find-editing;
+    in property <[SettingsHit]> settings-hits;
+    // The page shows the About card (System and About pages), and the mode it names.
+    in property <bool> settings-about;
+    in property <string> settings-mode;
 
     in property <image> viewer-image;
     in property <string> viewer-count;
@@ -290,6 +300,9 @@ export component AppWindow inherits Window {
     callback search-edited(string);
     callback search-done(bool);                       // accepted (Enter)
     callback edit-done(string, bool);
+    callback settings-find-edited(string);
+    callback settings-find-done();
+    callback settings-back();
     callback download-confirm();
     callback download-action(string, string);
     callback toast-clicked(int, string);            // id, action
@@ -1166,176 +1179,17 @@ export component AppWindow inherits Window {
         }
 
         // ------------------------------------------------------------ SETTINGS
-        if root.overlay == 2: Rectangle {
-            property <bool> entered: false;
-            init => { entered = true; }
-            background: entered ? #03050ccc : #03050c00;
-            animate background { duration: 260ms; }
-            TouchArea { clicked => { root.click(Zone.settings, -1); } }
-            Rectangle {
-                x: root.width - (760px * S.k) + (entered ? 0 : (120px * S.k));
-                opacity: entered ? 1 : 0;
-                animate x { duration: 420ms; easing: ease-out-expo; }
-                animate opacity { duration: 220ms; easing: ease-out-quad; }
-                width: (760px * S.k);
-                background: @linear-gradient(180deg, #111a33 0%, #0a1024 100%);
-                border-width: 1px;
-                border-color: Theme.line;
-                TouchArea {}
-                Flickable {
-                    content-y <=> root.settings-y;
-                    content-height: sheet.preferred-height;
-                    sheet := VerticalLayout {
-                        x: 0;
-                        y: 0;
-                        width: (760px * S.k);
-                        height: self.preferred-height;
-                        padding-left: (56px * S.k);
-                        padding-right: (56px * S.k);
-                        padding-top: (64px * S.k);
-                        padding-bottom: (120px * S.k);
-                        spacing: 0;
-                        HorizontalLayout {
-                            alignment: start;
-                            padding-bottom: (20px * S.k);
-                            BackButton { pad: root.pad-hints; clicked => { root.click(Zone.settings, -1); } }
-                        }
-                        Text { text: "Settings"; font-size: (44px * S.k); font-weight: 600; color: Theme.text; }
-                        Text { text: "Changes are saved automatically"; font-size: (18px * S.k); color: Theme.text3; }
-                        for s[i] in root.settings: VerticalLayout {
-                            property <bool> f: root.zone == Zone.settings && root.idx == i;
-                            property <length> r: (14px * S.k);
-                            padding-top: s.kind == 0 ? (s.label == "" ? (20px * S.k) : (36px * S.k)) : 0;
-                            padding-bottom: s.kind == 0 ? (12px * S.k) : 0;
-                            if s.kind == 0 && s.label != "": Text { text: s.label; font-size: (16px * S.k); font-weight: 600; letter-spacing: (2px * S.k); color: Theme.text3; }
-                            // One row of a section card: rows between two headers share a card.
-                            if s.kind != 0: Rectangle {
-                                background: f ? (s.danger ? #ff5a6a33 : #ffffff1f) : (s.danger ? #ff5a6a0d : #ffffff0b);
-                                border-top-left-radius: s.group-first || f ? r : 0;
-                                border-top-right-radius: s.group-first || f ? r : 0;
-                                border-bottom-left-radius: s.group-last || f ? r : 0;
-                                border-bottom-right-radius: s.group-last || f ? r : 0;
-                                border-width: f ? (3px * S.k) : 0;
-                                border-color: s.danger ? Theme.danger : #ffffff;
-                                if !s.group-first && !f && !(root.zone == Zone.settings && root.idx == i - 1): Rectangle {
-                                    x: (18px * S.k);
-                                    y: 0;
-                                    width: parent.width - (36px * S.k);
-                                    height: 1px;
-                                    background: Theme.line;
-                                }
-                                TouchArea { mouse-cursor: pointer; clicked => { root.click(Zone.settings, i); } }
-                                VerticalLayout {
-                                    padding-left: (18px * S.k);
-                                    padding-right: (18px * S.k);
-                                    padding-top: (14px * S.k);
-                                    padding-bottom: (14px * S.k);
-                                    spacing: (4px * S.k);
-                                    HorizontalLayout {
-                                        spacing: (16px * S.k);
-                                        min-height: (36px * S.k);
-                                        Text {
-                                            text: s.label;
-                                            font-size: (19px * S.k);
-                                            font-weight: s.kind == 4 ? 600 : 500;
-                                            color: s.danger ? #ffb3bb : Theme.text;
-                                            vertical-alignment: center;
-                                            horizontal-stretch: s.kind == 1 ? 0 : 1;
-                                        }
-                                        if s.kind == 1 && root.edit-index != i: Text {
-                                            text: s.value != "" ? s.value : (s.secret ? "Not set" : "—");
-                                            font-size: (17px * S.k);
-                                            font-family: "DejaVu Sans Mono";
-                                            color: s.value != "" ? Theme.text2 : Theme.text3;
-                                            horizontal-alignment: right;
-                                            vertical-alignment: center;
-                                            horizontal-stretch: 1;
-                                            min-width: (120px * S.k);
-                                            overflow: elide;
-                                        }
-                                        if s.kind == 2: VerticalLayout { alignment: center; Switch { on: s.on; } }
-                                        if s.kind == 3: HorizontalLayout {
-                                            spacing: (8px * S.k);
-                                            alignment: end;
-                                            Image { source: Icons.chevl; colorize: f ? Theme.text : Theme.text3; width: (22px * S.k); height: (22px * S.k); y: (7px * S.k); }
-                                            Text { text: s.value; font-size: (19px * S.k); color: Theme.text; vertical-alignment: center; }
-                                            Image { source: Icons.chevr; colorize: f ? Theme.text : Theme.text3; width: (22px * S.k); height: (22px * S.k); y: (7px * S.k); }
-                                        }
-                                        if s.kind == 4 && s.value != "": Text {
-                                            text: s.value;
-                                            font-size: (17px * S.k);
-                                            font-weight: s.value-kind == 3 ? 600 : 400;
-                                            color: s.value-kind == 1 ? Theme.ok : s.value-kind == 2 ? Theme.danger : s.value-kind == 3 ? #7ab4ff : Theme.text3;
-                                            vertical-alignment: center;
-                                        }
-                                    }
-                                    if s.kind == 1 && root.edit-index == i: Rectangle {
-                                        height: (50px * S.k);
-                                        border-radius: (10px * S.k);
-                                        background: #00000040;
-                                        border-width: 1px;
-                                        border-color: Theme.line;
-                                        TextInput {
-                                            x: (14px * S.k);
-                                            width: parent.width - (28px * S.k);
-                                            height: parent.height;
-                                            text <=> root.edit-text;
-                                            single-line: true;
-                                            input-type: s.secret ? InputType.password : InputType.text;
-                                            font-size: (18px * S.k);
-                                            color: Theme.text;
-                                            vertical-alignment: center;
-                                            font-family: "DejaVu Sans Mono";
-                                            init => { self.focus(); self.select-all(); }
-                                            accepted => { root.edit-done(self.text, true); }
-                                        }
-                                    }
-                                    if s.hint != "": Text {
-                                        text: s.hint;
-                                        width: (612px * S.k);
-                                        font-size: (15px * S.k);
-                                        wrap: word-wrap;
-                                        color: s.hint-kind == 1 ? Theme.ok : s.hint-kind == 2 ? Theme.danger : Theme.text3;
-                                    }
-                                }
-                            }
-                        }
-                        // About: required attribution for the Slint royalty-free license (section 2a).
-                        VerticalLayout {
-                            padding-top: (36px * S.k);
-                            spacing: (12px * S.k);
-                            Text { text: "ABOUT"; font-size: (16px * S.k); font-weight: 600; letter-spacing: (2px * S.k); color: Theme.text3; }
-                            Rectangle {
-                                border-radius: (14px * S.k);
-                                background: #ffffff0b;
-                                HorizontalLayout {
-                                    padding-left: (18px * S.k);
-                                    padding-right: (10px * S.k);
-                                    padding-top: (14px * S.k);
-                                    padding-bottom: (14px * S.k);
-                                    spacing: (16px * S.k);
-                                    VerticalLayout {
-                                        alignment: center;
-                                        Image { source: Icons.app; width: (60px * S.k); height: (60px * S.k); }
-                                    }
-                                    VerticalLayout {
-                                        alignment: center;
-                                        spacing: (4px * S.k);
-                                        horizontal-stretch: 1;
-                                        Text { text: "PS5 Launcher"; font-size: (19px * S.k); font-weight: 600; color: Theme.text; }
-                                        Text { text: "Version " + root.app-version + " · Linux"; font-size: (15px * S.k); color: Theme.text3; }
-                                        Text { text: "PS5 games on KytyPS5 · PS4 games on shadPS4"; font-size: (15px * S.k); color: Theme.text3; }
-                                    }
-                                    VerticalLayout {
-                                        alignment: center;
-                                        AboutSlint { width: (190px * S.k); }
-                                    }
-                                }
-                            }
-                        }
-                    }
-                }
-            }
+        if root.overlay == 2: SettingsPage {
+            cats: root.settings-cats; cat: root.settings-cat; zone: root.zone; idx: root.idx;
+            rows: root.settings; edit-index: root.edit-index; edit-text <=> root.edit-text;
+            scroll-y <=> root.settings-y; query <=> root.settings-query; find-editing: root.settings-find-editing;
+            hits: root.settings-hits; about: root.settings-about; version: root.app-version; mode: root.settings-mode;
+            pad: root.pad-hints;
+            click(zone, i) => { root.click(zone, i); }
+            edit-done(text, accepted) => { root.edit-done(text, accepted); }
+            find-edited(text) => { root.settings-find-edited(text); }
+            find-done => { root.settings-find-done(); }
+            back => { root.settings-back(); }
         }
 
         // ------------------------------------------------------------ BACKGROUND DOWNLOADS

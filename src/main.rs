@@ -60,7 +60,7 @@ OPTIONS:
     -h, --help          Show this help
 ";
 
-fn main() {
+fn main() -> std::process::ExitCode {
     // Torrent downloads hold every file of the torrent open; the default limit on macOS is 256.
     hostos::raise_open_file_limit();
     let mut windowed = false;
@@ -81,11 +81,11 @@ fn main() {
             "--sync" => force_sync = true,
             "--version" | "-V" => {
                 println!("ps5-launcher {}", env!("CARGO_PKG_VERSION"));
-                return;
+                return std::process::ExitCode::SUCCESS;
             }
             "-h" | "--help" => {
                 print!("{HELP}");
-                return;
+                return std::process::ExitCode::SUCCESS;
             }
             other => {
                 eprintln!("unknown option: {other}\n\n{HELP}");
@@ -115,5 +115,6 @@ fn main() {
 
     let ui = AppWindow::new().expect("could not create the window (is a graphical session running?)");
     ui.set_app_version(env!("CARGO_PKG_VERSION").into());
-    app::run(ui, mons, target, windowed);
+    // Restart launcher in About exits 75 (system::EXIT_RESTART_LAUNCHER); everything else 0.
+    std::process::ExitCode::from(app::run(ui, mons, target, windowed) as u8)
 }

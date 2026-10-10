@@ -49,8 +49,19 @@ fn marker_image(marker: &str) -> Option<&str> {
 
 /// Exit code that tells ps5-launcher-session to start the launcher again at once (Restart
 /// launcher). It does not count as a crash. Exit 0 ends the session.
-#[allow(dead_code)] // unused until Settings → About gets Restart launcher; the session script already reads 75
 pub const EXIT_RESTART_LAUNCHER: i32 = 75;
+
+/// The code the process exits with once the event loop ends; 0 unless set.
+static EXIT_CODE: std::sync::atomic::AtomicI32 = std::sync::atomic::AtomicI32::new(0);
+
+/// Exit with `code` at the next clean quit (`slint::quit_event_loop`).
+pub fn set_exit_code(code: i32) {
+    EXIT_CODE.store(code, std::sync::atomic::Ordering::Relaxed);
+}
+
+pub fn exit_code() -> i32 {
+    EXIT_CODE.load(std::sync::atomic::Ordering::Relaxed)
+}
 
 /// Answer of logind's CanSuspend, CanReboot and CanPowerOff.
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]

@@ -117,6 +117,7 @@ impl App {
         if self.edit_index >= 0 {
             self.finish_edit(None);
         }
+        self.settings_find_stop();
         if self.overlay == Overlay::Downloads && self.ui().get_download_editing() {
             self.ui().invoke_focus_root();
         }

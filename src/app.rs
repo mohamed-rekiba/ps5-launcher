@@ -43,6 +43,10 @@ pub const Z_TRAILER: i32 = 18;
 pub const Z_CONTROLS: i32 = 19;
 pub const Z_POWER: i32 = 20;
 pub const Z_QUICK: i32 = 21;
+/// Settings: the rail, its search field and the search hits. Z_SETTINGS is the page.
+pub const Z_SETTINGS_RAIL: i32 = 22;
+pub const Z_SETTINGS_FIND: i32 = 23;
+pub const Z_SETTINGS_HITS: i32 = 24;
 
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub enum Overlay {
@@ -256,8 +260,8 @@ pub struct App {
     pub hero_flip: bool,
     pub row_flip: bool,
     pub settings_ids: Vec<crate::settings::SId>,
-    /// Settings' Advanced section is expanded (for this session).
-    pub settings_advanced: bool,
+    /// Settings' rail, open category and search.
+    pub settings_nav: crate::settings::SettingsNav,
     pub boot: crate::boot::Boot,
     pub kyty: crate::kyty_ui::KytyUi,
     pub shad: crate::shad_ui::ShadUi,
@@ -317,7 +321,8 @@ fn post(f: impl FnOnce(&mut App) + Send + 'static) {
 
 // ====================================================================== startup
 
-pub fn run(ui: AppWindow, monitors: Vec<Monitor>, target_monitor: Option<Monitor>, windowed: bool) {
+/// Runs until the launcher quits, and returns the process exit code (`system::exit_code`).
+pub fn run(ui: AppWindow, monitors: Vec<Monitor>, target_monitor: Option<Monitor>, windowed: bool) -> i32 {
     let cfg = Arc::new(Mutex::new(Config::load()));
     audio::init();
     audio::set_enabled(cfg.lock().unwrap().sounds);
@@ -418,7 +423,7 @@ pub fn run(ui: AppWindow, monitors: Vec<Monitor>, target_monitor: Option<Monitor
         hero_flip: false,
         row_flip: false,
         settings_ids: Vec::new(),
-        settings_advanced: false,
+        settings_nav: Default::default(),
         boot: Default::default(),
         kyty: Default::default(),
         shad: Default::default(),
@@ -477,6 +482,7 @@ pub fn run(ui: AppWindow, monitors: Vec<Monitor>, target_monitor: Option<Monitor
         app.downloads.shutdown();
         crate::trailer::close();
     });
+    crate::system::exit_code()
 }
 
 fn wire_callbacks(ui: &AppWindow) {
@@ -511,6 +517,9 @@ fn wire_callbacks(ui: &AppWindow) {
         audio::play(Sound::Select);
     }));
     ui.on_edit_done(|t, _| with_app(move |app| app.finish_edit(Some(t.to_string()))));
+    ui.on_settings_find_edited(|t| with_app(move |app| app.settings_find_edited(t.to_string())));
+    ui.on_settings_find_done(|| with_app(|app| app.settings_find_done()));
+    ui.on_settings_back(|| with_app(|app| app.act(Act::Back)));
     ui.on_download_confirm(|| with_app(|app| app.confirm_download()));
     ui.on_download_action(|key, action| with_app(move |app| app.download_action(&key, &action)));
     ui.on_toast_clicked(|id, action| with_app(move |app| app.toast_clicked(id, &action)));
@@ -1070,7 +1079,7 @@ impl App {
                     app.push_hub();
                 }
                 app.toast(&format!("Saved: {} on Linux", status.label()),
-                    &format!("It's shared with {} the next time you choose Settings → Share your game ratings.", crate::platform::Platform::of_title_id(&tid).unwrap_or_default().emulator()), 1);
+                    &format!("It's shared with {} the next time you choose Settings → Appearance → Share your game ratings.", crate::platform::Platform::of_title_id(&tid).unwrap_or_default().emulator()), 1);
             });
         });
     }
@@ -1424,10 +1433,12 @@ impl App {
             Pad::R2 => Act::PageDown,
             Pad::Ps | Pad::PsHold => return,
         };
-        if self.search_editing || self.edit_index >= 0 {
+        if self.search_editing || self.edit_index >= 0 || self.settings_nav.find_editing {
             // Controller input ends text editing.
             if self.search_editing {
                 self.stop_search_edit();
+            } else if self.settings_nav.find_editing {
+                self.settings_find_stop();
             } else {
                 self.finish_edit(None);
             }
@@ -1485,6 +1496,18 @@ impl App {
             }
             return false;
         }
+        if self.settings_nav.find_editing {
+            if k(Key::Escape) {
+                self.settings_find_stop();
+                return true;
+            }
+            if let Some(d @ (Act::Up | Act::Down)) = dir {
+                self.settings_find_stop();
+                self.act(d);
+                return true;
+            }
+            return false;
+        }
         if self.edit_index >= 0 {
             if k(Key::Escape) {
                 self.finish_edit(None);
@@ -1508,6 +1531,15 @@ impl App {
         }
         if ctrl || alt {
             return false;
+        }
+        // Type-to-search on the Settings rail.
+        if self.overlay == Overlay::Settings && matches!(self.zone, Z_SETTINGS_RAIL | Z_SETTINGS_FIND)
+            && text.chars().count() == 1 && text.chars().all(|c| c.is_alphanumeric()) {
+            let q = format!("{}{}", self.settings_nav.query, text);
+            self.ui().set_settings_query(q.clone().into());
+            self.settings_find_edited(q);
+            self.settings_find_start();
+            return true;
         }
         if let Some(d) = dir {
             self.act(d);
@@ -1560,6 +1592,9 @@ impl App {
         }
         if self.search_editing && zone != Z_SEARCH {
             self.stop_search_edit();
+        }
+        if self.settings_nav.find_editing && zone != Z_SETTINGS_FIND {
+            self.settings_find_stop();
         }
         if self.edit_index >= 0 && !(zone == Z_SETTINGS && idx == self.edit_index) {
             let cur = self.ui().get_edit_text().to_string();
@@ -2088,8 +2123,11 @@ impl App {
                 self.ui().invoke_focus_root();
             }
             audio::play(Sound::Back);
-            if self.overlay == Overlay::Settings && self.edit_index >= 0 {
-                self.finish_edit(None);
+            if self.overlay == Overlay::Settings {
+                if self.edit_index >= 0 {
+                    self.finish_edit(None);
+                }
+                self.settings_find_stop();
             }
             let (ov, zone, idx) = self.stack.pop().unwrap_or((Overlay::None, if self.view == 0 { Z_ROW } else { Z_GRID }, 0));
             self.overlay = ov;
@@ -2683,38 +2721,7 @@ impl App {
         }
     }
 
-    // ------------------------------------------------------------------ settings
-
-    pub fn open_settings(&mut self) {
-        audio::play(Sound::Select);
-        self.build_settings();
-        let first = self.settings_rows.iter().position(|r| r.kind != 0).unwrap_or(0) as i32;
-        self.ui().set_settings_y(0.0);
-        self.push_overlay(Overlay::Settings, Z_SETTINGS, first);
-        self.push_settings();
-    }
-
-    fn act_settings(&mut self, a: Act) {
-        let n = self.settings_rows.len() as i32;
-        let focusable = |rows: &Vec<crate::SettingData>, i: i32| i >= 0 && i < rows.len() as i32 && rows[i as usize].kind != 0;
-        match a {
-            Act::Back => self.back(),
-            Act::Up | Act::Down => {
-                let step = if a == Act::Up { -1 } else { 1 };
-                let mut j = self.idx + step;
-                while j >= 0 && j < n && !focusable(&self.settings_rows, j) {
-                    j += step;
-                }
-                if focusable(&self.settings_rows, j) {
-                    self.move_focus(Z_SETTINGS, j);
-                    self.scroll_settings();
-                }
-            }
-            Act::Left | Act::Right => self.settings_change(self.idx as usize, if a == Act::Left { -1 } else { 1 }),
-            Act::Confirm => self.settings_activate(self.idx as usize),
-            _ => {}
-        }
-    }
+    // ------------------------------------------------------------------ settings (settings.rs)
 
     pub fn finish_edit(&mut self, text: Option<String>) {
         let i = self.edit_index;

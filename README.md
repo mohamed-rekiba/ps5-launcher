@@ -227,7 +227,7 @@ results to the community lists (needs a free GitHub account).
 - **Display:** choose a display, or **Active display** to start on the one the mouse pointer is
   on (macOS, and Linux with `xdotool`). For a window instead of fullscreen, run
   `ps5-launcher --windowed`.
-- **Game output resolution** (PS5 games, under **Show advanced settings**): the screen resolution
+- **Game output resolution** (PS5 games, under **Settings → Emulators**): the screen resolution
   the game is told it runs on, and the size it renders at.
   - **Game default:** what a PS5 reports for that game (4K or 1080p). The most accurate.
   - **1080p (Full HD):** the fastest. Games that pick 4K by default run much faster.
@@ -235,7 +235,7 @@ results to the community lists (needs a free GitHub account).
 
   The **Resolution** setting is the window size only. The game's picture is scaled to
   fit the window.
-- **Your own emulator builds:** under **Settings → Show advanced settings**, set **KytyPS5 location**
+- **Your own emulator builds:** under **Settings → Emulators**, set **KytyPS5 location**
   or **shadPS4 location**. The launcher then runs your build and does not install or update that
   emulator. Clear the field to go back to the one the launcher manages.
 - **Updates:** **Update automatically** covers the launcher, shadPS4 and KytyPS5.

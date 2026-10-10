@@ -356,11 +356,11 @@ its official Linux builds from GitHub Releases.
   `_PipelineCache`, …) live in one shared folder that every version uses. Updates never touch them.
 - **Rollback:** the previous build is kept. **Settings → Go back to the previous KytyPS5** switches
   back to it, and that build won't be reinstalled automatically.
-- **Using your own build:** if you set **Settings → Advanced → KytyPS5 location** to a build you compiled,
+- **Using your own build:** if you set **Settings → Emulators → KytyPS5 location** to a build you compiled,
   the launcher tells you when a newer official build exists but leaves yours alone.
   **Settings → Updates → KytyPS5 → Switch to official builds** moves you to auto-updates and *copies* your saves across;
   your own build folder isn't changed.
-- **Your own shadPS4:** set **Settings → Advanced → shadPS4 location** to a shadPS4 you built or installed.
+- **Your own shadPS4:** set **Settings → Emulators → shadPS4 location** to a shadPS4 you built or installed.
   PS4 games then start with it, and the launcher stops installing and updating shadPS4. Clear the
   field to go back to the managed copy.
 
