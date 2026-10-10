@@ -1,7 +1,6 @@
 //! What the PC can do, and how the launcher asks it: the mode the launcher runs in, the power
 //! actions it offers, and the system commands behind them. The UI reads this module; it never
 //! checks the mode itself. See docs/plans/ps5-launcher-os.md, Phase 2.
-#![allow(dead_code)] // nothing calls it until the Power menu and Quick Menu (Phase 3)
 
 /// Where the launcher runs.
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
@@ -50,6 +49,7 @@ fn marker_image(marker: &str) -> Option<&str> {
 
 /// Exit code that tells ps5-launcher-session to start the launcher again at once (Restart
 /// launcher). It does not count as a crash. Exit 0 ends the session.
+#[allow(dead_code)] // unused until Settings → About gets Restart launcher; the session script already reads 75
 pub const EXIT_RESTART_LAUNCHER: i32 = 75;
 
 /// Answer of logind's CanSuspend, CanReboot and CanPowerOff.
@@ -78,10 +78,15 @@ pub fn parse_logind_can(output: &str) -> Result<Can, String> {
 /// Run a system command and wait for it. An error names the command and carries its exit
 /// status and error output, for the UI to show. It blocks, so call it off the UI thread.
 pub fn run(cmd: &mut std::process::Command) -> Result<(), String> {
+    run_output(cmd).map(|_| ())
+}
+
+/// Same as `run`, and returns what the command printed on its standard output.
+pub fn run_output(cmd: &mut std::process::Command) -> Result<String, String> {
     let name = format!("{cmd:?}");
     let out = cmd.output().map_err(|e| format!("could not run {name}: {e}"))?;
     if out.status.success() {
-        return Ok(());
+        return Ok(String::from_utf8_lossy(&out.stdout).into_owned());
     }
     let stderr = String::from_utf8_lossy(&out.stderr);
     Err(format!("{name} failed ({}): {}", out.status, stderr.trim()))
@@ -98,6 +103,36 @@ pub enum PowerAction {
     PowerOff,
     LogOut,
     SwitchToDesktop,
+}
+
+impl PowerAction {
+    /// The row's label in the Power menu.
+    pub fn label(self) -> &'static str {
+        match self {
+            PowerAction::CloseGame => "Close game",
+            PowerAction::CloseLauncher => "Close launcher",
+            PowerAction::Sleep => "Sleep",
+            PowerAction::Restart { update: false } => "Restart",
+            PowerAction::Restart { update: true } => "Update and restart",
+            PowerAction::PowerOff => "Power off",
+            PowerAction::LogOut => "Log out",
+            PowerAction::SwitchToDesktop => "Switch to desktop",
+        }
+    }
+
+    /// The countdown's text before the seconds: "Powering off in" 3….
+    pub fn counting(self) -> &'static str {
+        match self {
+            PowerAction::CloseGame => "Closing the game in",
+            PowerAction::CloseLauncher => "Closing the launcher in",
+            PowerAction::Sleep => "Going to sleep in",
+            PowerAction::Restart { update: false } => "Restarting in",
+            PowerAction::Restart { update: true } => "Restarting to update in",
+            PowerAction::PowerOff => "Powering off in",
+            PowerAction::LogOut => "Logging out in",
+            PowerAction::SwitchToDesktop => "Switching to desktop in",
+        }
+    }
 }
 
 /// What the system can do, for the Power menu.
@@ -210,6 +245,61 @@ pub fn guard(action: PowerAction, work: &Work) -> Guard {
     Guard::Dialog { losses, choices }
 }
 
+/// A button's label in the loss dialog for `action`.
+pub fn choice_label(action: PowerAction, choice: &Choice) -> String {
+    match choice {
+        Choice::Cancel => "Cancel".into(),
+        Choice::WhenDone(_) => format!("{} when done", action.label()),
+        // "Close game now" reads oddly next to the game's own warning.
+        Choice::Now if action == PowerAction::CloseGame => action.label().into(),
+        Choice::Now => format!("{} now", action.label()),
+    }
+}
+
+/// A line of the loss dialog.
+pub fn loss_text(loss: &Loss) -> String {
+    match loss {
+        Loss::GameProgress(game) => format!("{game} is still running. Progress you have not saved is lost."),
+        Loss::Job(job) => format!("Installing {} ({}%). Stopping now leaves a broken install.", job.name, job.percent),
+    }
+}
+
+/// How a job that "Power off when done" waits for stands.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub enum JobEnd {
+    Running,
+    Done,
+    /// Failed or cancelled.
+    Failed,
+}
+
+/// Where "Power off when done" stands.
+#[derive(Clone, PartialEq, Eq, Debug)]
+pub enum WaitState {
+    /// These jobs (by name) still run.
+    Waiting(Vec<String>),
+    /// Every job finished: power off now.
+    Ready,
+    /// This job (by name) did not finish: the PC stays on.
+    Failed(String),
+}
+
+/// Check the jobs that "Power off when done" waits for (`waited`, by id) against the jobs
+/// there are now (id, name, state). A job that left the list did not finish. Jobs started
+/// later do not count.
+pub fn when_done(waited: &[String], jobs: &[(String, String, JobEnd)]) -> WaitState {
+    let mut running = Vec::new();
+    for id in waited {
+        match jobs.iter().find(|(job, _, _)| job == id) {
+            None => return WaitState::Failed(id.clone()),
+            Some((_, name, JobEnd::Failed)) => return WaitState::Failed(name.clone()),
+            Some((_, name, JobEnd::Running)) => running.push(name.clone()),
+            Some((_, _, JobEnd::Done)) => {}
+        }
+    }
+    if running.is_empty() { WaitState::Ready } else { WaitState::Waiting(running) }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -261,6 +351,79 @@ mod tests {
         assert!(failed.contains("sh") && failed.contains('3') && failed.contains("refused"), "{failed}");
         let missing = run(&mut Command::new("ps5-launcher-no-such-program")).unwrap_err();
         assert!(missing.contains("ps5-launcher-no-such-program"), "{missing}");
+    }
+
+    #[test]
+    fn run_output_returns_what_the_command_prints() {
+        use std::process::Command;
+        assert_eq!(run_output(Command::new("sh").args(["-c", "echo 's \"yes\"'"])), Ok("s \"yes\"\n".into()));
+        let failed = run_output(Command::new("sh").args(["-c", "echo half; echo refused >&2; exit 3"])).unwrap_err();
+        assert!(failed.contains('3') && failed.contains("refused"), "{failed}");
+        assert!(run_output(&mut Command::new("ps5-launcher-no-such-program")).is_err());
+    }
+
+    fn end(id: &str, state: JobEnd) -> (String, String, JobEnd) {
+        (id.into(), format!("{id} game"), state)
+    }
+
+    #[test]
+    fn waiting_lasts_while_a_job_runs() {
+        let waited = vec!["a".to_string(), "b".to_string()];
+        assert_eq!(
+            when_done(&waited, &[end("a", JobEnd::Done), end("b", JobEnd::Running)]),
+            WaitState::Waiting(vec!["b game".into()])
+        );
+    }
+
+    #[test]
+    fn waiting_ends_when_every_job_is_done() {
+        let waited = vec!["a".to_string(), "b".to_string()];
+        assert_eq!(when_done(&waited, &[end("a", JobEnd::Done), end("b", JobEnd::Done)]), WaitState::Ready);
+    }
+
+    #[test]
+    fn waiting_ignores_work_started_later() {
+        let waited = vec!["a".to_string()];
+        assert_eq!(when_done(&waited, &[end("a", JobEnd::Done), end("later", JobEnd::Running)]), WaitState::Ready);
+    }
+
+    #[test]
+    fn a_failed_or_missing_job_stops_the_wait() {
+        let waited = vec!["a".to_string(), "b".to_string()];
+        assert_eq!(
+            when_done(&waited, &[end("a", JobEnd::Running), end("b", JobEnd::Failed)]),
+            WaitState::Failed("b game".into())
+        );
+        // A job that left the list (removed from Downloads) did not finish.
+        assert_eq!(when_done(&waited, &[end("a", JobEnd::Done)]), WaitState::Failed("b".into()));
+    }
+
+    #[test]
+    fn labels_name_each_action() {
+        assert_eq!(PowerOff.label(), "Power off");
+        assert_eq!(Restart { update: true }.label(), "Update and restart");
+        assert_eq!(Restart { update: false }.label(), "Restart");
+        assert_eq!(SwitchToDesktop.label(), "Switch to desktop");
+        assert_eq!(PowerOff.counting(), "Powering off in");
+        assert_eq!(Sleep.counting(), "Going to sleep in");
+    }
+
+    #[test]
+    fn choice_labels_follow_the_action() {
+        assert_eq!(choice_label(PowerOff, &Choice::Cancel), "Cancel");
+        assert_eq!(choice_label(PowerOff, &Choice::WhenDone(vec!["a".into()])), "Power off when done");
+        assert_eq!(choice_label(PowerOff, &Choice::Now), "Power off now");
+        assert_eq!(choice_label(Restart { update: false }, &Choice::Now), "Restart now");
+        assert_eq!(choice_label(CloseGame, &Choice::Now), "Close game");
+    }
+
+    #[test]
+    fn losses_say_what_is_lost() {
+        assert_eq!(
+            loss_text(&Loss::GameProgress("Dreaming Sarah".into())),
+            "Dreaming Sarah is still running. Progress you have not saved is lost."
+        );
+        assert_eq!(loss_text(&Loss::Job(installing())), "Installing Astro Bot (64%). Stopping now leaves a broken install.");
     }
 
     fn installing() -> Job {

@@ -127,8 +127,8 @@ What's different on macOS:
 [gamescope](https://github.com/ValveSoftware/gamescope) (`sudo dnf install gamescope`,
 `sudo pacman -S gamescope`; Ubuntu 24.04 does not ship it), log out, and choose **PS5 Launcher** at
 the login screen. The launcher then fills the screen and is the only thing running. On a PC without
-a desktop, run `ps5-launcher-session` from a text console. In this session **Settings** offers
-**Restart** and **Power off** instead of Quit. To log in to it by itself, see
+a desktop, run `ps5-launcher-session` from a text console. In this session the **Power** menu
+offers Sleep, Restart, Power off and Log out instead of Close launcher. To log in to it by itself, see
 [packaging/linux](packaging/linux/README.md).
 
 **A whole operating system.** **PS5 Launcher OS** makes a PC start straight into the launcher. It's
@@ -190,6 +190,7 @@ needs free space for the whole unpacked game, which can be several times the siz
 | Search | △ | / |
 | Switch Home ⇄ Library | L1 / R1 | Tab |
 | Switch between game and launcher | PS button | |
+| Power menu (close the game or the launcher, power off) | Hold the PS button for 2 seconds, or the power button at the top | |
 | Downloads | | Ctrl+D |
 
 **Games play best with a controller.** DualSense, DualShock 4, Xbox and most other controllers

@@ -41,6 +41,7 @@ pub const Z_SORT_PICKER: i32 = 16;
 pub const Z_DENSITY: i32 = 17;
 pub const Z_TRAILER: i32 = 18;
 pub const Z_CONTROLS: i32 = 19;
+pub const Z_POWER: i32 = 20;
 
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub enum Overlay {
@@ -54,6 +55,9 @@ pub enum Overlay {
     Sort = 8,
     Trailer = 9,
     Controls = 10,
+    Power = 11,
+    PowerCountdown = 12,
+    PowerDialog = 13,
 }
 
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
@@ -270,6 +274,7 @@ pub struct App {
     /// The status filters lead `genre_list`: All, Installed, In-game, In-game on Linux and, with
     /// more than one console, "PS5 games only" and "PS4 games only". Genres follow.
     pub status_count: usize,
+    pub power: crate::power_ui::PowerUi,
 }
 
 thread_local! {
@@ -423,6 +428,7 @@ pub fn run(ui: AppWindow, monitors: Vec<Monitor>, target_monitor: Option<Monitor
         mixed_consoles: false,
         status_count: 4,
         compat_checked: 0.0,
+        power: Default::default(),
     };
     ui.set_grid_rows(ModelRc::from(app.grid_model.clone()));
     ui.set_tiles(ModelRc::from(app.tile_model.clone()));
@@ -1342,6 +1348,7 @@ impl App {
 
     pub fn tick(&mut self) {
         self.push_installs();
+        self.check_power_wait();
         self.push_downloads();
         let tm = util::local_time();
         let (h, m) = (tm.tm_hour, tm.tm_min);
@@ -1377,8 +1384,15 @@ impl App {
             return;
         }
         if p == Pad::PsHold {
-            // Opens the Power menu once it exists (Phase 3 of docs/plans/ps5-launcher-os.md).
-            crate::log!("PS button held");
+            // From anywhere, also during a game: bring the launcher forward first, as a press does.
+            if !self.live.is_empty() {
+                crate::sessions::show_launcher();
+            }
+            if !self.pad_hints {
+                self.pad_hints = true;
+                self.ui().set_pad_hints(true);
+            }
+            self.open_power_menu();
             return;
         }
         if !crate::display::window_has_focus(&self.ui()) {
@@ -1615,13 +1629,13 @@ impl App {
         ui.set_idx(idx);
     }
 
-    fn move_focus(&mut self, zone: i32, idx: i32) {
+    pub fn move_focus(&mut self, zone: i32, idx: i32) {
         self.set_focus(zone, idx);
         audio::play(Sound::Move);
     }
 
     fn top_items(&self) -> Vec<i32> {
-        if self.live.is_empty() { vec![2, 3, 4] } else { vec![0, 1, 2, 3, 4] }
+        if self.live.is_empty() { vec![2, 3, 4, 5] } else { vec![0, 1, 2, 3, 4, 5] }
     }
 
     pub fn act(&mut self, a: Act) {
@@ -1653,6 +1667,9 @@ impl App {
             Overlay::Hub => self.act_hub(a),
             Overlay::Downloads => self.act_downloads(a),
             Overlay::Sort => self.act_sort_picker(a),
+            Overlay::Power => self.act_power_menu(a),
+            Overlay::PowerDialog => self.act_power_dialog(a),
+            Overlay::PowerCountdown => self.act_power_countdown(a),
             Overlay::None => self.act_main(a),
         }
     }
@@ -1703,7 +1720,8 @@ impl App {
                         0 => self.resume_game(),
                         1 => self.stop_game(None),
                         2 => self.start_search_edit(),
-                        4 => self.open_downloads(None),
+                        4 => self.open_power_menu(),
+                        5 => self.open_downloads(None),
                         _ => self.open_settings(),
                     },
                     _ => {}
@@ -2050,6 +2068,10 @@ impl App {
             crate::trailer::close();
             self.trailer_timer = None;
             self.ui().set_trailer_frame(slint::Image::default());
+        }
+        if self.overlay == Overlay::PowerCountdown {
+            // Cancelled: the action must not run when the count would have reached 0.
+            self.power.timer = None;
         }
         if self.overlay != Overlay::None {
             if self.overlay == Overlay::Downloads {

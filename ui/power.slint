@@ -1,0 +1,180 @@
+// The Power menu, the loss dialog and the countdown (docs/plans/ps5-launcher-os.md, Phase 3).
+// One focus style, the app's own: the focused row or button turns white. A dangerous action
+// only gets a red icon or red text, never a red fill.
+
+import { S, Theme, Icons, PowerRow } from "theme.slint";
+import { KeyCap } from "widgets.slint";
+
+// The centred list: a title, then one row per action with an icon.
+export component PowerMenu inherits Rectangle {
+    in property <[PowerRow]> rows;
+    in property <int> selected;
+    // "Powering off after Astro Bot installs", while Power off waits.
+    in property <string> note;
+    callback choose(int);
+    callback close();
+    property <bool> entered: false;
+    init => { entered = true; }
+    background: entered ? #03050c99 : #03050c00;
+    animate background { duration: 200ms; }
+    TouchArea { clicked => { root.close(); } }
+    Rectangle {
+        x: (root.width - self.width) / 2;
+        y: (root.height - self.height) / 2;
+        opacity: entered ? 1 : 0;
+        transform-scale: entered ? 1.0 : 0.94;
+        animate opacity { duration: 180ms; easing: ease-out-quad; }
+        animate transform-scale { duration: 320ms; easing: ease-out-back; }
+        width: (600px * S.k);
+        height: list.preferred-height;
+        border-radius: (24px * S.k);
+        background: #121a31fa;
+        border-width: 1px;
+        border-color: Theme.line;
+        drop-shadow-blur: (60px * S.k);
+        drop-shadow-color: #000000cc;
+        TouchArea {}
+        list := VerticalLayout {
+            padding: (28px * S.k);
+            spacing: (6px * S.k);
+            VerticalLayout {
+                padding-bottom: (10px * S.k);
+                spacing: (6px * S.k);
+                Text { text: "Power"; font-size: (32px * S.k); font-weight: 600; color: Theme.text; }
+                if root.note != "": Text { text: root.note; font-size: (17px * S.k); color: Theme.warn; wrap: word-wrap; }
+            }
+            for row[i] in root.rows: VerticalLayout {
+                if row.sep: Rectangle {
+                    height: (14px * S.k);
+                    Rectangle { y: (7px * S.k); height: 1px; background: Theme.line; }
+                }
+                Rectangle {
+                    property <bool> f: root.selected == i;
+                    height: (66px * S.k);
+                    border-radius: (14px * S.k);
+                    background: f ? #ffffff : ta.has-hover ? #ffffff14 : transparent;
+                    HorizontalLayout {
+                        padding-left: (18px * S.k);
+                        spacing: (18px * S.k);
+                        Image {
+                            source: Icons.get(row.icon);
+                            colorize: row.danger ? (f ? Theme.danger : #ff8f9c) : f ? #0a0d18 : Theme.text;
+                            width: (28px * S.k);
+                            height: (28px * S.k);
+                            y: (19px * S.k);
+                        }
+                        Text { text: row.label; font-size: (21px * S.k); font-weight: 500; color: f ? #0a0d18 : Theme.text; vertical-alignment: center; }
+                    }
+                    ta := TouchArea { mouse-cursor: pointer; clicked => { root.choose(i); } }
+                }
+            }
+        }
+    }
+}
+
+// A dialog button: white when focused, like the app's Btn. A dangerous one has red text.
+component PowerButton inherits Rectangle {
+    in property <string> text;
+    in property <bool> focused;
+    in property <bool> danger;
+    callback clicked();
+    height: (64px * S.k);
+    width: max((200px * S.k), t.preferred-width + (72px * S.k));
+    border-radius: self.height / 2;
+    background: focused ? #ffffff : ta.has-hover ? #ffffff36 : #ffffff24;
+    border-width: 1px;
+    border-color: #ffffff1a;
+    drop-shadow-blur: focused ? (28px * S.k) : 0;
+    drop-shadow-color: focused ? #8cb9ffaa : transparent;
+    transform-scale: focused ? 1.05 : 1.0;
+    animate background, transform-scale { duration: Theme.fast; }
+    t := Text {
+        text: root.text;
+        font-size: (22px * S.k);
+        font-weight: 600;
+        color: root.focused ? (root.danger ? Theme.danger : #0a0d18) : root.danger ? #ff8f9c : #ffffff;
+    }
+    ta := TouchArea { mouse-cursor: pointer; clicked => { root.clicked(); } }
+}
+
+// What an action would lose, and the choices, safe one first.
+export component PowerDialog inherits Rectangle {
+    in property <string> title;
+    in property <[string]> losses;
+    in property <string> note;
+    in property <[PowerRow]> choices;
+    in property <int> selected;
+    callback choose(int);
+    callback close();
+    background: #03050ccc;
+    TouchArea { clicked => { root.close(); } }
+    Rectangle {
+        x: (root.width - self.width) / 2;
+        y: (root.height - self.height) / 2;
+        width: (940px * S.k);
+        height: body.preferred-height;
+        border-radius: (28px * S.k);
+        background: #121a31;
+        border-width: 1px;
+        border-color: Theme.line;
+        drop-shadow-blur: (60px * S.k);
+        drop-shadow-color: #000000cc;
+        TouchArea {}
+        body := VerticalLayout {
+            padding: (48px * S.k);
+            spacing: (14px * S.k);
+            Text { text: root.title; font-size: (36px * S.k); font-weight: 600; color: Theme.text; }
+            Rectangle { height: (4px * S.k); }
+            for loss in root.losses: HorizontalLayout {
+                spacing: (14px * S.k);
+                alignment: start;
+                Image { source: Icons.alert; colorize: Theme.warn; width: (26px * S.k); height: (26px * S.k); y: (1px * S.k); }
+                Text { text: loss; font-size: (22px * S.k); color: Theme.text; wrap: word-wrap; width: (780px * S.k); }
+            }
+            if root.note != "": Text { text: root.note; font-size: (17px * S.k); color: Theme.text3; wrap: word-wrap; }
+            HorizontalLayout {
+                alignment: start;
+                spacing: (16px * S.k);
+                padding-top: (22px * S.k);
+                for c[i] in root.choices: PowerButton {
+                    text: c.label;
+                    danger: c.danger;
+                    focused: root.selected == i;
+                    clicked => { root.choose(i); }
+                }
+            }
+        }
+    }
+}
+
+// "Powering off in 3…": nothing is lost, and Back cancels.
+export component PowerCountdown inherits Rectangle {
+    in property <string> text;
+    in property <int> seconds;
+    in property <bool> pad;
+    callback close();
+    background: #03050ce6;
+    TouchArea { clicked => { root.close(); } }
+    VerticalLayout {
+        alignment: center;
+        spacing: (28px * S.k);
+        HorizontalLayout {
+            alignment: center;
+            Rectangle {
+                width: (180px * S.k);
+                height: (180px * S.k);
+                border-radius: (90px * S.k);
+                border-width: (6px * S.k);
+                border-color: Theme.accent;
+                Text { text: root.seconds; font-size: (96px * S.k); font-weight: 700; color: Theme.text; }
+            }
+        }
+        Text { text: root.text + " " + root.seconds + "…"; font-size: (40px * S.k); font-weight: 600; color: Theme.text; horizontal-alignment: center; }
+        HorizontalLayout {
+            alignment: center;
+            spacing: (12px * S.k);
+            KeyCap { text: root.pad ? "○" : "Esc"; round: root.pad; fg: root.pad ? #ff8f9c : #ffffff; }
+            Text { text: "Cancel"; font-size: (22px * S.k); color: Theme.text2; vertical-alignment: center; }
+        }
+    }
+}

@@ -1,7 +1,8 @@
-import { S, Theme, Icons, Zone, DownloadData, BootStep, ChipData, ActionData, TileData, HeroData, CardData, CardRow, GenreChip, Fact, FactRow, Shot, HubData, SettingData, ToastData, MenuItem, RunningData } from "theme.slint";
+import { S, Theme, Icons, Zone, DownloadData, BootStep, ChipData, ActionData, TileData, HeroData, CardData, CardRow, GenreChip, Fact, FactRow, Shot, HubData, SettingData, ToastData, MenuItem, RunningData, PowerRow } from "theme.slint";
 import { FocusRing, Chip, Btn, Kicker, Badge, Switch, KeyCap, BackButton, Shimmer, Cover } from "widgets.slint";
 import { DownloadsSheet, DownloadConsent } from "downloads.slint";
 import { LibraryFilter, LibrarySortPicker } from "library.slint";
+import { PowerMenu, PowerDialog, PowerCountdown } from "power.slint";
 import { AboutSlint, Palette } from "std-widgets.slint";
 
 export { S, Theme, Zone }
@@ -145,7 +146,7 @@ export component AppWindow inherits Window {
 
     // ---------------------------------------------------------------- state from Rust
     in property <int> view;          // 0 home, 1 library
-    in property <int> overlay;       // 0 none, 1 hub, 2 settings, 3 viewer, 4 launch, 5 menu
+    in property <int> overlay;       // 0 none, 1 hub, 2 settings, 3 viewer, 4 launch, 5 menu, 11-13 power (Overlay in app.rs)
     in property <int> zone;
     in property <int> idx;
     in property <string> clock;
@@ -255,6 +256,15 @@ export component AppWindow inherits Window {
 
     in property <string> menu-title;
     in property <[MenuItem]> menu-items;
+
+    in property <[PowerRow]> power-rows;
+    in property <string> power-note;
+    in property <string> power-title;
+    in property <[string]> power-losses;
+    in property <string> power-dialog-note;
+    in property <[PowerRow]> power-choices;
+    in property <string> power-counting;
+    in property <int> power-seconds;
 
     in property <bool> boot-first;
     in property <bool> boot-ready;
@@ -800,9 +810,9 @@ export component AppWindow inherits Window {
                         x: (14px * S.k); y: (39px * S.k); width: parent.width - (28px * S.k); height: (4px * S.k); background: #ffffff14;
                         Rectangle { x: 0; y: 0; width: parent.width * (root.install-active ? root.install-progress : root.download-progress); background: Theme.accent; animate width { duration: 300ms; } }
                     }
-                    TouchArea { mouse-cursor: pointer; clicked => { root.click(Zone.top, 4); } }
+                    TouchArea { mouse-cursor: pointer; clicked => { root.click(Zone.top, 5); } }
                 }
-                for ic[i] in [Icons.search, Icons.gear]: Rectangle {
+                for ic[i] in [Icons.search, Icons.gear, Icons.power]: Rectangle {
                     width: (52px * S.k);
                     height: (52px * S.k);
                     y: (26px * S.k);
@@ -818,7 +828,7 @@ export component AppWindow inherits Window {
                     y: (26px * S.k);
                     width: disk-row.preferred-width;
                     border-radius: (26px * S.k);
-                    property <bool> f: root.zone == Zone.top && root.idx == 4 && root.overlay == 0;
+                    property <bool> f: root.zone == Zone.top && root.idx == 5 && root.overlay == 0;
                     background: f ? #ffffff : disk-ta.has-hover ? #ffffff24 : #ffffff14;
                     disk-row := HorizontalLayout {
                         padding-left: (16px * S.k);
@@ -831,7 +841,7 @@ export component AppWindow inherits Window {
                             Text { text: "Downloads  " + root.storage-downloads; font-size: (15px * S.k); color: disk-pill.f ? #0a0d18 : Theme.text2; }
                         }
                     }
-                    disk-ta := TouchArea { mouse-cursor: pointer; clicked => { root.click(Zone.top, 4); } }
+                    disk-ta := TouchArea { mouse-cursor: pointer; clicked => { root.click(Zone.top, 5); } }
                 }
                 // Connected controllers: the icon and the count in one quiet pill, like the other top-bar
                 // controls. Dimmed while none is connected.
@@ -908,7 +918,7 @@ export component AppWindow inherits Window {
             border-width: 1px;
             border-color: Theme.line;
             // Hidden over the library grid so it never covers game titles.
-            visible: root.overlay != 4 && root.overlay != 3 && root.overlay != 6 && root.overlay != 7 && (root.view == 0 || root.overlay != 0);
+            visible: root.overlay != 4 && root.overlay != 3 && root.overlay != 6 && root.overlay != 7 && root.overlay != 12 && (root.view == 0 || root.overlay != 0);
             hints := HorizontalLayout {
                 padding-left: (20px * S.k);
                 padding-right: (22px * S.k);
@@ -1933,6 +1943,23 @@ export component AppWindow inherits Window {
             }
                 }
             }
+        }
+
+        // ------------------------------------------------------------ POWER
+        if root.overlay == 11: PowerMenu {
+            rows: root.power-rows; selected: root.zone == Zone.power ? root.idx : -1; note: root.power-note;
+            choose(i) => { root.click(Zone.power, i); }
+            close => { root.click(Zone.power, -1); }
+        }
+        if root.overlay == 13: PowerDialog {
+            title: root.power-title; losses: root.power-losses; note: root.power-dialog-note;
+            choices: root.power-choices; selected: root.zone == Zone.power ? root.idx : -1;
+            choose(i) => { root.click(Zone.power, i); }
+            close => { root.click(Zone.power, -1); }
+        }
+        if root.overlay == 12: PowerCountdown {
+            text: root.power-counting; seconds: root.power-seconds; pad: root.pad-hints;
+            close => { root.click(Zone.power, -1); }
         }
 
         // ------------------------------------------------------------ TOASTS
