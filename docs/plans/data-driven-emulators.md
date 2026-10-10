@@ -1,8 +1,15 @@
 # Plan: emulators from a configuration file
 
-Status: proposed, waiting for the owner's GO and the format choice (JSON recommended, YAML needs
-the new `serde_norway` dependency). Designed with the project's advisor (Codex); the design
-below is its answer, kept as written.
+Status: **approved by the owner** (GO), with these choices, which replace the design's format
+section (§3) where they differ:
+
+1. **Format: YAML**, parsed strictly into typed Rust structs; unknown fields are rejected.
+2. **Parser: `serde_norway`** (approved dependency).
+3. **Schema: `schemars`** generates `assets/emulators.schema.json` from the Rust structs, so the
+   schema never drifts from the code (a test fails when the committed file differs).
+
+The embedded default is `assets/emulators.yaml`; the user override is
+`~/.config/ps5-launcher/emulators.yaml`. Everything else below is the advisor's design as written.
 
 ---
 
