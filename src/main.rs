@@ -34,6 +34,7 @@ mod update;
 mod library;
 mod library_layout;
 mod network;
+mod osupdate;
 mod hostos;
 mod present;
 mod osk_ui;
