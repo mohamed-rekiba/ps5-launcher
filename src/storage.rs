@@ -57,6 +57,11 @@ fn is_system_mount(mountpoint: &str) -> bool {
     matches!(mountpoint, "/" | "/sysroot" | "/boot" | "/boot/efi" | "/usr" | "/var" | "[SWAP]")
 }
 
+/// Whether the entry or anything below it (partition, LUKS, LVM) holds a system mount.
+fn mounts_system(e: &Entry) -> bool {
+    e.mountpoint.as_deref().is_some_and(is_system_mount) || e.children.iter().any(mounts_system)
+}
+
 /// The drives in lsblk's JSON. Empty and virtual devices (nbd, loop, zram, ram) are left out.
 pub fn parse_drives(json: &str) -> Result<Vec<Drive>, String> {
     let lsblk: Lsblk = serde_json::from_str(json).map_err(|e| format!("unexpected lsblk output: {e}"))?;
@@ -66,7 +71,7 @@ pub fn parse_drives(json: &str) -> Result<Vec<Drive>, String> {
         .into_iter()
         .filter(|e| e.kind == "disk" && e.size > 0 && !virtual_name(&e.name))
         .map(|e| {
-            let system = e.children.iter().chain([&e]).any(|p| p.mountpoint.as_deref().is_some_and(is_system_mount));
+            let system = mounts_system(&e);
             Drive {
                 name: e.model.map(|m| m.trim().to_string()).filter(|m| !m.is_empty()).unwrap_or(e.name),
                 path: e.path,
@@ -164,6 +169,33 @@ mod tests {
         assert!(drives[0].system, "/sysroot, /boot and /boot/efi are on it");
         assert_eq!(drives[0].partitions.len(), 4);
         assert!(!parse_drives(CAPTURED).unwrap()[1].system);
+    }
+
+    #[test]
+    fn a_root_inside_luks_and_lvm_still_marks_the_system_disk() {
+        // lsblk nests: disk → partition → crypt → lvm. Only the deepest one is mounted.
+        let json = r#"{"blockdevices": [
+            {"name": "nvme0n1", "path": "/dev/nvme0n1", "size": 512110190592, "type": "disk",
+             "fstype": null, "mountpoint": null, "rm": false, "hotplug": false, "label": null,
+             "model": "Samsung SSD 980",
+             "children": [
+                {"name": "nvme0n1p1", "path": "/dev/nvme0n1p1", "size": 629145600, "type": "part",
+                 "fstype": "vfat", "mountpoint": null, "rm": false, "hotplug": false, "label": null, "model": null},
+                {"name": "nvme0n1p2", "path": "/dev/nvme0n1p2", "size": 511479848960, "type": "part",
+                 "fstype": "crypto_LUKS", "mountpoint": null, "rm": false, "hotplug": false, "label": null, "model": null,
+                 "children": [
+                    {"name": "luks-1", "path": "/dev/mapper/luks-1", "size": 511462023168, "type": "crypt",
+                     "fstype": "LVM2_member", "mountpoint": null, "rm": false, "hotplug": false, "label": null, "model": null,
+                     "children": [
+                        {"name": "vg-root", "path": "/dev/mapper/vg-root", "size": 511462023168, "type": "lvm",
+                         "fstype": "ext4", "mountpoint": "/sysroot", "rm": false, "hotplug": false, "label": null, "model": null}
+                     ]}
+                 ]}
+             ]}
+        ]}"#;
+        let drives = parse_drives(json).unwrap();
+        assert!(drives[0].system);
+        assert_eq!(drives[0].partitions.len(), 2, "partitions are the disk's direct children");
     }
 
     #[test]
