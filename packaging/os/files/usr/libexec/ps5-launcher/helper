@@ -3,22 +3,85 @@
 # The launcher runs it through pkexec; polkit allows it for the user at the PC without a
 # password (/usr/share/polkit-1/actions/io.github.ps5launcher.helper.policy). Its paths are
 # fixed, so nothing in the caller's environment can redirect it; test-helper.sh tests a copy
-# with these two lines changed.
+# with these lines changed.
 #
 #   helper set-next-session plasma   log in to Plasma once, at the next automatic login
 #   helper clear-next-session        forget that (Plasma's autostart, and every boot)
 #   helper update-check              is a system update available?
 #   helper update                    download a system update; it installs at the next restart
 #   helper rollback                  start the previous system at the next restart
+#   helper switch main|nvidia        change to the main or the NVIDIA image (next restart)
+#   helper queue-key                 queue the next NVIDIA image's Secure Boot key; prints the
+#                                    password the blue MOK screen asks for
+#
+# With Secure Boot on, the NVIDIA image's driver only loads when its signing key is enrolled.
+# So update and switch nvidia first check the new image's key, and stage it by digest only
+# when the key is enrolled. Otherwise they print one word and exit:
+#   key-required (exit 3)  run queue-key, restart, and enroll the key on the blue screen
+#   key-pending  (exit 4)  the key waits for the blue screen: restart and enroll it
 set -eu
 sddm_dir=/etc/sddm.conf.d
+os_release=/usr/lib/ps5-launcher/os-release
+cert_dir=/usr/share/ps5-launcher/secureboot
 PATH=/usr/sbin:/usr/bin
 export PATH
 next_session="$sddm_dir/90-ps5-launcher-os-next-session.conf"
+cert_label=io.github.ps5-launcher.secureboot-cert-sha256
 
 usage() {
-    echo "usage: helper set-next-session plasma | clear-next-session | update-check | update | rollback" >&2
+    echo "usage: helper set-next-session plasma | clear-next-session | update-check | update | rollback | switch main|nvidia | queue-key" >&2
     exit 2
+}
+
+fail() {
+    echo "helper: $*" >&2
+    exit 1
+}
+
+# A value from the OS marker ("IMAGE", "IMAGE_REF").
+marker() {
+    sed -n "s/^$1=//p" "$os_release" | head -1
+}
+
+secure_boot() {
+    mokutil --sb-state 2>/dev/null | grep -q "SecureBoot enabled"
+}
+
+# The digest of `ref` in the registry, and the certificate file its label names.
+# Sets $digest and $cert.
+resolve() {
+    out=$(skopeo inspect --format "{{.Digest}} {{index .Labels \"$cert_label\"}}" "docker://$1") ||
+        fail "could not read $1"
+    digest=${out%% *}
+    sha=${out#* }
+    case "$digest" in sha256:*) ;; *) fail "no digest for $1" ;; esac
+    case "$sha" in
+    *[!0-9a-f]* | "") fail "$1 has no valid $cert_label label" ;;
+    esac
+    cert="$cert_dir/$sha.der"
+    [ -f "$cert" ] || fail "$1 is signed with a key this system does not know ($sha)"
+}
+
+# Stage `ref` (an NVIDIA image) by digest, once its key is enrolled. A key that only waits for
+# the blue screen does not count: the driver would still be refused at the next start.
+stage_nvidia() {
+    ref=$1
+    resolve "$ref"
+    if secure_boot; then
+        state=$(mokutil --test-key "$cert" 2>&1 || true)
+        case "$state" in
+        *"is already enrolled"* | *"already in the built-in trusted keyring"*) ;;
+        *"already in the enrollment request"*)
+            echo key-pending
+            exit 4
+            ;;
+        *)
+            echo key-required
+            exit 3
+            ;;
+        esac
+    fi
+    exec bootc switch "${ref%:*}@$digest"
 }
 
 [ $# -ge 1 ] || usage
@@ -32,8 +95,7 @@ case "$task $#" in
     # then the file is renamed into place.
     if [ -L "$sddm_dir" ] || [ ! -d "$sddm_dir" ] ||
         [ -z "$(find "$sddm_dir" -maxdepth 0 -user "$(id -u)" ! -perm -g+w ! -perm -o+w)" ]; then
-        echo "helper: $sddm_dir is not a folder only this user can write to" >&2
-        exit 1
+        fail "$sddm_dir is not a folder only this user can write to"
     fi
     tmp=$(mktemp "$sddm_dir/.next-session.XXXXXX")
     printf '# Written by "Switch to desktop"; deleted when Plasma starts.\n[Autologin]\nSession=plasma.desktop\n' \
@@ -44,9 +106,34 @@ case "$task $#" in
     ;;
 "clear-next-session 0") rm -f "$next_session" ;;
 "update-check 0") exec bootc upgrade --check ;;
-# TODO(Phase 1): on the NVIDIA image, refuse to stage an image whose signing key is not
-# enrolled (its label against mokutil --list-enrolled), and queue the key instead.
-"update 0") exec bootc upgrade ;;
+"update 0")
+    # The NVIDIA image is always staged by digest (after the key check when Secure Boot is on),
+    # and bootc then follows that digest, not a tag. So its channel comes from the marker.
+    if [ "$(marker IMAGE)" = nvidia ]; then
+        stage_nvidia "$(marker IMAGE_REF)"
+    fi
+    exec bootc upgrade
+    ;;
 "rollback 0") exec bootc rollback ;;
+"switch 1")
+    ref=$(marker IMAGE_REF)
+    [ -n "$ref" ] || fail "$os_release has no IMAGE_REF"
+    case "$1" in
+    main) exec bootc switch "${ref%:*}:main" ;;
+    nvidia) stage_nvidia "${ref%:*}:nvidia" ;;
+    *) usage ;;
+    esac
+    ;;
+"queue-key 0")
+    ref=$(marker IMAGE_REF)
+    [ "$(marker IMAGE)" = nvidia ] || ref="${ref%:*}:nvidia"
+    resolve "$ref"
+    # 8 random digits: easy to type on the blue screen, which may ask for them one by one.
+    password=$(od -An -N4 -tu4 /dev/urandom | tr -d ' ')
+    password=$(printf '%08d' $((password % 100000000)))
+    printf '%s\n%s\n' "$password" "$password" | mokutil --import "$cert" >/dev/null ||
+        fail "mokutil could not queue the key"
+    echo "$password"
+    ;;
 *) usage ;;
 esac
