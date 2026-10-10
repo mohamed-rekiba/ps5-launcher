@@ -33,6 +33,7 @@ mod kyty_ui;
 mod update;
 mod library;
 mod library_layout;
+mod network;
 mod hostos;
 mod present;
 mod power_ui;
