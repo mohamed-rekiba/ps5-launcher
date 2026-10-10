@@ -3,6 +3,7 @@
 
 use crate::config::{Config, VIDEO_OUT_MODES};
 use crate::library::LocalGame;
+use crate::platform::Platform;
 use crate::util::{atomic_write, cache_dir, config_dir, now_secs};
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
@@ -171,6 +172,43 @@ pub(crate) fn kyty_args(cfg: &Config, game: &str) -> Vec<String> {
     args
 }
 
+/// An emulator build, as a launch records it.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum Build {
+    /// Its name, known without running anything.
+    Known(String),
+    /// Only the binary can say: its `--help` banner, which takes up to 3 s.
+    Probe(PathBuf),
+}
+
+impl Build {
+    /// The build's name; "" when the binary does not say. Off the UI thread for a `Probe`.
+    pub fn resolve(self) -> String {
+        match self {
+            Build::Known(name) => name,
+            Build::Probe(path) => crate::kyty::binary_version(&path).map(|(git, date)| format!("{date} ({git})").trim().to_string()).unwrap_or_default(),
+        }
+    }
+}
+
+/// The emulator (its addon id) the old launch path runs for a game, and its build: shadPS4's
+/// release for PS4 games, KytyPS5's tag (`kyty_installed`, in `kyty_root`) or its banner for
+/// PS5 games. The same names as ratings used before.
+pub(crate) fn launch_identity(platform: Platform, cfg: &Config, kyty_installed: &str, kyty_root: &Path, shad_installed: &str) -> (&'static str, Build) {
+    let build = match platform {
+        Platform::Ps4 if cfg.shad_custom() => Build::Known("custom build".into()),
+        Platform::Ps4 => Build::Known(crate::shad::pretty(shad_installed)),
+        Platform::Ps5 if crate::kyty::is_managed_in(&cfg.emulator_path(), kyty_root) && !kyty_installed.is_empty() => Build::Known(kyty_installed.into()),
+        Platform::Ps5 => Build::Probe(cfg.emulator_path()),
+    };
+    (platform.emulator_id(), build)
+}
+
+/// `launch_identity` with the managed builds' state files.
+pub(crate) fn current_identity(platform: Platform, cfg: &Config) -> (&'static str, Build) {
+    launch_identity(platform, cfg, &crate::kyty::load_state().installed, &crate::kyty::root(), &crate::shad::load_state().installed)
+}
+
 /// The game path from an emulator's command line; None unless it is the emulator running a game.
 /// `ps` joins the arguments with spaces, so a path containing spaces ends at the next " --" option.
 #[cfg(any(target_os = "macos", test))]
@@ -274,6 +312,11 @@ pub struct Session {
     pub own: bool,
     pub log: PathBuf,
     pub stopping: bool,
+    /// The emulator's addon id; "" for a detected game the launcher does not know.
+    pub emulator: String,
+    /// The build it runs, captured at launch; "" until known (a custom KytyPS5 is asked off the
+    /// UI thread), and for games started outside the launcher.
+    pub build: String,
 }
 
 #[derive(Clone, Debug)]
@@ -284,6 +327,9 @@ pub struct Ended {
     pub stopped: bool,
     pub played: f64,
     pub log: PathBuf,
+    /// The session's emulator and build (see `Session`).
+    pub emulator: String,
+    pub build: String,
 }
 
 struct Inner {
@@ -374,6 +420,20 @@ impl Sessions {
             .map_err(|e| e.to_string())?;
         let pid = child.id();
         inner.children.insert(pid, child);
+        let (emulator, build) = current_identity(game.platform, &cfg);
+        let build = match build {
+            Build::Known(name) => name,
+            probe => {
+                let inner = self.inner.clone();
+                std::thread::spawn(move || {
+                    let name = probe.resolve();
+                    if let Some(s) = inner.lock().unwrap().live.iter_mut().find(|s| s.pid == pid) {
+                        s.build = name;
+                    }
+                });
+                String::new()
+            }
+        };
         inner.live.push(Session {
             pid,
             game_id: game.id.clone(),
@@ -384,6 +444,8 @@ impl Sessions {
             own: true,
             log,
             stopping: false,
+            emulator: emulator.into(),
+            build,
         });
         Ok(())
     }
@@ -449,12 +511,12 @@ impl Sessions {
                     .cloned()
                     .or_else(|| crate::library::read_param(Path::new(path)));
                 drop(lib);
-                let (game_id, title_id, name) = match g {
-                    Some(g) => (g.id, g.title_id, g.name),
-                    None => (String::new(), String::new(), Path::new(path).file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_else(|| "Unknown game".into())),
+                let (game_id, title_id, name, emulator) = match g {
+                    Some(g) => (g.id, g.title_id, g.name, g.platform.emulator_id().to_string()),
+                    None => (String::new(), String::new(), Path::new(path).file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_else(|| "Unknown game".into()), String::new()),
                 };
                 crate::log!("detected running game: {name} (pid {pid})");
-                inner.live.push(Session { pid: *pid, game_id, title_id, name, path: path.clone(), since: *started, own: false, log: PathBuf::new(), stopping: false });
+                inner.live.push(Session { pid: *pid, game_id, title_id, name, path: path.clone(), since: *started, own: false, log: PathBuf::new(), stopping: false, emulator, build: String::new() });
                 changed = true;
             }
             // Finished sessions.
@@ -492,7 +554,7 @@ impl Sessions {
                     e.last = now.floor();
                 }
                 crate::log!("game ended: {} exit {:?}", s.name, code);
-                inner.ended.push(Ended { game_id: s.game_id.clone(), name: s.name.clone(), exit_code: *code, stopped: s.stopping, played, log: s.log.clone() });
+                inner.ended.push(Ended { game_id: s.game_id.clone(), name: s.name.clone(), exit_code: *code, stopped: s.stopping, played, log: s.log.clone(), emulator: s.emulator.clone(), build: s.build.clone() });
             }
             if !finished.is_empty() {
                 if let Ok(json) = serde_json::to_vec_pretty(&inner.playtime) {
@@ -790,5 +852,38 @@ mod tests {
         assert_eq!(game_folder(s(folder.clone())), s(folder));
         assert_eq!(game_folder(s(t.path().join("game.zar"))), s(t.path().join("game.zar")));
         assert_eq!(game_folder("/does/not/exist".into()), "/does/not/exist");
+    }
+}
+
+#[cfg(test)]
+mod identity_tests {
+    use super::{launch_identity, Build};
+    use crate::config::Config;
+    use crate::platform::Platform;
+    use std::path::{Path, PathBuf};
+
+    const ROOT: &str = "/home/u/.local/share/ps5-launcher/kyty";
+
+    fn identity(platform: Platform, cfg: &Config, kyty_installed: &str, shad_installed: &str) -> (&'static str, Build) {
+        launch_identity(platform, cfg, kyty_installed, Path::new(ROOT), shad_installed)
+    }
+
+    #[test]
+    fn a_launch_records_the_emulator_and_the_build_it_runs() {
+        let mut cfg = Config::default();
+        assert_eq!(identity(Platform::Ps4, &cfg, "", "v.0.9.0"), ("shadps4", Build::Known("0.9.0".into())), "the managed shadPS4's release");
+        cfg.shad_emulator = "/opt/shad/AppRun".into();
+        assert_eq!(identity(Platform::Ps4, &cfg, "", "v.0.9.0"), ("shadps4", Build::Known("custom build".into())));
+        cfg.emulator = format!("{ROOT}/current/kyty_emulator");
+        assert_eq!(identity(Platform::Ps5, &cfg, "KytyPS5-2026-09-29-59a1760", ""), ("kyty", Build::Known("KytyPS5-2026-09-29-59a1760".into())), "the managed KytyPS5's tag");
+        assert_eq!(identity(Platform::Ps5, &cfg, "", ""), ("kyty", Build::Probe(PathBuf::from(format!("{ROOT}/current/kyty_emulator")))), "no tag: ask the binary");
+        cfg.emulator = "/home/u/KytyPS5/_Build/kyty_emulator".into();
+        assert_eq!(identity(Platform::Ps5, &cfg, "KytyPS5-2026-09-29-59a1760", ""), ("kyty", Build::Probe(PathBuf::from("/home/u/KytyPS5/_Build/kyty_emulator"))), "the user's own build: ask it");
+    }
+
+    #[test]
+    fn a_build_is_known_or_read_from_its_binary() {
+        assert_eq!(Build::Known("1.0".into()).resolve(), "1.0");
+        assert_eq!(Build::Probe(PathBuf::from("/does/not/exist/kyty_emulator")).resolve(), "", "a binary that is not there has no version");
     }
 }

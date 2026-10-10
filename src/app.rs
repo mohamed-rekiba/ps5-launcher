@@ -280,6 +280,9 @@ pub struct App {
     pub my_results: crate::results::Results,
     /// Saved logs of games that just crashed, by game ID, waiting to go with their rating.
     pub crash_logs: HashMap<String, std::path::PathBuf>,
+    /// The emulator (addon id) and build of each game's last session in this run, by game ID,
+    /// as the launch recorded them: the game's rating names them.
+    pub played_on: HashMap<String, (String, String)>,
     /// Library: show one console's games (None: every console).
     pub platform_filter: Option<crate::platform::Platform>,
     /// The Library catalog has games for more than one console (shows badges and a console chip).
@@ -448,6 +451,7 @@ pub fn run(ui: AppWindow, monitors: Vec<Monitor>, target_monitor: Option<Monitor
         compat: crate::compat::with_mine(crate::compat::load().0, &crate::results::load()),
         my_results: crate::results::load(),
         crash_logs: HashMap::new(),
+        played_on: HashMap::new(),
         platform_filter: None,
         mixed_consoles: false,
         status_count: 4,
@@ -1107,14 +1111,14 @@ impl App {
         }.map(|p| p.to_string_lossy().into_owned()).unwrap_or_default();
         let probe = self.emulator_probe(l);
         std::thread::spawn(move || {
-            let (emulator, version) = (probe.emulator(), probe.version());
+            let (emulator, version) = probe.identify();
             post(move |app| {
                 let Some(status) = status else {
-                    app.my_results.skip(&tid, emulator, &version);
+                    app.my_results.skip(&tid, &emulator, &version);
                     app.my_results.save();
                     return;
                 };
-                app.my_results.rate(&tid, &name, status, emulator, &version, util::now_secs(), &log);
+                app.my_results.rate(&tid, &name, status, &emulator, &version, util::now_secs(), &log);
                 app.my_results.save();
                 app.compat = crate::compat::with_mine(std::mem::take(&mut app.compat), &app.my_results);
                 app.build_genres();
@@ -1136,10 +1140,10 @@ impl App {
         let probe = self.emulator_probe(l);
         let id = game_id.to_string();
         std::thread::spawn(move || {
-            let (emulator, version) = (probe.emulator(), probe.version());
+            let (emulator, version) = probe.identify();
             post(move |app| {
                 let free = matches!(app.overlay, Overlay::None | Overlay::Hub) && app.live.is_empty() && !app.boot.active;
-                if free && app.my_results.should_ask(&tid, emulator, &version) {
+                if free && app.my_results.should_ask(&tid, &emulator, &version) {
                     if let Some(l) = app.locals.iter().position(|g| g.l.id == id) {
                         app.open_rating(l, true);
                     }
@@ -1286,8 +1290,8 @@ impl App {
     }
 
     fn emulator_probe(&self, l: usize) -> EmulatorProbe {
-        let c = self.cfg.lock().unwrap();
-        EmulatorProbe { platform: self.locals[l].l.platform, kyty: c.emulator_path(), custom_shad: c.shad_custom() }
+        let game = &self.locals[l].l;
+        EmulatorProbe { platform: game.platform, cfg: self.cfg.lock().unwrap().clone(), played: self.played_on.get(&game.id).cloned() }
     }
 
     /// Count the installed games' bytes on a worker thread, when the set of game folders changed.
@@ -1379,6 +1383,9 @@ impl App {
                 self.toast_game_action(&what.0, &format!("{}{more}", what.1), 2, &e.game_id, &action);
             } else {
                 self.toast_game(&e.name, &format!("Played for {played}"), 1, &e.game_id);
+            }
+            if !e.emulator.is_empty() {
+                self.played_on.insert(e.game_id.clone(), (e.emulator.clone(), e.build.clone()));
             }
             self.ask_rating(&e.game_id);
         }
@@ -2925,26 +2932,28 @@ pub fn model<T: Clone + 'static>(v: Vec<T>) -> ModelRc<T> {
 }
 
 
-/// What it takes to name the emulator build a game ran on, for its rating: cheap to make, but
-/// `version` can take a moment for a custom KytyPS5, so call it off the UI thread.
+/// What it takes to name the emulator and build a game ran on, for its rating: cheap to make,
+/// but `identify` can take a moment for a custom KytyPS5, so call it off the UI thread.
 struct EmulatorProbe {
     platform: crate::platform::Platform,
-    kyty: std::path::PathBuf,
-    custom_shad: bool,
+    cfg: crate::config::Config,
+    /// What the game's last session in this run recorded at launch.
+    played: Option<(String, String)>,
 }
 
 impl EmulatorProbe {
-    /// The emulator's addon id.
-    fn emulator(&self) -> &'static str {
-        self.platform.emulator_id()
-    }
-
-    /// KytyPS5's build for PS5 games, shadPS4's release for PS4 games.
-    fn version(&self) -> String {
-        match self.platform {
-            crate::platform::Platform::Ps4 if self.custom_shad => "custom build".into(),
-            crate::platform::Platform::Ps4 => crate::shad::pretty(&crate::shad::load_state().installed),
-            crate::platform::Platform::Ps5 => crate::kyty::version_for(&self.kyty),
+    /// The emulator's addon id and its build: as the last session recorded them, else the
+    /// emulator that runs the game now (KytyPS5's build for PS5 games, shadPS4's release for PS4
+    /// games).
+    fn identify(self) -> (String, String) {
+        match self.played {
+            Some((emulator, build)) if !build.is_empty() => (emulator, build),
+            // Launched, but its build was not known yet when it ended, or it was started outside the launcher.
+            Some((emulator, _)) => (emulator, crate::sessions::current_identity(self.platform, &self.cfg).1.resolve()),
+            None => {
+                let (emulator, build) = crate::sessions::current_identity(self.platform, &self.cfg);
+                (emulator.to_string(), build.resolve())
+            }
         }
     }
 }
