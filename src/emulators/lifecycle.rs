@@ -648,6 +648,13 @@ impl Run<'_> {
                     }
                 } else if !present(&target) && present(&old) {
                     self.rename(&old, &target, &subject, "the old copy cannot be put back")?;
+                } else if present(&old) {
+                    // Another folder took the name meanwhile: keep both, and say where.
+                    let kept = self.ensure(&["kept", "emulators", &id])?;
+                    let free = (1..).map(|n| kept.join(n.to_string())).find(|p| !present(p)).expect("a free number");
+                    self.rename(&old, &free, &subject, "the earlier copy cannot be kept")?;
+                    let message = format!("an interrupted update found another folder here; the launcher kept both, and the earlier copy is in {}", shown(self.root, &free));
+                    self.problems.push(Problem::new(subject.clone(), message));
                 }
                 self.remove(&old)?;
                 self.remove(&self.staging(&id))?;

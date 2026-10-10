@@ -606,6 +606,27 @@ fn an_edit_made_during_an_update_is_kept() {
 }
 
 #[test]
+fn a_recovery_that_finds_another_folder_keeps_both() {
+    let r = root();
+    run(r.path(), &[kyty_v1()]);
+    // The update stops after the old copy went aside, before the default is in place ...
+    let staged = r.path().join("emulators/.staging/kyty");
+    let crash = Injected::new(real(), |_, op, path| if op == Op::Rename && path == staged { Err(io::Error::other("the power went off")) } else { Ok(()) });
+    reconcile(r.path(), &src(&[kyty_v2()]), &crash);
+    assert_eq!(crash.crashed(), Some(Op::Rename));
+    // ... and the user makes a new folder with that name before the next start.
+    fs::create_dir(r.path().join("emulators/kyty")).unwrap();
+    fs::write(r.path().join("emulators/kyty/emulator.yaml"), "mine\n").unwrap();
+    let problems = run(r.path(), &[kyty_v2()]);
+    assert_eq!(problems[0], Problem::new("emulators/kyty", "an interrupted update found another folder here; the launcher kept both, and the earlier copy is in kept/emulators/kyty/1"));
+    assert_eq!(read(r.path(), "emulators/kyty/emulator.yaml"), "mine\n");
+    assert_eq!(read(r.path(), "kept/emulators/kyty/1/emulator.yaml"), "kyty v1\n");
+    assert_eq!(read(r.path(), "kept/emulators/kyty/1/media/icon.svg"), "<svg/>");
+    assert!(!r.path().join("addons-journal.yaml").exists());
+    assert_tidy(r.path());
+}
+
+#[test]
 fn a_damaged_journal_leaves_every_folder_as_it_is() {
     for journal in ["step: offer\nid: kyty\nrevision: \"ééééééééééééééééé\"\n", "step: copy\nid: ../kyty\nrevision: aaaa\n", "step: [\n"] {
         let r = root();
