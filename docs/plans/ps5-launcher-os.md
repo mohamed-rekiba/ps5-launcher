@@ -506,9 +506,9 @@ user.
 
 - README "As a console" rewritten. `packaging/README.md` and `packaging/os/README.md` updated.
   `docs/DEVELOPMENT.md` gets the system layer and the helper.
-- Bazzite users: the launcher shows a notice with the steps to move to the new image. The old
-  workflow keeps building the Bazzite image for the agreed time, then stops.
-- `os/` and the old workflow are deleted when that time ends.
+- Bazzite users: the launcher shows a notice with the steps to move to the new image.
+- ~~`os/` and the old workflow are deleted when that time ends~~: done early. The owner removed
+  both before the Fedora image's first release (`packaging/os/` replaces `os/`).
 - Release notes through the existing Release Please flow.
 
 ## Decisions after the spike
