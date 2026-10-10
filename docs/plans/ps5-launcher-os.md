@@ -10,7 +10,7 @@ advisor (Codex) and are recorded here and in the commit messages.
 |---|---|
 | 0a. Image and installer spike | Done in CI: Fedora 44 bootc builds and boots under KVM, the signed NVIDIA modules build, the helper and SDDM fallback work. Real-hardware questions are open. |
 | 0b. UI prototype | Done; picks below. |
-| 1. OS image | Built: `packaging/os/`, `.github/workflows/os-fedora.yml` with VM gates and manual promotion. Not run yet: needs the owner's Secure Boot key, a public GHCR package and the release environment. **Image signing is designed, not built: it blocks any public release.** |
+| 1. OS image | Built: `packaging/os/`, `.github/workflows/os-fedora.yml` with VM gates and manual promotion. Not run yet: needs the owner's Secure Boot key, a public GHCR package and the release environment. **Image signing is built, not run yet: it needs the owner's signing key and one green end-to-end run, then a reviewed change lifts the release guard.** |
 | 2. System layer and session | Done. |
 | 3. Power menu, Quick Menu, PS button, power key | Done. |
 | 4. Settings with the side rail | Done. |
@@ -536,11 +536,14 @@ user.
   entry is deferred.
 - **Power key:** a udev rule, logind's `HandlePowerKey=suspend` as the fallback, and the launcher
   holding the `handle-power-key` inhibitor through `systemd-inhibit` and a pipe.
-- **Image signing (to build):** a dedicated cosign key pair, legacy sigstore attachments in GHCR;
-  a reject-by-default `/etc/containers/policy.json` and a `registries.d` entry in both images;
-  `--enforce-container-sigpolicy` on every helper switch; the helper verifies the exact digest
-  before staging (skopeo inspect checks nothing); the public ISO pins verified digests, and the
-  first boot turns enforcement on. Secrets: `OS_IMAGE_SIGNING_KEY`, `COSIGN_PASSWORD`.
+- **Image signing (built, not run yet):** a dedicated cosign key pair (cosign v3.1.3, legacy
+  sigstore attachments in GHCR, simple signing payload, no transparency log); a reject-by-default
+  `/etc/containers/policy.json` and a `registries.d` entry in both images;
+  `--enforce-container-sigpolicy` on every helper switch; the helper checks the exact digest
+  through skopeo's image proxy before it trusts it (skopeo inspect checks nothing); the public
+  ISO pins the promoted digests, and the first start turns enforcement on. Secrets
+  `OS_IMAGE_SIGNING_KEY` and `COSIGN_PASSWORD` in the environment `os-fedora-signing` (main only).
+  See `packaging/os/signing/README.md`.
 
 ## Open questions
 
