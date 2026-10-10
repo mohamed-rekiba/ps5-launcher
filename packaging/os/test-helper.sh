@@ -11,11 +11,12 @@ sed -e "s|^sddm_dir=/etc/sddm.conf.d$|sddm_dir=$work/sddm|" \
     -e "s|^os_release=/usr/lib/ps5-launcher/os-release$|os_release=$work/os-release|" \
     -e "s|^cert_dir=/usr/share/ps5-launcher/secureboot$|cert_dir=$work/certs|" \
     -e "s|^state_dir=/var/lib/ps5-launcher$|state_dir=$work/state|" \
+    -e "s|^long=7200$|long=2|" \
     -e "s|^PATH=/usr/sbin:/usr/bin$|PATH=$work/bin:/usr/sbin:/usr/bin:/bin|" \
     "$(dirname "$0")/files/usr/libexec/ps5-launcher/helper" > "$work/helper"
 chmod +x "$work/helper"
 for fixed in "^sddm_dir=$work/sddm$" "^os_release=$work/os-release$" "^cert_dir=$work/certs$" \
-    "^state_dir=$work/state$" "^PATH=$work/bin:"; do
+    "^state_dir=$work/state$" "^long=2$" "^PATH=$work/bin:"; do
     if ! grep -q "$fixed" "$work/helper"; then
         echo "FAIL the helper's fixed path $fixed was not found"
         exit 1
@@ -25,7 +26,8 @@ printf 'IMAGE=main\nIMAGE_REF=ghcr.io/owner/ps5-launcher-fedora:main\n' > "$work
 # The fakes. bootc logs its arguments. skopeo answers from $work/registry/<tag> ("digest label").
 # mokutil answers from $work/sb-state and $work/mok ("enrolled", "pending" or "not"), and logs
 # what --import gets on stdin.
-printf '#!/bin/sh\necho "$*" >> "%s/bootc.log"\n' "$work" > "$work/bin/bootc"
+# bootc hangs while $work/hang exists, to test the helper's own deadlines.
+printf '#!/bin/sh\necho "$*" >> "%s/bootc.log"\n[ -e "%s/hang" ] && sleep 60\nexit 0\n' "$work" "$work" > "$work/bin/bootc"
 cat > "$work/bin/skopeo" <<FAKE
 #!/bin/sh
 for a in "\$@"; do case "\$a" in docker://*) ref=\$a ;; esac; done
@@ -50,6 +52,10 @@ case "\$1" in
 esac
 FAKE
 chmod +x "$work/bin/bootc" "$work/bin/skopeo" "$work/bin/mokutil"
+# macOS has no timeout on the helper's PATH (Homebrew's coreutils has one); Fedora does.
+if ! PATH=/usr/sbin:/usr/bin:/bin command -v timeout >/dev/null; then
+    ln -s "$(command -v timeout || command -v gtimeout)" "$work/bin/timeout"
+fi
 # macOS has no sha256sum on the helper's PATH; Fedora does.
 if ! PATH=/usr/sbin:/usr/bin:/bin command -v sha256sum >/dev/null; then
     printf '#!/bin/sh\nexec shasum -a 256 "$@"\n' > "$work/bin/sha256sum"
@@ -188,6 +194,14 @@ check "  and follows the main tag" grep -qx "switch ghcr.io/owner/ps5-launcher-f
 check "switch to anything else is refused" gate 2 switch ../../evil
 check "status reads bootc's state" gate 0 status
 check "  as JSON" grep -qx "status --json" "$work/bootc.log"
+# The helper stops a task that runs too long by itself (as root; the launcher's own deadline
+# cannot stop a pkexec'd process). The test copy's long deadline is 2 s.
+printf 'IMAGE=main\nIMAGE_REF=ghcr.io/owner/ps5-launcher-fedora:main\n' > "$work/os-release"
+touch "$work/hang"
+start=$(date +%s)
+check "a download that hangs is stopped by the helper's deadline" gate 124 update
+check "  within seconds" test $(($(date +%s) - start)) -lt 15
+rm "$work/hang"
 check "an unknown task is refused" fails helper rm -rf /
 check "no task is refused" fails helper
 check "extra arguments are refused" fails helper update --apply

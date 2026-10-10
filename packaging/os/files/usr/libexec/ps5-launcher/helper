@@ -26,6 +26,11 @@ sddm_dir=/etc/sddm.conf.d
 os_release=/usr/lib/ps5-launcher/os-release
 cert_dir=/usr/share/ps5-launcher/secureboot
 state_dir=/var/lib/ps5-launcher
+# How long a task may run, in seconds. timeout runs as root here, so it can stop the work; the
+# launcher's own deadline cannot stop a process pkexec started as root.
+short=30
+check=120
+long=7200
 PATH=/usr/sbin:/usr/bin
 export PATH
 next_session="$sddm_dir/90-ps5-launcher-os-next-session.conf"
@@ -49,7 +54,7 @@ marker() {
 # Whether Secure Boot checks kernel modules. Anything but a clear answer stops the task: guessing
 # "off" would stage an image whose driver may not load.
 secure_boot() {
-    sb=$(mokutil --sb-state 2>&1 || true)
+    sb=$(timeout -k 10 "$short" mokutil --sb-state 2>&1 || true)
     case "$sb" in
     *"validation is disabled in shim"*) return 1 ;;
     *"SecureBoot enabled"*) return 0 ;;
@@ -61,7 +66,7 @@ secure_boot() {
 # The digest of `ref` in the registry, and the certificate file its label names.
 # Sets $digest and $cert.
 resolve() {
-    out=$(skopeo inspect --format "{{.Digest}} {{index .Labels \"$cert_label\"}}" "docker://$1") ||
+    out=$(timeout -k 10 "$check" skopeo inspect --format "{{.Digest}} {{index .Labels \"$cert_label\"}}" "docker://$1") ||
         fail "could not read $1"
     digest=${out%% *}
     sha=${out#* }
@@ -90,7 +95,7 @@ stage_nvidia() {
     ref=$1
     resolve "$ref"
     if secure_boot; then
-        state=$(mokutil --test-key "$cert" 2>&1 || true)
+        state=$(timeout -k 10 "$short" mokutil --test-key "$cert" 2>&1 || true)
         case "$state" in
         *"is already enrolled"* | *"already in the built-in trusted keyring"*) ;;
         *"already in the enrollment request"*)
@@ -103,7 +108,7 @@ stage_nvidia() {
             ;;
         esac
     fi
-    bootc switch "${ref%:*}@$digest"
+    timeout -k 10 "$long" bootc switch "${ref%:*}@$digest"
     remember_digest "$digest"
     exit 0
 }
@@ -129,7 +134,7 @@ case "$task $#" in
     mv -f "$tmp" "$next_session"
     ;;
 "clear-next-session 0") rm -f "$next_session" ;;
-"status 0") exec bootc status --json ;;
+"status 0") exec timeout -k 10 "$short" bootc status --json ;;
 "update-check 0")
     # bootc cannot see a newer image once it follows a digest, so the NVIDIA image asks the
     # channel itself.
@@ -142,7 +147,7 @@ case "$task $#" in
         fi
         exit 0
     fi
-    exec bootc upgrade --check
+    exec timeout -k 10 "$check" bootc upgrade --check
     ;;
 "update 0")
     # The NVIDIA image is always staged by digest (after the key check when Secure Boot is on),
@@ -150,14 +155,14 @@ case "$task $#" in
     if [ "$(marker IMAGE)" = nvidia ]; then
         stage_nvidia "$(marker IMAGE_REF)"
     fi
-    exec bootc upgrade
+    exec timeout -k 10 "$long" bootc upgrade
     ;;
-"rollback 0") exec bootc rollback ;;
+"rollback 0") exec timeout -k 10 "$check" bootc rollback ;;
 "switch 1")
     ref=$(marker IMAGE_REF)
     [ -n "$ref" ] || fail "$os_release has no IMAGE_REF"
     case "$1" in
-    main) exec bootc switch "${ref%:*}:main" ;;
+    main) exec timeout -k 10 "$long" bootc switch "${ref%:*}:main" ;;
     nvidia) stage_nvidia "${ref%:*}:nvidia" ;;
     *) usage ;;
     esac
@@ -166,7 +171,7 @@ case "$task $#" in
     ref=$(marker IMAGE_REF)
     [ "$(marker IMAGE)" = nvidia ] || ref="${ref%:*}:nvidia"
     resolve "$ref"
-    case "$(mokutil --test-key "$cert" 2>&1 || true)" in
+    case "$(timeout -k 10 "$short" mokutil --test-key "$cert" 2>&1 || true)" in
     *"is already enrolled"* | *"already in the built-in trusted keyring"*)
         echo key-enrolled
         exit 0
@@ -174,13 +179,13 @@ case "$task $#" in
     *"already in the enrollment request"*)
         # mokutil keeps a waiting request and its first password; replace it, so the password
         # printed below is the one the blue screen asks for.
-        mokutil --revoke-import >/dev/null || fail "mokutil could not replace the waiting request"
+        timeout -k 10 "$short" mokutil --revoke-import >/dev/null || fail "mokutil could not replace the waiting request"
         ;;
     esac
     # 8 random digits: easy to type on the blue screen, which may ask for them one by one.
     password=$(od -An -N4 -tu4 /dev/urandom | tr -d ' ')
     password=$(printf '%08d' $((password % 100000000)))
-    printf '%s\n%s\n' "$password" "$password" | mokutil --import "$cert" >/dev/null ||
+    printf '%s\n%s\n' "$password" "$password" | timeout -k 10 "$short" mokutil --import "$cert" >/dev/null ||
         fail "mokutil could not queue the key"
     echo "$password"
     ;;
