@@ -44,26 +44,3 @@ jobs:
           token: ${{ secrets.RELEASE_PLEASE_TOKEN || github.token }}
           config-file: .github/release-please-config.json
           manifest-file: .github/release-please-manifest.json
-
-  # Without RELEASE_PLEASE_TOKEN the tag push starts nothing, so start Package on the tag here.
-  package:
-    needs: release-please
-    if: needs.release-please.outputs.created == 'true'
-    runs-on: ubuntu-24.04
-    timeout-minutes: 5
-    permissions:
-      actions: write
-    steps:
-      - name: Start Package on the new tag
-        env:
-          GH_TOKEN: ${{ github.token }}
-          GH_REPO: ${{ github.repository }}
-          TAG: ${{ needs.release-please.outputs.tag }}
-          PAT: ${{ secrets.RELEASE_PLEASE_TOKEN }}
-        run: |
-          if [ -n "$PAT" ]; then
-            echo "RELEASE_PLEASE_TOKEN pushed the tag, so the tag push starts Package"
-            exit 0
-          fi
-          gh workflow run package.yml --ref "$TAG"
-          echo "Started Package on $TAG"
