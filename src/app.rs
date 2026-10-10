@@ -471,6 +471,10 @@ pub fn run(ui: AppWindow, monitors: Vec<Monitor>, target_monitor: Option<Monitor
     with_app(|app| app.shad_start());
     with_app(|app| app.app_update_start());
     with_app(|app| app.compat_start());
+    // The Quick Menu's Sound card is there from its first opening.
+    if crate::system::Mode::current() != crate::system::Mode::Desktop {
+        with_app(|app| app.sound_load(false));
+    }
 
     wire_callbacks(&ui);
     crate::gamepad::spawn(|p| post(move |app| app.on_pad(p)));

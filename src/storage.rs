@@ -139,9 +139,29 @@ pub fn gigabytes(bytes: u64) -> String {
     if gb >= 1000.0 { format!("{:.1} TB", gb / 1000.0) } else { format!("{gb:.1} GB") }
 }
 
+/// A file system's usual name: lsblk prints "exfat", people say "exFAT".
+pub fn fs_name(fstype: &str) -> String {
+    match fstype {
+        "exfat" => "exFAT".into(),
+        "vfat" => "FAT32".into(),
+        "ntfs" | "ntfs3" => "NTFS".into(),
+        "btrfs" => "Btrfs".into(),
+        "xfs" => "XFS".into(),
+        "crypto_LUKS" => "Encrypted".into(),
+        other => other.into(),
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn file_system_names() {
+        assert_eq!(fs_name("exfat"), "exFAT");
+        assert_eq!(fs_name("ntfs3"), "NTFS");
+        assert_eq!(fs_name("ext4"), "ext4");
+    }
 
     fn part(fstype: Option<&str>, mountpoint: Option<&str>) -> Partition {
         Partition { path: "/dev/sda1".into(), bytes: 1, fstype: fstype.map(String::from), label: None, mountpoint: mountpoint.map(String::from) }

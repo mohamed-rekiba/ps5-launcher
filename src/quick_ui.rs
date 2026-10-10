@@ -69,9 +69,10 @@ pub fn seps(cards: &[Card]) -> Vec<bool> {
     }).collect()
 }
 
-/// The Sound card's status: "65%", or "Muted".
+/// The Sound card's status: "65%", or "Muted · 65%".
 pub fn sound_status(output: &crate::sound::Output) -> String {
-    if output.muted { "Muted".into() } else { crate::sound::percent(output.volume) }
+    let volume = crate::sound::percent(output.volume);
+    if output.muted { format!("Muted · {volume}") } else { volume }
 }
 
 /// "2 connected".
@@ -278,7 +279,7 @@ mod tests {
     fn the_sound_card_shows_the_volume() {
         let out = |volume, muted| crate::sound::Output { id: 1, name: "TV".into(), volume, muted, default: true };
         assert_eq!(sound_status(&out(0.65, false)), "65%");
-        assert_eq!(sound_status(&out(0.65, true)), "Muted");
+        assert_eq!(sound_status(&out(0.65, true)), "Muted · 65%");
     }
 
     #[test]

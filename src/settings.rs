@@ -267,7 +267,7 @@ const RAIL_FOLDED: f32 = 116.0;
 const PAGE_TOP: f32 = 170.0;
 const PAGE_BOTTOM: f32 = 110.0;
 /// The Secure Boot key's steps on the Updates page, with the space under them.
-const KEY_CARD: f32 = 600.0;
+const KEY_CARD: f32 = 510.0;
 
 /// The rail and the page: which category is open, every row of every category (for search), and
 /// the search field.

@@ -328,9 +328,9 @@ impl App {
                 }
                 rows.push((Cat::Network, SId::Network(i), r));
                 if net.asking.as_deref() == Some(w.ssid.as_str()) {
-                    let mut r = row(1, "Password");
+                    let mut r = row(1, &format!("Password for {}", w.ssid));
                     r.secret = true;
-                    r.hint = format!("For {} · Enter or Done joins it", w.ssid).into();
+                    r.hint = "Enter or Done joins the network".into();
                     rows.push((Cat::Network, SId::WifiPassword, r));
                 }
             }
@@ -465,7 +465,7 @@ impl App {
         let outputs = &self.sys.outputs;
         if let Some(out) = sound::default_output(outputs) {
             let mut r = row(3, "Volume");
-            r.value = if out.muted { format!("Muted · {}", sound::percent(out.volume)) } else { sound::percent(out.volume) }.into();
+            r.value = crate::quick_ui::sound_status(out).into();
             r.hint = out.name.clone().into();
             rows.push((Cat::Sound, SId::Volume, r));
             let mut r = row(2, "Mute");
@@ -562,7 +562,7 @@ impl App {
             }
             for (p, part) in listed {
                 let name = part.label.clone().unwrap_or_else(|| part.path.trim_start_matches("/dev/").to_string());
-                let fstype = part.fstype.as_deref().unwrap_or_default();
+                let fstype = storage::fs_name(part.fstype.as_deref().unwrap_or_default());
                 let mut r = row(4, &format!("{name} · {fstype}"));
                 let size = storage::gigabytes(part.bytes);
                 r.hint = match (&part.mountpoint, self.sys.free.get(&part.path)) {
@@ -628,7 +628,12 @@ impl App {
         r.value = osupdate::status_text(status, os.found.as_deref(), os.checking).into();
         r.value_kind = if staged || found { 3 } else if os.checking { 0 } else { 1 };
         let version = status.booted.version.clone().unwrap_or_else(|| osupdate::short_digest(&status.booted.digest));
-        r.hint = if staged { format!("Version {version} · the update installs when the PC restarts") } else { format!("Version {version}") }.into();
+        r.hint = match status.staged.as_ref().and_then(|s| s.version.clone()) {
+            Some(next) => format!("Version {version} · {next} installs when the PC restarts"),
+            None if staged => format!("Version {version} · the update installs when the PC restarts"),
+            None => format!("Version {version}"),
+        }
+        .into();
         rows.push((Cat::OsUpdates, SId::OsStatus, r));
         if found && !staged {
             let mut r = row(4, "Download update");
