@@ -1,0 +1,7 @@
+# actionlint configuration (make lint and CI run actionlint on .github/workflows).
+paths:
+  .github/workflows/os.yml:
+    ignore:
+      # concurrency.queue (GitHub's "queue: max") is newer than actionlint v1.7.12, which does not
+      # know the key yet. Remove this once actionlint supports it.
+      - 'unexpected key "queue" for "concurrency" section'

@@ -308,7 +308,9 @@ Releases are automated with [Release Please](https://github.com/googleapis/relea
      publishes the release. The launcher's updater only ever sees published releases, so they
      always have their files.
    - **OS** (`os.yml`) waits for Package to publish, then builds and tests the OS images with
-     that release ([packaging/os](../packaging/os/README.md)). Prereleases are skipped.
+     that release ([packaging/os](../packaging/os/README.md)). Prereleases are skipped. Once
+     image signing is enabled, it then waits for the `os-fedora-release` approval (after the
+     hardware tests), promotes the images, and attaches the installer ISO to the release.
 
 To run Package or OS by hand, pick the release tag under **Use workflow from**.
 

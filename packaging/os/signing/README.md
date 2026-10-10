@@ -118,7 +118,7 @@ repository.
 | Environment | Used by | Its rules (the owner sets them) |
 |---|---|---|
 | `os-fedora-signing` | the `sign` job | Deployment branches and tags: `main` and `v*`. No reviewers. Secrets `OS_IMAGE_SIGNING_KEY`, `COSIGN_PASSWORD`. |
-| `os-fedora-release` | the `promote` job | Deployment branches: `main` only. Required reviewers, who approve only with hardware results for that exact run. |
+| `os-fedora-release` | the `promote` job | Deployment branches and tags: `main` and `v*`. Required reviewers, who approve only with hardware results for that exact run. |
 
 The signing key is not in `os-fedora-release`: its required reviewers would hold every daily run
 at the `sign` job. A run from any other branch fails at `sign`, so it gets no signed candidates

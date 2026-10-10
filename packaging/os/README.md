@@ -325,16 +325,19 @@ Fedora's updates. Both go into the job summary and the image labels.
    upgrade digests, the Fedora base digest, the launcher version, the certificate and ISO
    checksums), [hardware-test.md](hardware-test.md) and
    [collect-hardware-logs.sh](collect-hardware-logs.sh). The job summary shows the manifest.
-6. **release-guard**, in every run with `promote` or `attach_iso` on: fails while
-   `OS_IMAGE_SIGNING` is not `enabled` (see below). Promotion and the ISO wait for it.
-7. **promote**, only when the run was started with `promote` on, from `main`, after every gate
-   passed, and after a reviewer of the environment `os-fedora-release` approved it. First it
+6. **release-guard**, in every run with `promote` or `attach_iso` on, and in every release-tag
+   run: by hand it fails while `OS_IMAGE_SIGNING` is not `enabled` (see below); on a release tag
+   it only skips promotion and the ISO until then. Promotion and the ISO wait for it.
+7. **promote**, when the run was started by hand with `promote` on from `main`, or by a release
+   tag once `OS_IMAGE_SIGNING` is `enabled`; after every gate passed, and after a reviewer of the environment `os-fedora-release` approved it. First it
    checks both digests: `cosign verify` against the committed key, with this run's id, the sign
    job's attempt, the commit and the variant; and Fedora 44's skopeo copying each digest under
    the images' own policy. Then it copies the tested digests to `main-YYYYMMDD`,
-   `nvidia-YYYYMMDD`, `main` and `nvidia`, and checks each tag's digest and signature. **Scheduled
-   runs and release runs never promote; they only push candidates.**
-8. **iso**, only with `attach_iso` on and after promotion: checks again that `main` and `nvidia`
+   `nvidia-YYYYMMDD`, `main` and `nvidia`, and checks each tag's digest and signature. It refuses
+   to promote a launcher older than the one `main` has, so a late approval never moves installed
+   PCs back. **Runs by hand without `promote`, and release runs while signing is not enabled,
+   never promote; they only push candidates.**
+8. **iso**, after promotion, with `attach_iso` on or in a release-tag run: checks again that `main` and `nvidia`
    point at the promoted digests and that they are signed, builds the ISO that installs exactly
    those digests, and attaches `ps5-launcher-fedora-x86_64.iso` and its `.sha256` to the
    launcher release, under 2 GiB.
@@ -378,14 +381,18 @@ Then set it to `enabled` in a separate, reviewed change that cites that run's id
    Package settings → Change visibility). The install test and installed PCs pull without a
    login, so the install test fails until then.
 4. **The environment `os-fedora-release`:** create it (Settings → Environments), add required
-   reviewers, and allow only the `main` branch to deploy to it. Without reviewers, a run with
-   `promote` on would promote right after the automated gates.
+   reviewers, and allow only the branch `main` and the tags `v*` to deploy to it. Without
+   reviewers, a release tag (or a run with `promote` on) would promote right after the
+   automated gates.
 5. **Protect `main` and the `v*` tags:** the environments trust them, so protect both (Settings →
    Rules): `main` changes only through reviewed pull requests, and only the release token may
    create, move or delete a `v*` tag.
-6. **After a launcher release:** the release's `v*` tag starts this workflow, without
-   promotion. Promote by hand after the hardware tests: start it from `main` with `promote` on
-   (and `attach_iso`, once the release guard is lifted).
+6. **After a launcher release:** the release's `v*` tag starts this workflow. While the release
+   guard is on, it only builds and tests the candidates. Once it is lifted, the run then waits
+   for the `os-fedora-release` approval: test the run's `candidate-iso` on hardware
+   ([hardware-test.md](hardware-test.md)), approve, and the run promotes the images and attaches
+   the ISO to that release. A run by hand from `main` with `promote` (and `attach_iso`) on still
+   works.
 7. Optional repository variables: `OS_IMAGE_OWNER` (a fork's registry name), `OS_VM_RUNNER` (a
    runner with KVM).
 

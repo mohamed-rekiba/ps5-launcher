@@ -46,18 +46,19 @@ name: OS
 #                  upgrade, bootc rollback, and the switch to NVIDIA and back work. It also
 #                  makes the candidate-iso artifact for the hardware tests: an ISO that installs
 #                  this run's tested digests, its checksum, manifest.txt, and the test kit.
-# 7. release-guard: fails every run with promote or attach_iso on while OS_IMAGE_SIGNING (below)
-#    is not "enabled".
+# 7. release-guard: fails every run by hand with promote or attach_iso on while OS_IMAGE_SIGNING
+#    (below) is not "enabled"; on a release tag it only skips promote and iso until then.
 # 8. promote: checks both digests' signatures (cosign verify against the committed key, with this
 #    run's id, attempt and commit, and a Fedora 44 skopeo copy under the image's own policy), then
 #    copies the tested digests to the release tags and checks every tag's digest and signature.
-#    Only when asked (input promote), only from main, and only after the environment
+#    By hand only when asked (input promote) and only from main; by itself on a release tag once
+#    OS_IMAGE_SIGNING is enabled. Either way only after the environment
 #    os-fedora-release approves it: its reviewers confirm the hardware tests
 #    (packaging/os/hardware-test.md), which CI cannot run (Secure Boot, real GPUs). The approval
 #    must cite hardware results for this exact run id, attempt and pair of digests. Scheduled
 #    runs never promote.
-# 9. iso: after promotion, and only when asked (input attach_iso), checks the promoted digests'
-#    signatures again and attaches ps5-launcher-fedora-x86_64.iso, which installs exactly those
+# 9. iso: after promotion, when asked (input attach_iso) or on a release tag, checks the promoted
+#    digests' signatures again and attaches ps5-launcher-fedora-x86_64.iso, which installs exactly those
 #    digests, to the launcher release.
 #
 # TODO: delete old testing-* tags (and their .sig tags) from the registry.
@@ -84,9 +85,12 @@ permissions:
   contents: read
   packages: write
 
+# One run at a time, through promotion and the ISO upload. queue: max keeps every waiting run (up
+# to 100): with the default, a third release run would cancel the second one while it waits.
 concurrency:
   group: ps5-launcher-fedora
   cancel-in-progress: false
+  queue: max
 
 env:
   # The registry owner. A fork that sets the repository variable OS_IMAGE_OWNER to its own name
@@ -730,23 +734,42 @@ jobs:
 
   # The public-release guard: promotion and the release ISO publish what installed PCs trust, so
   # they wait until image signing has run end to end (OS_IMAGE_SIGNING at the top). It has no
-  # environment, so it fails before anyone is asked to approve.
+  # environment, so it decides before anyone is asked to approve. Its output "release" lets
+  # promote and iso run:
+  #   by hand, with promote or attach_iso on: fails while signing is not enabled
+  #   on a release tag: promotes and attaches the ISO when signing is enabled; until then it
+  #     only says so, and the run still builds and tests the candidates
   release-guard:
-    if: inputs.promote || inputs.attach_iso
+    needs: prepare
+    if: inputs.promote || inputs.attach_iso || github.event_name == 'push'
     runs-on: ubuntu-24.04
     timeout-minutes: 5
+    outputs:
+      release: ${{ steps.guard.outputs.release }}
     steps:
-      - name: Refuse to publish before image signing has run end to end
+      - id: guard
+        name: Refuse to publish before image signing has run end to end
+        env:
+          EVENT: ${{ github.event_name }}
         run: |
-          if [ "$OS_IMAGE_SIGNING" != enabled ]; then
+          if [ "$OS_IMAGE_SIGNING" = enabled ]; then
+            echo "Image signing is enabled"
+            echo "release=true" >> "$GITHUB_OUTPUT"
+          elif [ "$EVENT" = push ]; then
+            echo "::notice::This release gets no OS images or ISO yet: image signing has not run end to end (OS_IMAGE_SIGNING). The candidates are still built and tested."
+            echo "release=false" >> "$GITHUB_OUTPUT"
+          else
             echo "::error::Promotion and the release ISO are blocked. Image signing is built, but two things are left: the owner's signing keys (packaging/os/signing/README.md), then one green run of this whole workflow. A separate, reviewed change then sets OS_IMAGE_SIGNING to enabled, citing that run. Run without promote and attach_iso to get the candidates."
             exit 1
           fi
-          echo "Image signing is enabled"
 
   promote:
     needs: [prepare, main, nvidia, sign, boot-test, install-test, release-guard]
-    if: inputs.promote && github.ref == 'refs/heads/main'
+    # By hand only from main; by itself only on a release tag (protected, like main).
+    if: >-
+      needs.release-guard.outputs.release == 'true' &&
+      ((inputs.promote && github.ref == 'refs/heads/main') ||
+       (github.event_name == 'push' && startsWith(github.ref, 'refs/tags/v')))
     runs-on: ubuntu-24.04
     timeout-minutes: 60
     # The owner adds required reviewers to this environment. They approve only with hardware
@@ -819,8 +842,19 @@ jobs:
               rm -rf /out/copy' | tee -a "$GITHUB_STEP_SUMMARY"
 
       - name: Copy the tested digests to the release tags
+        env:
+          LAUNCHER_TAG: ${{ needs.prepare.outputs.launcher_tag }}
         run: |
           echo "${{ github.token }}" | skopeo login ghcr.io -u "${{ github.actor }}" --password-stdin
+          # Never move the channels back: an older release approved after a newer one must not
+          # downgrade installed PCs. The same version again (a rebuild with Fedora's updates) is fine.
+          new=${LAUNCHER_TAG#v}
+          current=$(skopeo inspect "docker://$IMAGE:main" 2>/dev/null |
+            jq -r '.Labels["io.github.ps5-launcher.launcher-version"] // empty' || true)
+          if [ -n "$current" ] && [ "$(printf '%s\n%s\n' "$current" "$new" | sort -V | tail -1)" != "$new" ]; then
+            echo "::error::$IMAGE:main has launcher $current, newer than $new: promoting would move installed PCs back. Nothing was changed."
+            exit 1
+          fi
           # The same repository, so each signature (the tag sha256-<digest>.sig) follows its digest.
           promote() { # DIGEST TAG
             skopeo copy --preserve-digests "docker://$IMAGE@$1" "docker://$IMAGE:$2"
@@ -850,7 +884,7 @@ jobs:
 
   iso:
     needs: [prepare, main, nvidia, release-guard, promote]
-    if: inputs.attach_iso
+    if: needs.release-guard.outputs.release == 'true' && (inputs.attach_iso || github.event_name == 'push')
     runs-on: ubuntu-24.04
     timeout-minutes: 30
     permissions:
