@@ -1,0 +1,9 @@
+#!/bin/sh
+# Holds the power key for the launcher. The launcher starts it as:
+#   systemd-inhibit --what=handle-power-key --mode=block --no-ask-password --who=ps5-launcher \
+#       --why="Launcher power menu" /usr/libexec/ps5-launcher-os/power-key-hold
+# It writes one byte, "r" (the inhibitor lock is taken), then waits for the end of its input and
+# exits 0. When the launcher closes the pipe or dies, this ends, and the lock with it.
+printf r || exit 1
+cat >/dev/null
+exit 0

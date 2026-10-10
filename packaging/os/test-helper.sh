@@ -11,12 +11,16 @@ sed -e "s|^sddm_dir=/etc/sddm.conf.d$|sddm_dir=$work/sddm|" \
     -e "s|^os_release=/usr/lib/ps5-launcher/os-release$|os_release=$work/os-release|" \
     -e "s|^cert_dir=/usr/share/ps5-launcher/secureboot$|cert_dir=$work/certs|" \
     -e "s|^state_dir=/var/lib/ps5-launcher$|state_dir=$work/state|" \
+    -e "s|^health_dir=/var/lib/ps5-launcher-os/health$|health_dir=$work/health|" \
+    -e "s|^lock_file=/run/ps5-launcher-os.lock$|lock_file=$work/lock|" \
+    -e "s|^short=30$|short=1|" \
     -e "s|^long=7200$|long=2|" \
     -e "s|^PATH=/usr/sbin:/usr/bin$|PATH=$work/bin:/usr/sbin:/usr/bin:/bin|" \
     "$(dirname "$0")/files/usr/libexec/ps5-launcher/helper" > "$work/helper"
 chmod +x "$work/helper"
 for fixed in "^sddm_dir=$work/sddm$" "^os_release=$work/os-release$" "^cert_dir=$work/certs$" \
-    "^state_dir=$work/state$" "^long=2$" "^PATH=$work/bin:"; do
+    "^state_dir=$work/state$" "^health_dir=$work/health$" "^lock_file=$work/lock$" "^short=1$" \
+    "^long=2$" "^PATH=$work/bin:"; do
     if ! grep -q "$fixed" "$work/helper"; then
         echo "FAIL the helper's fixed path $fixed was not found"
         exit 1
@@ -60,6 +64,13 @@ fi
 if ! PATH=/usr/sbin:/usr/bin:/bin command -v sha256sum >/dev/null; then
     printf '#!/bin/sh\nexec shasum -a 256 "$@"\n' > "$work/bin/sha256sum"
     chmod +x "$work/bin/sha256sum"
+fi
+# macOS has no flock; this one takes no lock (the lock test below needs a real one).
+real_flock=1
+if ! PATH=/usr/sbin:/usr/bin:/bin command -v flock >/dev/null; then
+    real_flock=0
+    printf '#!/bin/sh\nexit 0\n' > "$work/bin/flock"
+    chmod +x "$work/bin/flock"
 fi
 next="$work/sddm/90-ps5-launcher-os-next-session.conf"
 
@@ -202,8 +213,40 @@ start=$(date +%s)
 check "a download that hangs is stopped by the helper's deadline" gate 124 update
 check "  within seconds" test $(($(date +%s) - start)) -lt 15
 rm "$work/hang"
+# update, switch and rollback wait for the lock the boot health check shares with them.
+if [ "$real_flock" = 1 ]; then
+    : > "$work/bootc.log"
+    flock "$work/lock" sleep 4 &
+    holder=$!
+    sleep 0.5
+    check "rollback waits for the shared lock, then gives up" gate 1 rollback
+    check "  without touching bootc" test ! -s "$work/bootc.log"
+    check "switch gives up too" gate 1 switch main
+    wait "$holder"
+    check "rollback runs once the lock is free" gate 0 rollback
+else
+    echo "skip the lock tests: no flock here"
+fi
+mkdir -p "$work/health"
+echo '{}' > "$work/health/notice.json"
+check "health-ack deletes the boot check's notice" helper health-ack
+check "  so it is gone" test ! -e "$work/health/notice.json"
+check "health-ack with no notice is fine" helper health-ack
 check "an unknown task is refused" fails helper rm -rf /
 check "no task is refused" fails helper
 check "extra arguments are refused" fails helper update --apply
+
+# The power-key holder the launcher runs under systemd-inhibit: one byte "r", then it waits for
+# the end of its input and exits 0.
+hold="$(dirname "$0")/files/usr/libexec/ps5-launcher-os/power-key-hold"
+check "power-key-hold writes exactly r" test "$(: | "$hold" | od -An -c | tr -d ' ')" = r
+check "  and exits 0 at the end of input" sh -c ": | '$hold' >/dev/null"
+{ sleep 2; } | "$hold" > "$work/hold.out" &
+holder=$!
+sleep 1
+check "  it waits while its input stays open" kill -0 "$holder"
+check "  after saying r" test "$(cat "$work/hold.out")" = r
+wait "$holder"
+check "  then ends with exit 0" test $? = 0
 
 [ "$failures" = 0 ]
