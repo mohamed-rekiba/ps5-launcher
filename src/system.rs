@@ -2,6 +2,8 @@
 //! actions it offers, and the system commands behind them. The UI reads this module; it never
 //! checks the mode itself. See docs/plans/ps5-launcher-os.md, Phase 2.
 
+use std::time::{Duration, Instant};
+
 /// Where the launcher runs.
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub enum Mode {
@@ -103,29 +105,89 @@ pub fn run_output(cmd: &mut std::process::Command) -> Result<String, String> {
     Err(format!("{name} failed ({}): {}", out.status, stderr.trim()))
 }
 
+/// A password or another secret for a tool's standard input. Command-line arguments show in
+/// /proc to every process; stdin does not. It never prints: Debug shows dots, and there is no
+/// Display.
+#[derive(Clone, PartialEq, Eq)]
+pub struct Secret(String);
+
+impl Secret {
+    pub fn new(secret: &str) -> Secret {
+        Secret(secret.to_string())
+    }
+
+    /// `text` with every copy of the secret replaced by dots.
+    fn hide(&self, text: String) -> String {
+        if self.0.is_empty() || !text.contains(&self.0) { text } else { text.replace(&self.0, "••••") }
+    }
+}
+
+impl std::fmt::Debug for Secret {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str("Secret(••••)")
+    }
+}
+
 /// A system tool's command line, as the backends (network, sound, storage, osupdate) build it,
-/// so tests can check every argument. It runs under coreutils' `timeout`: a tool can wait
-/// forever (bluetoothctl did on Fedora 44), so every call gets `secs` seconds.
+/// so tests can check every argument. A tool can wait forever (bluetoothctl did on Fedora 44), so
+/// every call gets `secs` seconds: a user tool runs under coreutils' `timeout`, with the
+/// launcher's own deadline as a backstop. A root helper call (pkexec) does not: once pkexec made
+/// it root, the user cannot stop it, so the helper keeps its own deadlines and `secs` is a little
+/// longer than the helper's.
 #[derive(Clone, PartialEq, Eq, Debug)]
 pub struct Call {
     pub program: &'static str,
     pub args: Vec<String>,
     pub secs: u32,
+    /// Written to the tool's standard input as one line, then stdin closes. Without it the tool's
+    /// stdin is empty.
+    pub stdin: Option<Secret>,
 }
 
 /// `timeout`'s exit code when the time ran out.
 const TIMED_OUT: i32 = 124;
 
+/// `timeout -k`: seconds between SIGTERM and SIGKILL.
+const KILL_AFTER: u64 = 5;
+
+/// How long a call waits for the output of a tool that exited, when a process the tool started
+/// still holds its output open.
+const OUTPUT_GRACE: Duration = Duration::from_secs(2);
+
 impl Call {
     pub fn new(program: &'static str, args: &[&str], secs: u32) -> Call {
-        Call { program, args: args.iter().map(|a| a.to_string()).collect(), secs }
+        Call { program, args: args.iter().map(|a| a.to_string()).collect(), secs, stdin: None }
     }
 
-    /// The command: SIGTERM after `secs`, SIGKILL 5 seconds later if the tool ignores it.
+    /// The same call, with `secret` on its standard input.
+    pub fn with_stdin(mut self, secret: &str) -> Call {
+        self.stdin = Some(Secret::new(secret));
+        self
+    }
+
+    /// pkexec runs the tool as root.
+    fn privileged(&self) -> bool {
+        self.program == "pkexec"
+    }
+
+    /// The command. A user tool gets SIGTERM after `secs`, and SIGKILL 5 seconds later if it
+    /// ignores it. A root helper call runs as it is.
     pub fn command(&self) -> std::process::Command {
+        if self.privileged() {
+            let mut cmd = std::process::Command::new(self.program);
+            cmd.args(&self.args);
+            return cmd;
+        }
         let mut cmd = std::process::Command::new("timeout");
-        cmd.args(["-k", "5", &self.secs.to_string(), self.program]).args(&self.args);
+        cmd.args(["-k", &KILL_AFTER.to_string(), &self.secs.to_string(), self.program]).args(&self.args);
         cmd
+    }
+
+    /// How long the launcher waits for the call before it stops it: `secs`, and for a user
+    /// tool, also the time `timeout` takes to stop it.
+    pub fn deadline(&self) -> Duration {
+        let secs = u64::from(self.secs);
+        Duration::from_secs(if self.privileged() { secs } else { secs + KILL_AFTER + 5 })
     }
 
     /// The command line for errors and the log. A password never shows.
@@ -165,16 +227,123 @@ fn finished(call: &Call, ran: Ran) -> Result<Ran, String> {
     Ok(ran)
 }
 
-/// Run `call` and wait for it, at most its time. Any exit code is Ok; an error means the tool
-/// could not start or did not finish. It blocks, so call it off the UI thread.
+/// Run `call` and wait for it, at most its deadline. Any exit code is Ok; an error means the
+/// tool could not start or did not finish. The secret never shows in what it returns. It
+/// blocks, so call it off the UI thread.
 pub fn call_status(call: &Call) -> Result<Ran, String> {
-    let out = call.command().output().map_err(|e| format!("could not run {}: {e}", call.shown()))?;
-    let ran = Ran {
-        code: out.status.code(),
-        stdout: String::from_utf8_lossy(&out.stdout).into_owned(),
-        stderr: String::from_utf8_lossy(&out.stderr).into_owned(),
+    let end = run_until(call.command(), call.stdin.as_ref(), call.deadline(), OUTPUT_GRACE)
+        .map_err(|e| format!("could not run {}: {e}", call.shown()))?;
+    match end {
+        End::Exited(ran) => {
+            let ran = match &call.stdin {
+                Some(secret) => Ran { stdout: secret.hide(ran.stdout), stderr: secret.hide(ran.stderr), ..ran },
+                None => ran,
+            };
+            finished(call, ran)
+        }
+        End::TimedOut => Err(format!("{} did not answer within {} s", call.shown(), call.secs)),
+    }
+}
+
+/// How `run_until` ended.
+#[derive(PartialEq, Eq, Debug)]
+enum End {
+    Exited(Ran),
+    /// The deadline passed. The process group was told to stop, but a process that became root
+    /// may still run.
+    TimedOut,
+}
+
+/// Run `cmd` in a process group of its own, with `secret` (and a line end) on its stdin, and
+/// wait for it at most `deadline`. Its output is read on threads, so a process it left behind
+/// that still holds the output open cannot hold the call: after the tool exits, the output
+/// waits at most `grace`. At the deadline the group gets SIGTERM, then SIGKILL, and the call
+/// ends without waiting for the pipes.
+fn run_until(mut cmd: std::process::Command, secret: Option<&Secret>, deadline: Duration, grace: Duration) -> std::io::Result<End> {
+    use std::io::{Read, Write};
+    use std::os::unix::process::CommandExt;
+    use std::process::Stdio;
+    use std::sync::{mpsc, Arc, Mutex};
+
+    let start = Instant::now();
+    cmd.stdin(if secret.is_some() { Stdio::piped() } else { Stdio::null() })
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .process_group(0);
+    let mut child = cmd.spawn()?;
+    // The group's id is the child's pid.
+    let group = child.id() as libc::pid_t;
+
+    let (eof_tx, eof_rx) = mpsc::channel::<()>();
+    let read = |pipe: Option<Box<dyn Read + Send>>| {
+        let buf = Arc::new(Mutex::new(Vec::new()));
+        let (into, eof) = (buf.clone(), eof_tx.clone());
+        if let Some(mut pipe) = pipe {
+            std::thread::spawn(move || {
+                let mut chunk = [0u8; 4096];
+                while let Ok(n @ 1..) = pipe.read(&mut chunk) {
+                    into.lock().unwrap().extend_from_slice(&chunk[..n]);
+                }
+                let _ = eof.send(());
+            });
+        }
+        buf
     };
-    finished(call, ran)
+    let stdout = read(child.stdout.take().map(|p| Box::new(p) as Box<dyn Read + Send>));
+    let stderr = read(child.stderr.take().map(|p| Box::new(p) as Box<dyn Read + Send>));
+
+    if let (Some(secret), Some(mut stdin)) = (secret, child.stdin.take()) {
+        // A tool that exits without reading closes the pipe: that is its own error to report.
+        let _ = stdin.write_all(format!("{}\n", secret.0).as_bytes());
+        // Dropping stdin closes it, so a second prompt reads the end of input and fails at once.
+    }
+
+    let status = loop {
+        if let Some(status) = child.try_wait()? {
+            break Some(status);
+        }
+        if start.elapsed() >= deadline {
+            break None;
+        }
+        std::thread::sleep(Duration::from_millis(20));
+    };
+    let Some(status) = status else {
+        stop_group(group, &mut child);
+        return Ok(End::TimedOut);
+    };
+
+    // Both readers end at the end of their pipe, unless a process left behind holds it.
+    let until = Instant::now() + grace;
+    for _ in 0..2 {
+        let left = until.saturating_duration_since(Instant::now());
+        if eof_rx.recv_timeout(left).is_err() {
+            break;
+        }
+    }
+    let text = |buf: &Arc<Mutex<Vec<u8>>>| String::from_utf8_lossy(&buf.lock().unwrap()).into_owned();
+    Ok(End::Exited(Ran { code: status.code(), stdout: text(&stdout), stderr: text(&stderr) }))
+}
+
+/// SIGTERM to the group, SIGKILL 2 seconds later if the child still runs. A process that pkexec
+/// made root does not take the user's signals: then the child is reaped on a thread of its own
+/// whenever it ends, and the call does not wait for it.
+fn stop_group(group: libc::pid_t, child: &mut std::process::Child) {
+    // SAFETY: killpg only sends a signal, to the group the child leads.
+    unsafe { libc::killpg(group, libc::SIGTERM) };
+    let start = Instant::now();
+    while start.elapsed() < Duration::from_secs(2) {
+        if let Ok(Some(_)) = child.try_wait() {
+            return;
+        }
+        std::thread::sleep(Duration::from_millis(20));
+    }
+    // SAFETY: as above; the child has not been reaped, so the group id is still its own.
+    unsafe { libc::killpg(group, libc::SIGKILL) };
+    if !matches!(child.try_wait(), Ok(Some(_))) {
+        let pid = child.id();
+        // SAFETY: waitpid on our own child only reaps it.
+        std::thread::spawn(move || unsafe { libc::waitpid(pid as libc::pid_t, std::ptr::null_mut(), 0) });
+    }
 }
 
 /// `run_output` with the call's time limit: what the tool printed, when it exited with 0.
@@ -470,6 +639,97 @@ mod tests {
         let error = ran.error(&call);
         assert!(!error.contains("hunter22"), "{error}");
         assert_eq!(error, "nmcli device wifi connect Home password •••• failed (exit 4): Error: Secrets were required.");
+    }
+
+    #[test]
+    fn a_secret_never_shows_in_the_args_the_debug_output_or_an_error() {
+        let call = Call::new("nmcli", &["--ask", "device", "wifi", "connect", "Home"], 60).with_stdin("hunter22");
+        assert!(!call.args.iter().any(|a| a.contains("hunter22")), "{:?}", call.args);
+        let debug = format!("{call:?}");
+        assert!(!debug.contains("hunter22"), "{debug}");
+        assert_eq!(call.shown(), "nmcli --ask device wifi connect Home");
+        let ran = Ran { code: Some(1), stdout: String::new(), stderr: "Error: Secrets were required.".into() };
+        assert!(!ran.error(&call).contains("hunter22"));
+    }
+
+    // macOS has no `timeout`.
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn a_secret_goes_to_stdin_and_never_comes_back() {
+        // The tool gets the secret as its first line, and stdin closes after it.
+        let check = Call::new("sh", &["-c", "read p; [ \"$p\" = hunter22 ] && echo match; read q || echo eof"], 5);
+        assert_eq!(call(&check.with_stdin("hunter22")), Ok("match\neof\n".into()));
+        // A tool that prints what it read: the secret is hidden in what the launcher keeps.
+        let echo = Call::new("sh", &["-c", "read p; echo \"Password: $p\"; echo \"bad $p\" >&2; exit 4"], 5).with_stdin("hunter22");
+        let ran = call_status(&echo).unwrap();
+        assert!(!ran.stdout.contains("hunter22") && !ran.stderr.contains("hunter22"), "{ran:?}");
+        let error = call(&echo).unwrap_err();
+        assert!(!error.contains("hunter22") && error.contains("exit 4"), "{error}");
+    }
+
+    // macOS has no `timeout`.
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn a_call_without_a_secret_has_no_stdin() {
+        // The launcher's own stdin is never handed to a tool.
+        assert_eq!(call(&Call::new("sh", &["-c", "read x || echo none"], 5)), Ok("none\n".into()));
+    }
+
+    #[test]
+    fn a_root_helper_call_does_not_run_under_timeout() {
+        // `timeout` runs as the user and cannot stop the helper once pkexec made it root: the
+        // helper has its own deadlines, and the launcher only waits a little longer.
+        let call = Call::new("pkexec", &["/usr/libexec/ps5-launcher/helper", "status"], 60);
+        let cmd = call.command();
+        assert_eq!(cmd.get_program(), "pkexec");
+        let args: Vec<_> = cmd.get_args().map(|a| a.to_str().unwrap()).collect();
+        assert_eq!(args, ["/usr/libexec/ps5-launcher/helper", "status"]);
+        assert_eq!(call.deadline(), Duration::from_secs(60));
+        // A user tool runs under timeout; the launcher's own deadline is the backstop after it.
+        assert!(Call::new("nmcli", &["radio"], 10).deadline() > Duration::from_secs(15));
+    }
+
+    #[test]
+    fn the_runner_writes_the_secret_and_closes_stdin() {
+        let mut cmd = std::process::Command::new("sh");
+        cmd.args(["-c", "read p; echo \"[$p]\"; read q || echo eof"]);
+        let secret = Secret::new("p@ss word'\"");
+        let end = run_until(cmd, Some(&secret), Duration::from_secs(5), Duration::from_secs(1)).unwrap();
+        let End::Exited(ran) = end else { panic!("{end:?}") };
+        assert_eq!(ran.stdout, "[p@ss word'\"]\neof\n");
+    }
+
+    #[test]
+    fn the_deadline_stops_a_tool_that_never_ends() {
+        let started = Instant::now();
+        let mut cmd = std::process::Command::new("sleep");
+        cmd.arg("30");
+        let end = run_until(cmd, None, Duration::from_millis(300), Duration::from_millis(200)).unwrap();
+        assert_eq!(end, End::TimedOut);
+        assert!(started.elapsed() < Duration::from_secs(5), "{:?}", started.elapsed());
+    }
+
+    #[test]
+    fn a_child_left_behind_cannot_hold_the_call() {
+        // The tool exits, but a process it started keeps its output open.
+        let started = Instant::now();
+        let mut cmd = std::process::Command::new("sh");
+        cmd.args(["-c", "sleep 20 & echo hi"]);
+        let end = run_until(cmd, None, Duration::from_secs(30), Duration::from_millis(300)).unwrap();
+        let End::Exited(ran) = end else { panic!("{end:?}") };
+        assert_eq!((ran.code, ran.stdout.as_str()), (Some(0), "hi\n"));
+        assert!(started.elapsed() < Duration::from_secs(5), "{:?}", started.elapsed());
+    }
+
+    #[test]
+    fn the_deadline_stops_the_tools_children_too() {
+        // A grandchild that holds the pipes after the deadline does not keep the call waiting.
+        let started = Instant::now();
+        let mut cmd = std::process::Command::new("sh");
+        cmd.args(["-c", "sleep 30 & sleep 30"]);
+        let end = run_until(cmd, None, Duration::from_millis(300), Duration::from_millis(200)).unwrap();
+        assert_eq!(end, End::TimedOut);
+        assert!(started.elapsed() < Duration::from_secs(5), "{:?}", started.elapsed());
     }
 
     #[test]

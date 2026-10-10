@@ -181,15 +181,17 @@ pub fn set_radio_call(on: bool) -> Call {
     Call::new("nmcli", &["radio", "wifi", if on { "on" } else { "off" }], 10)
 }
 
-/// Join a network. The SSID and the password are arguments of their own: no shell sees them.
-/// Joining waits for the address (DHCP), so it gets a minute.
+/// Join a network. The SSID is an argument of its own: no shell sees it. The password goes on
+/// stdin, because every process can read another's arguments in /proc: with `--ask`, nmcli's
+/// secret agent reads it when NetworkManager asks for the network's secret, and NetworkManager
+/// saves it with the new connection. Joining waits for the address (DHCP), so it gets a minute.
 pub fn connect_call(ssid: &str, password: Option<&str>) -> Call {
-    let mut call = Call::new("nmcli", &["device", "wifi", "connect"], 60);
-    call.args.push(ssid.to_string());
-    if let Some(password) = password {
-        call.args.extend(["password".to_string(), password.to_string()]);
+    let ask: &[&str] = if password.is_some() { &["--ask"] } else { &[] };
+    let call = Call::new("nmcli", &[ask, &["device", "wifi", "connect", ssid]].concat(), 60);
+    match password {
+        Some(password) => call.with_stdin(password),
+        None => call,
     }
-    call
 }
 
 /// Join a network that has a saved connection, with its saved password.
@@ -205,6 +207,7 @@ pub fn forget_call(uuid: &str) -> Call {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::system::Secret;
 
     /// Captured on Fedora 44 (PS5 Launcher OS spike, VM boot test).
     const DEVICES: &str = "ens2:ethernet:connected:Wired connection 1\nlo:loopback:connected (externally):lo\n";
@@ -326,12 +329,22 @@ mod tests {
     }
 
     #[test]
-    fn the_ssid_and_the_password_are_arguments_of_their_own() {
-        let call = connect_call("Cafe; rm -rf ~", Some("p@ss word'\""));
+    fn the_ssid_is_an_argument_of_its_own() {
+        let call = connect_call("Cafe; rm -rf ~", None);
         assert_eq!(call.program, "nmcli");
-        assert_eq!(call.args, ["device", "wifi", "connect", "Cafe; rm -rf ~", "password", "p@ss word'\""]);
-        assert_eq!(connect_call("Open Cafe", None).args, ["device", "wifi", "connect", "Open Cafe"]);
-        assert!(connect_call("x", None).secs >= 30, "joining waits for DHCP");
+        assert_eq!(call.args, ["device", "wifi", "connect", "Cafe; rm -rf ~"]);
+        assert_eq!(call.stdin, None, "an open network asks for nothing");
+        assert!(call.secs >= 30, "joining waits for DHCP");
+    }
+
+    #[test]
+    fn the_password_goes_on_stdin_never_in_the_arguments() {
+        // Arguments show in /proc to every process. With --ask, nmcli's secret agent reads the
+        // password from stdin when NetworkManager asks for it (checked on nmcli 1.56.1).
+        let call = connect_call("Home", Some("p@ss word'\""));
+        assert_eq!(call.args, ["--ask", "device", "wifi", "connect", "Home"]);
+        assert_eq!(call.stdin, Some(Secret::new("p@ss word'\"")));
+        assert!(!format!("{call:?}").contains("p@ss"));
     }
 
     #[test]
