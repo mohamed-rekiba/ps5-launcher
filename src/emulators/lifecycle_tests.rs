@@ -64,8 +64,14 @@ fn root() -> tempfile::TempDir {
     tempfile::Builder::new().prefix("addons-").tempdir().unwrap()
 }
 
+/// Other tests in this process fork children. Between a fork and its exec, the child holds a
+/// copy of every open descriptor, the lock file's too, and flock locks belong to the open file:
+/// a run that starts right after another can find the lock held for a moment. The launcher
+/// waits 5 s; the tests wait 2 s.
+const LOCK_WAIT: Duration = Duration::from_secs(2);
+
 fn real() -> RealFiles {
-    RealFiles { lock_wait: Duration::ZERO, durable: true }
+    RealFiles { lock_wait: LOCK_WAIT, durable: true }
 }
 
 fn run(root: &Path, addons: &[ShippedAddon]) -> Vec<Problem> {
@@ -355,8 +361,9 @@ fn one_lock_serializes_changes() {
     let r = root();
     let held = real().lock(&r.path().join("addons.lock")).unwrap();
     assert!(held.is_some());
-    assert!(real().lock(&r.path().join("addons.lock")).unwrap().is_none(), "a second lock waits");
-    assert_eq!(run(r.path(), &[kyty_v1()]), [Problem::new("addons", "another launcher is changing the addons; the defaults were not checked this time")]);
+    let impatient = RealFiles { lock_wait: Duration::ZERO, durable: true };
+    assert!(impatient.lock(&r.path().join("addons.lock")).unwrap().is_none(), "a second lock waits");
+    assert_eq!(reconcile(r.path(), &src(&[kyty_v1()]), &impatient), [Problem::new("addons", "another launcher is changing the addons; the defaults were not checked this time")]);
     assert!(!r.path().join("emulators").exists());
     drop(held);
     assert_eq!(run(r.path(), &[kyty_v1()]), []);
@@ -445,7 +452,7 @@ impl FileOps for Injected<'_> {
 /// No flush to the disk: the tests cannot see it, and the nested crash tests run hundreds of
 /// changes.
 fn fast() -> RealFiles {
-    RealFiles { lock_wait: Duration::ZERO, durable: false }
+    RealFiles { lock_wait: LOCK_WAIT, durable: false }
 }
 
 /// Stop `change` at every step in turn; after each stop, the next start must end where an
