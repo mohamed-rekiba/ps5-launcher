@@ -38,6 +38,7 @@ mod present;
 mod psn;
 mod sessions;
 mod settings;
+mod system;
 mod util;
 
 slint::include_modules!();
