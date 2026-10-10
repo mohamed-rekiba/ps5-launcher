@@ -15,6 +15,10 @@ component SettingRows inherits VerticalLayout {
     in property <int> edit-index: -1;
     in-out property <string> edit-text;
     in property <length> hint-w;
+    // The on-screen keyboard edits the row: the field below stays closed.
+    in property <bool> osk;
+    // Where the caret goes when the field opens (a byte offset); -1 selects all.
+    in property <int> caret: -1;
     callback choose(int);
     callback edit-done(string, bool);
     spacing: 0;
@@ -57,7 +61,7 @@ component SettingRows inherits VerticalLayout {
                         vertical-alignment: center;
                         horizontal-stretch: s.kind == 1 ? 0 : 1;
                     }
-                    if s.kind == 1 && root.edit-index != i: Text {
+                    if s.kind == 1 && (root.edit-index != i || root.osk): Text {
                         text: s.value != "" ? s.value : (s.secret ? "Not set" : "—");
                         font-size: (17px * S.k);
                         font-family: "DejaVu Sans Mono";
@@ -84,7 +88,7 @@ component SettingRows inherits VerticalLayout {
                         vertical-alignment: center;
                     }
                 }
-                if s.kind == 1 && root.edit-index == i: Rectangle {
+                if s.kind == 1 && root.edit-index == i && !root.osk: Rectangle {
                     height: (50px * S.k);
                     border-radius: (10px * S.k);
                     background: #00000040;
@@ -101,7 +105,10 @@ component SettingRows inherits VerticalLayout {
                         color: Theme.text;
                         vertical-alignment: center;
                         font-family: "DejaVu Sans Mono";
-                        init => { self.focus(); self.select-all(); }
+                        init => {
+                            self.focus();
+                            if root.caret < 0 { self.select-all(); } else { self.set-selection-offsets(root.caret, root.caret); }
+                        }
                         accepted => { root.edit-done(self.text, true); }
                     }
                 }
@@ -136,6 +143,11 @@ export component SettingsPage inherits Rectangle {
     in property <string> version;
     in property <string> mode;
     in property <bool> pad;
+    // The on-screen keyboard is open: it edits the search field or a row instead of them.
+    in property <bool> osk;
+    // Where the caret goes when the search field or a row takes the keyboard (a byte offset);
+    // -1: the end of the search, all of a row selected.
+    in property <int> caret: -1;
     callback click(int, int);
     callback edit-done(string, bool);
     callback find-edited(string);
@@ -194,6 +206,8 @@ export component SettingsPage inherits Rectangle {
                         edit-index: root.edit-index;
                         edit-text <=> root.edit-text;
                         hint-w: page.width - (36px * S.k);
+                        osk: root.osk;
+                        caret: root.caret;
                         choose(i) => { root.click(Zone.settings, i); }
                         edit-done(text, accepted) => { root.edit-done(text, accepted); }
                     }
@@ -265,7 +279,7 @@ export component SettingsPage inherits Rectangle {
                     width: (24px * S.k);
                     height: (24px * S.k);
                 }
-                if root.find-editing: TextInput {
+                if root.find-editing && !root.osk: TextInput {
                     x: (52px * S.k);
                     width: parent.width - (68px * S.k);
                     height: parent.height;
@@ -274,11 +288,14 @@ export component SettingsPage inherits Rectangle {
                     font-size: (18px * S.k);
                     color: Theme.text;
                     vertical-alignment: center;
-                    init => { self.focus(); self.set-selection-offsets(1000000, 1000000); }
+                    init => {
+                        self.focus();
+                        self.set-selection-offsets(root.caret < 0 ? 1000000 : root.caret, root.caret < 0 ? 1000000 : root.caret);
+                    }
                     edited => { root.find-edited(self.text); }
                     accepted => { root.find-done(); }
                 }
-                if !root.find-editing && rail.labels: Text {
+                if (!root.find-editing || root.osk) && rail.labels: Text {
                     x: (52px * S.k);
                     width: parent.width - (68px * S.k);
                     text: root.query != "" ? root.query : "Search settings";

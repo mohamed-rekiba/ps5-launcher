@@ -1,10 +1,11 @@
-import { S, Theme, Icons, Zone, DownloadData, BootStep, ChipData, ActionData, TileData, HeroData, CardData, CardRow, GenreChip, Fact, FactRow, Shot, HubData, SettingData, ToastData, MenuItem, RunningData, PowerRow, QuickCard, SettingsCat, SettingsHit } from "theme.slint";
+import { S, Theme, Icons, Zone, DownloadData, BootStep, ChipData, ActionData, TileData, HeroData, CardData, CardRow, GenreChip, Fact, FactRow, Shot, HubData, SettingData, ToastData, MenuItem, RunningData, PowerRow, QuickCard, SettingsCat, SettingsHit, OskKey, OskField } from "theme.slint";
 import { FocusRing, Chip, Btn, Kicker, Badge, Switch, KeyCap, BackButton, Shimmer, Cover } from "widgets.slint";
 import { DownloadsSheet, DownloadConsent } from "downloads.slint";
 import { LibraryFilter, LibrarySortPicker } from "library.slint";
 import { PowerMenu, PowerDialog, PowerCountdown } from "power.slint";
 import { QuickMenu } from "quick.slint";
 import { SettingsPage } from "settings.slint";
+import { Osk } from "osk.slint";
 import { Palette } from "std-widgets.slint";
 
 export { S, Theme, Zone }
@@ -247,6 +248,19 @@ export component AppWindow inherits Window {
     in-out property <string> settings-query;
     in property <bool> settings-find-editing;
     in property <[SettingsHit]> settings-hits;
+    // Where the caret goes when a text field takes the keyboard after the on-screen keyboard
+    // (a byte offset); -1: as before (all selected in a Settings row, the end in search).
+    in property <int> edit-caret: -1;
+
+    // The on-screen keyboard (osk.slint, src/osk_ui.rs).
+    in property <bool> osk-open;
+    in property <OskField> osk-field;
+    in property <[OskKey]> osk-keys;
+    in property <int> osk-focus;
+    in property <[string]> osk-sugs;
+    in property <int> osk-sug: -1;
+    in property <[string]> osk-accents;
+    in property <int> osk-accent;
     // The page shows the About card (System and About pages), and the mode it names.
     in property <bool> settings-about;
     in property <string> settings-mode;
@@ -303,6 +317,10 @@ export component AppWindow inherits Window {
     callback settings-find-edited(string);
     callback settings-find-done();
     callback settings-back();
+    callback osk-key(int);
+    callback osk-pick(int);
+    callback osk-done();
+    callback osk-close();
     callback download-confirm();
     callback download-action(string, string);
     callback toast-clicked(int, string);            // id, action
@@ -314,6 +332,8 @@ export component AppWindow inherits Window {
 
     public function focus-root() { scope.focus(); }
     public function focus-search() { search-input.focus(); search-input.select-all(); }
+    // The search field takes the keyboard with the caret at `at` (a byte offset).
+    public function focus-search-at(at: int) { search-input.focus(); search-input.set-selection-offsets(at, at); }
 
     changed width => { root.resized(); }
     changed height => { root.resized(); }
@@ -1184,7 +1204,7 @@ export component AppWindow inherits Window {
             rows: root.settings; edit-index: root.edit-index; edit-text <=> root.edit-text;
             scroll-y <=> root.settings-y; query <=> root.settings-query; find-editing: root.settings-find-editing;
             hits: root.settings-hits; about: root.settings-about; version: root.app-version; mode: root.settings-mode;
-            pad: root.pad-hints;
+            pad: root.pad-hints; osk: root.osk-open; caret: root.edit-caret;
             click(zone, i) => { root.click(zone, i); }
             edit-done(text, accepted) => { root.edit-done(text, accepted); }
             find-edited(text) => { root.settings-find-edited(text); }
@@ -1829,6 +1849,16 @@ export component AppWindow inherits Window {
         if root.overlay == 12: PowerCountdown {
             text: root.power-counting; seconds: root.power-seconds; pad: root.pad-hints;
             close => { root.click(Zone.power, -1); }
+        }
+
+        // ------------------------------------------------------------ ON-SCREEN KEYBOARD
+        if root.osk-open: Osk {
+            field: root.osk-field; keys: root.osk-keys; focused: root.osk-focus;
+            sugs: root.osk-sugs; sug: root.osk-sug; accents: root.osk-accents; accent: root.osk-accent;
+            key(i) => { root.osk-key(i); }
+            pick(i) => { root.osk-pick(i); }
+            done => { root.osk-done(); }
+            close => { root.osk-close(); }
         }
 
         // ------------------------------------------------------------ TOASTS

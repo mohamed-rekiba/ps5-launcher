@@ -282,6 +282,10 @@ pub struct App {
     pub status_count: usize,
     pub power: crate::power_ui::PowerUi,
     pub quick: crate::quick_ui::QuickUi,
+    pub osk: crate::osk_ui::OskUi,
+    /// The last input came from a controller (not a key or a click): text fields open the
+    /// on-screen keyboard.
+    pub last_input_pad: bool,
 }
 
 thread_local! {
@@ -438,6 +442,8 @@ pub fn run(ui: AppWindow, monitors: Vec<Monitor>, target_monitor: Option<Monitor
         compat_checked: 0.0,
         power: Default::default(),
         quick: Default::default(),
+        osk: Default::default(),
+        last_input_pad: false,
     };
     ui.set_grid_rows(ModelRc::from(app.grid_model.clone()));
     ui.set_tiles(ModelRc::from(app.tile_model.clone()));
@@ -508,18 +514,15 @@ fn wire_callbacks(ui: &AppWindow) {
         }
     }));
     ui.on_search_edited(|t| with_app(move |app| app.on_search(t.to_string())));
-    ui.on_search_done(|_| with_app(|app| {
-        app.stop_search_edit();
-        if !app.filtered.is_empty() {
-            app.set_focus(Z_GRID, 0);
-            app.ensure_grid_visible();
-        }
-        audio::play(Sound::Select);
-    }));
+    ui.on_search_done(|_| with_app(|app| app.search_done()));
     ui.on_edit_done(|t, _| with_app(move |app| app.finish_edit(Some(t.to_string()))));
     ui.on_settings_find_edited(|t| with_app(move |app| app.settings_find_edited(t.to_string())));
     ui.on_settings_find_done(|| with_app(|app| app.settings_find_done()));
     ui.on_settings_back(|| with_app(|app| app.act(Act::Back)));
+    ui.on_osk_key(|i| with_app(move |app| app.osk_click(i as usize)));
+    ui.on_osk_pick(|i| with_app(move |app| app.osk_pick(i as usize)));
+    ui.on_osk_done(|| with_app(|app| app.osk_finish(true)));
+    ui.on_osk_close(|| with_app(|app| app.osk_finish(false)));
     ui.on_download_confirm(|| with_app(|app| app.confirm_download()));
     ui.on_download_action(|key, action| with_app(move |app| app.download_action(&key, &action)));
     ui.on_toast_clicked(|id, action| with_app(move |app| app.toast_clicked(id, &action)));
@@ -1395,6 +1398,7 @@ impl App {
     }
 
     pub fn on_pad(&mut self, p: Pad) {
+        self.last_input_pad = true;
         if p == Pad::Ps {
             return self.ps_pressed();
         }
@@ -1417,6 +1421,10 @@ impl App {
             self.pad_hints = true;
             self.ui().set_pad_hints(true);
         }
+        // The on-screen keyboard gets the controller first: no search, tab or other shortcuts.
+        if self.osk.open() {
+            return self.osk_pad(p);
+        }
         let act = match p {
             Pad::Up => Act::Up,
             Pad::Down => Act::Down,
@@ -1431,7 +1439,7 @@ impl App {
             Pad::R1 => Act::TabNext,
             Pad::L2 => Act::PageUp,
             Pad::R2 => Act::PageDown,
-            Pad::Ps | Pad::PsHold => return,
+            Pad::Ps | Pad::PsHold | Pad::ConfirmHold => return,
         };
         if self.search_editing || self.edit_index >= 0 || self.settings_nav.find_editing {
             // Controller input ends text editing.
@@ -1457,6 +1465,11 @@ impl App {
         if self.pad_hints {
             self.pad_hints = false;
             self.ui().set_pad_hints(false);
+        }
+        self.last_input_pad = false;
+        // A key on a physical keyboard closes the on-screen one; the field takes the typing.
+        if self.osk.open() && self.osk_key(text, ctrl, alt) {
+            return true;
         }
         let k = |key: Key| SharedString::from(key) == text;
         let dir = if k(Key::UpArrow) {
@@ -1587,6 +1600,7 @@ impl App {
     }
 
     pub fn on_click(&mut self, zone: i32, idx: i32) {
+        self.last_input_pad = false;
         if self.boot.active {
             return self.boot_confirm();
         }
@@ -1647,12 +1661,28 @@ impl App {
         }
         self.search_editing = true;
         self.set_focus(Z_SEARCH, 0);
-        self.ui().invoke_focus_search();
+        if self.last_input_pad {
+            let query = self.query.clone();
+            self.osk_open(crate::osk_ui::Field::Library, &query);
+        } else {
+            self.ui().invoke_focus_search();
+        }
     }
 
     pub fn stop_search_edit(&mut self) {
+        self.osk_close_if(|f| f == crate::osk_ui::Field::Library);
         self.search_editing = false;
         self.ui().invoke_focus_root();
+    }
+
+    /// Enter in the search field: focus goes to the first result.
+    pub fn search_done(&mut self) {
+        self.stop_search_edit();
+        if !self.filtered.is_empty() {
+            self.set_focus(Z_GRID, 0);
+            self.ensure_grid_visible();
+        }
+        audio::play(Sound::Select);
     }
 
     // ------------------------------------------------------------------ navigation
@@ -2724,6 +2754,7 @@ impl App {
     // ------------------------------------------------------------------ settings (settings.rs)
 
     pub fn finish_edit(&mut self, text: Option<String>) {
+        self.osk_close_if(|f| matches!(f, crate::osk_ui::Field::Row(..)));
         let i = self.edit_index;
         if i < 0 {
             return;

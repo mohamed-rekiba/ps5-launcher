@@ -7,6 +7,7 @@
 
 use std::collections::HashMap;
 use std::os::fd::RawFd;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::{Duration, Instant};
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
@@ -28,6 +29,9 @@ pub enum Pad {
     Ps,
     /// The PS / Guide button held for 2 seconds (sent once, while it is still held).
     PsHold,
+    /// Confirm held for 500 ms while the on-screen keyboard is open (sent once, while held).
+    /// While the keyboard is open, a short Confirm press is sent on release instead of on press.
+    ConfirmHold,
 }
 
 const EV_KEY: u16 = 1;
@@ -80,7 +84,8 @@ struct Device {
     ranges: HashMap<u16, (i32, i32)>,
     axes: HashMap<u16, f32>,
     buttons: [bool; 4], // dpad buttons up/down/left/right
-    ps: PsButton,
+    ps: HoldButton,
+    confirm: HoldButton,
 }
 
 /// evdev nodes of gamepads (devices with a joystick handler and a south face button).
@@ -203,7 +208,7 @@ fn open_device(path: &str) -> Option<Device> {
         }
     }
     crate::log!("controller connected: {path}");
-    Some(Device { fd, path: path.to_string(), ranges, axes: HashMap::new(), buttons: [false; 4], ps: PsButton::default() })
+    Some(Device { fd, path: path.to_string(), ranges, axes: HashMap::new(), buttons: [false; 4], ps: HoldButton::ps(), confirm: HoldButton::confirm() })
 }
 
 /// Spawns the input thread. `emit` receives presses (directions auto-repeat while held).
@@ -249,18 +254,34 @@ impl Repeater {
     }
 }
 
-/// The PS button of one controller: a short press is `Pad::Ps` when it is let go; holding it for
-/// 2 seconds is `Pad::PsHold`, sent once while it is held, and then letting go sends nothing.
-#[derive(Default)]
-struct PsButton {
+/// A button with a short press and a hold, for one controller. A short press is `tap`, sent when
+/// the button is let go; holding it for `after` is `long`, sent once while it is held, and then
+/// letting go sends nothing.
+///
+/// The PS button always works this way (2 seconds: `Pad::Ps` or `Pad::PsHold`). The Confirm button
+/// works this way only while the on-screen keyboard is open (500 ms: `Pad::Confirm` or
+/// `Pad::ConfirmHold`, for accents); otherwise it presses at once, as every other button does.
+struct HoldButton {
     held_since: Option<Instant>,
-    /// PsHold was sent for the current press.
+    /// `long` was sent for the current press.
     fired: bool,
+    after: Duration,
+    tap: Pad,
+    long: Pad,
 }
 
 const PS_HOLD: Duration = Duration::from_secs(2);
+const CONFIRM_HOLD: Duration = Duration::from_millis(500);
 
-impl PsButton {
+impl HoldButton {
+    fn ps() -> Self {
+        HoldButton { held_since: None, fired: false, after: PS_HOLD, tap: Pad::Ps, long: Pad::PsHold }
+    }
+
+    fn confirm() -> Self {
+        HoldButton { held_since: None, fired: false, after: CONFIRM_HOLD, tap: Pad::Confirm, long: Pad::ConfirmHold }
+    }
+
     fn press(&mut self, now: Instant) {
         // A press while already held keeps the first press's deadline.
         if self.held_since.is_none() {
@@ -275,26 +296,43 @@ impl PsButton {
             return;
         }
         // The release can arrive before an update has seen the deadline pass.
-        emit(if now >= since + PS_HOLD { Pad::PsHold } else { Pad::Ps });
+        emit(if now >= since + self.after { self.long } else { self.tap });
     }
 
-    /// Sends PsHold when the button has been held for 2 seconds at `now`.
+    /// Sends `long` when the button has been held long enough at `now`.
     fn update(&mut self, now: Instant, mut emit: impl FnMut(Pad)) {
         if let Some(since) = self.held_since {
-            if !self.fired && now >= since + PS_HOLD {
+            if !self.fired && now >= since + self.after {
                 self.fired = true;
-                emit(Pad::PsHold);
+                emit(self.long);
             }
         }
     }
 
-    /// How long until PsHold is due (zero if overdue), or None if nothing is pending.
+    /// Forget the current press: neither the hold nor the release sends anything.
+    fn cancel(&mut self) {
+        self.held_since = None;
+    }
+
+    /// How long until `long` is due (zero if overdue), or None if nothing is pending.
     fn next_due(&self, now: Instant) -> Option<Duration> {
         match self.held_since {
-            Some(since) if !self.fired => Some((since + PS_HOLD).saturating_duration_since(now)),
+            Some(since) if !self.fired => Some((since + self.after).saturating_duration_since(now)),
             _ => None,
         }
     }
+}
+
+/// The on-screen keyboard is open: Confirm tells a press from a hold (see `HoldButton`).
+static CONFIRM_HOLDS: AtomicBool = AtomicBool::new(false);
+
+/// Called by the on-screen keyboard when it opens and closes.
+pub fn set_confirm_hold(on: bool) {
+    CONFIRM_HOLDS.store(on, Ordering::Relaxed);
+}
+
+fn confirm_holds() -> bool {
+    CONFIRM_HOLDS.load(Ordering::Relaxed)
 }
 
 #[cfg(target_os = "linux")]
@@ -318,11 +356,12 @@ fn run(emit: impl Fn(Pad)) {
             std::thread::sleep(Duration::from_secs(3));
             continue;
         }
-        // Wait for input, or until the next key-repeat or PS hold is due.
+        // Wait for input, or until the next key-repeat, PS hold or Confirm hold is due.
         let now = Instant::now();
         let timeout = devices
             .iter()
-            .filter_map(|d| d.ps.next_due(now))
+            .flat_map(|d| [d.ps.next_due(now), d.confirm.next_due(now)])
+            .flatten()
             .chain(repeater.next_due(now))
             .min()
             .unwrap_or(Duration::from_millis(3000));
@@ -355,6 +394,14 @@ fn run(emit: impl Fn(Pad)) {
                     EV_KEY if code == BTN_MODE => match value {
                         1 => dev.ps.press(Instant::now()),
                         0 => dev.ps.release(Instant::now(), |p| emit(p)),
+                        _ => {}
+                    },
+                    // Confirm presses at once, unless the on-screen keyboard wants its holds.
+                    EV_KEY if code == BTN_SOUTH => match value {
+                        1 if confirm_holds() => dev.confirm.press(Instant::now()),
+                        1 => emit(Pad::Confirm),
+                        0 if confirm_holds() => dev.confirm.release(Instant::now(), |p| emit(p)),
+                        0 => dev.confirm.cancel(),
                         _ => {}
                     },
                     EV_KEY => match map_button(code) {
@@ -392,8 +439,14 @@ fn run(emit: impl Fn(Pad)) {
         }
         let now = Instant::now();
         repeater.update(dirs, now, |p| emit(p));
+        let holds = confirm_holds();
         for d in &mut devices {
             d.ps.update(now, |p| emit(p));
+            // The keyboard closed while Confirm was held: that press is dropped.
+            if !holds {
+                d.confirm.cancel();
+            }
+            d.confirm.update(now, |p| emit(p));
         }
     }
 }
@@ -427,11 +480,16 @@ fn run(emit: impl Fn(Pad)) {
     use gilrs::{Axis, Event, EventType, GamepadId, Gilrs};
 
     /// What one controller is holding: d-pad buttons [up, down, left, right] and the left stick.
-    #[derive(Default)]
     struct State {
         dpad: [bool; 4],
         stick: [f32; 2], // x, y (gilrs reports up as positive y)
-        ps: PsButton,
+        ps: HoldButton,
+        confirm: HoldButton,
+    }
+    impl Default for State {
+        fn default() -> Self {
+            State { dpad: [false; 4], stick: [0.0; 2], ps: HoldButton::ps(), confirm: HoldButton::confirm() }
+        }
     }
 
     let mut gilrs = match Gilrs::new() {
@@ -444,12 +502,13 @@ fn run(emit: impl Fn(Pad)) {
     let mut states: HashMap<GamepadId, State> = HashMap::new();
     let mut repeater = Repeater::default();
     loop {
-        // Sleep until input arrives or a direction repeat or PS hold is due (never long: pads can
-        // appear).
+        // Sleep until input arrives or a direction repeat, PS hold or Confirm hold is due (never
+        // long: pads can appear).
         let now = Instant::now();
         let wait = states
             .values()
-            .filter_map(|st| st.ps.next_due(now))
+            .flat_map(|st| [st.ps.next_due(now), st.confirm.next_due(now)])
+            .flatten()
             .chain(repeater.next_due(now))
             .min()
             .unwrap_or(Duration::from_millis(500))
@@ -462,12 +521,16 @@ fn run(emit: impl Fn(Pad)) {
                 EventType::ButtonPressed(b, _) => match map_gilrs_button(b) {
                     Some(p) if (p as usize) < 4 => st.dpad[p as usize] = true,
                     Some(Pad::Ps) => st.ps.press(Instant::now()),
+                    // Confirm presses at once, unless the on-screen keyboard wants its holds.
+                    Some(Pad::Confirm) if confirm_holds() => st.confirm.press(Instant::now()),
                     Some(p) => emit(p),
                     None => {}
                 },
                 EventType::ButtonReleased(b, _) => match map_gilrs_button(b) {
                     Some(p) if (p as usize) < 4 => st.dpad[p as usize] = false,
                     Some(Pad::Ps) => st.ps.release(Instant::now(), |p| emit(p)),
+                    Some(Pad::Confirm) if confirm_holds() => st.confirm.release(Instant::now(), |p| emit(p)),
+                    Some(Pad::Confirm) => st.confirm.cancel(),
                     _ => {}
                 },
                 EventType::AxisChanged(Axis::LeftStickX, v, _) => st.stick[0] = v,
@@ -507,8 +570,14 @@ fn run(emit: impl Fn(Pad)) {
         }
         let now = Instant::now();
         repeater.update(dirs, now, |p| emit(p));
+        let holds = confirm_holds();
         for st in states.values_mut() {
             st.ps.update(now, |p| emit(p));
+            // The keyboard closed while Confirm was held: that press is dropped.
+            if !holds {
+                st.confirm.cancel();
+            }
+            st.confirm.update(now, |p| emit(p));
         }
     }
 }
@@ -565,14 +634,14 @@ mod tests {
     }
 
     /// Let go of the PS button at `at` ms and collect what it sends.
-    fn release(b: &mut PsButton, t0: Instant, at: u64) -> Vec<Pad> {
+    fn release(b: &mut HoldButton, t0: Instant, at: u64) -> Vec<Pad> {
         let mut out = Vec::new();
         b.release(ms(t0, at), |p| out.push(p));
         out
     }
 
     /// Update the PS button at `at` ms and collect what it sends.
-    fn tick(b: &mut PsButton, t0: Instant, at: u64) -> Vec<Pad> {
+    fn tick(b: &mut HoldButton, t0: Instant, at: u64) -> Vec<Pad> {
         let mut out = Vec::new();
         b.update(ms(t0, at), |p| out.push(p));
         out
@@ -580,7 +649,7 @@ mod tests {
 
     #[test]
     fn a_short_ps_press_is_sent_when_let_go() {
-        let (mut b, t0) = (PsButton::default(), Instant::now());
+        let (mut b, t0) = (HoldButton::ps(), Instant::now());
         b.press(t0);
         assert!(tick(&mut b, t0, 500).is_empty(), "nothing while held");
         assert_eq!(release(&mut b, t0, 1999), [Pad::Ps]);
@@ -589,7 +658,7 @@ mod tests {
 
     #[test]
     fn holding_ps_for_2_seconds_sends_the_hold_once() {
-        let (mut b, t0) = (PsButton::default(), Instant::now());
+        let (mut b, t0) = (HoldButton::ps(), Instant::now());
         b.press(t0);
         assert!(tick(&mut b, t0, 1999).is_empty());
         assert_eq!(tick(&mut b, t0, 2000), [Pad::PsHold], "exactly at 2 s");
@@ -600,14 +669,14 @@ mod tests {
     #[test]
     fn a_late_release_still_counts_as_a_hold() {
         // The release arrives before an update ran past the deadline.
-        let (mut b, t0) = (PsButton::default(), Instant::now());
+        let (mut b, t0) = (HoldButton::ps(), Instant::now());
         b.press(t0);
         assert_eq!(release(&mut b, t0, 2100), [Pad::PsHold]);
     }
 
     #[test]
     fn repeated_presses_and_stray_releases_are_harmless() {
-        let (mut b, t0) = (PsButton::default(), Instant::now());
+        let (mut b, t0) = (HoldButton::ps(), Instant::now());
         assert!(release(&mut b, t0, 0).is_empty(), "release without a press");
         b.press(t0);
         b.press(ms(t0, 1500));
@@ -619,7 +688,7 @@ mod tests {
 
     #[test]
     fn next_due_says_when_the_hold_is_due() {
-        let (mut b, t0) = (PsButton::default(), Instant::now());
+        let (mut b, t0) = (HoldButton::ps(), Instant::now());
         assert_eq!(b.next_due(t0), None);
         b.press(t0);
         assert_eq!(b.next_due(ms(t0, 500)), Some(Duration::from_millis(1500)));
@@ -630,11 +699,43 @@ mod tests {
 
     #[test]
     fn each_controller_has_its_own_ps_button() {
-        let (mut a, mut b, t0) = (PsButton::default(), PsButton::default(), Instant::now());
+        let (mut a, mut b, t0) = (HoldButton::ps(), HoldButton::ps(), Instant::now());
         a.press(t0);
         b.press(ms(t0, 1000));
         assert_eq!(release(&mut b, t0, 1500), [Pad::Ps]);
         assert_eq!(tick(&mut a, t0, 2000), [Pad::PsHold]);
+    }
+
+    #[test]
+    fn a_short_confirm_press_is_sent_when_let_go() {
+        let (mut b, t0) = (HoldButton::confirm(), Instant::now());
+        b.press(t0);
+        assert!(tick(&mut b, t0, 300).is_empty(), "nothing while held");
+        assert_eq!(release(&mut b, t0, 499), [Pad::Confirm]);
+    }
+
+    #[test]
+    fn holding_confirm_for_half_a_second_sends_the_hold_once() {
+        let (mut b, t0) = (HoldButton::confirm(), Instant::now());
+        b.press(t0);
+        assert!(tick(&mut b, t0, 499).is_empty());
+        assert_eq!(tick(&mut b, t0, 500), [Pad::ConfirmHold], "exactly at 500 ms");
+        assert!(tick(&mut b, t0, 900).is_empty(), "only once");
+        assert!(release(&mut b, t0, 1000).is_empty(), "letting go sends no short press");
+        assert_eq!(b.next_due(ms(t0, 1000)), None);
+    }
+
+    #[test]
+    fn cancel_drops_a_pending_confirm() {
+        // The keyboard closed while the button was held: letting go must not press anything.
+        let (mut b, t0) = (HoldButton::confirm(), Instant::now());
+        b.press(t0);
+        b.cancel();
+        assert_eq!(b.next_due(ms(t0, 100)), None);
+        assert!(tick(&mut b, t0, 600).is_empty());
+        assert!(release(&mut b, t0, 700).is_empty());
+        b.press(ms(t0, 800));
+        assert_eq!(release(&mut b, t0, 900), [Pad::Confirm], "the next press works again");
     }
 
     #[test]

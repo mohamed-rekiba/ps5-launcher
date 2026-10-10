@@ -70,6 +70,10 @@ export global Icons {
     out property <image> chip: @image-url("../assets/icons/chip.svg");
     out property <image> palette: @image-url("../assets/icons/palette.svg");
     out property <image> tune: @image-url("../assets/icons/tune.svg");
+    out property <image> shift: @image-url("../assets/icons/shift.svg");
+    out property <image> backspace: @image-url("../assets/icons/backspace.svg");
+    out property <image> eye: @image-url("../assets/icons/eye.svg");
+    out property <image> eyeoff: @image-url("../assets/icons/eye-off.svg");
     out property <image> none;
 
     public pure function get(name: string) -> image {
@@ -81,7 +85,8 @@ export global Icons {
             : name == "close" ? close : name == "moon" ? moon : name == "restart" ? restart : name == "update" ? update
             : name == "logout" ? logout : name == "desktop" ? desktop
             : name == "pad" ? pad : name == "download" ? download
-            : name == "chip" ? chip : name == "palette" ? palette : name == "tune" ? tune : none;
+            : name == "chip" ? chip : name == "palette" ? palette : name == "tune" ? tune
+            : name == "shift" ? shift : name == "backspace" ? backspace : name == "eye" ? eye : name == "eyeoff" ? eyeoff : none;
     }
 }
 
@@ -229,3 +234,10 @@ export struct SettingsCat { label: string, icon: string, dot: bool, system: bool
 // A Settings search hit: the row's label and its category.
 export struct SettingsHit { label: string, place: string }
 export struct RunningData { active: bool, name: string, time: string }
+// A key of the on-screen keyboard. x and w are in key widths from the left edge of the keys.
+// icon: an Icons name shown instead of the label. lit: shift is on.
+export struct OskKey { label: string, icon: string, row: int, x: float, w: float, special: bool, lit: bool }
+// The field the on-screen keyboard edits: the text before and after the caret (dots for a
+// hidden password), and the labels of the L2 and R2 hints. secret: a password field, with the
+// eye; eye: its text shows. mono: a path or a key, in the monospaced font.
+export struct OskField { label: string, placeholder: string, before: string, after: string, secret: bool, eye: bool, search: bool, mono: bool, shift: string, layer: string }

@@ -36,6 +36,7 @@ mod library_layout;
 mod network;
 mod hostos;
 mod present;
+mod osk_ui;
 mod power_ui;
 mod quick_ui;
 mod psn;

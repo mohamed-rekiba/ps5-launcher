@@ -1,0 +1,264 @@
+// The on-screen keyboard (docs/plans/ps5-launcher-os.md, Phase 5; the prototype's pick A): docked
+// at the bottom, QWERTY with large keys, and the edited field lifted above it so it is never
+// covered. One focus style, the app's own: the focused key turns white.
+
+import { S, Theme, Icons, OskKey, OskField } from "theme.slint";
+import { KeyCap } from "widgets.slint";
+
+component KeyBtn inherits Rectangle {
+    in property <string> label;
+    in property <string> icon;
+    in property <bool> focused;
+    in property <bool> special;
+    in property <bool> lit;
+    callback clicked();
+    border-radius: (14px * S.k);
+    background: focused ? #ffffff : lit ? #3d8bff66 : ta.has-hover ? #ffffff40 : special ? #ffffff1a : #ffffff2e;
+    drop-shadow-blur: focused ? (22px * S.k) : 0;
+    drop-shadow-color: focused ? #8cb9ffaa : transparent;
+    transform-scale: focused ? 1.06 : 1.0;
+    animate background, transform-scale { duration: 90ms; }
+    if root.icon != "": Image {
+        source: Icons.get(root.icon);
+        colorize: root.focused ? #0a0d18 : Theme.text;
+        width: (30px * S.k);
+        height: (30px * S.k);
+    }
+    if root.icon == "": Text {
+        text: root.label;
+        font-size: root.label.character-count > 1 ? (21px * S.k) : (30px * S.k);
+        font-weight: root.special ? 600 : 500;
+        color: root.focused ? #0a0d18 : Theme.text;
+    }
+    ta := TouchArea { mouse-cursor: pointer; clicked => { root.clicked(); } }
+}
+
+export component Osk inherits Rectangle {
+    in property <OskField> field;
+    in property <[OskKey]> keys;
+    // The focused key, an index into `keys`; -1 while focus is on the suggestions.
+    in property <int> focused;
+    // Title suggestions (Library search), and the focused one (-1: none).
+    in property <[string]> sugs;
+    in property <int> sug: -1;
+    // The accent popup over the focused key (empty: closed), and its focused accent.
+    in property <[string]> accents;
+    in property <int> accent;
+    callback key(int);
+    callback pick(int);
+    callback done();
+    callback close();
+
+    property <length> unit: (128px * S.k);
+    property <length> kh: (74px * S.k);
+    property <length> kg: (12px * S.k);
+    property <length> keys-w: 10 * unit + 9 * kg;
+    property <length> keys-h: 4 * kh + 3 * kg;
+    property <length> hint-h: (54px * S.k);
+    property <length> sug-h: root.sugs.length > 0 ? (62px * S.k) : 0;
+    // The panel: the hints, the suggestions, the keys.
+    property <length> ph: (26px * S.k) + hint-h + sug-h + keys-h + (48px * S.k);
+    property <length> py: root.height - ph;
+    property <length> kx: (root.width - keys-w) / 2;
+    property <length> ky: py + (26px * S.k) + hint-h + sug-h;
+    property <OskKey> fk: root.keys[max(0, root.focused)];
+
+    property <bool> entered: false;
+    init => { entered = true; }
+
+    // The screen above dims, so the lifted field stands out. Clicks stay here.
+    Rectangle {
+        y: 0;
+        height: root.py;
+        background: entered ? #03050c99 : #03050c00;
+        animate background { duration: 200ms; }
+    }
+    TouchArea {}
+
+    // ---------------------------------------------------------------- the panel
+    Rectangle {
+        y: entered ? root.py : root.height;
+        animate y { duration: 260ms; easing: ease-out-expo; }
+        height: root.ph;
+        background: #0b1124fa;
+        border-width: 1px;
+        border-color: Theme.line;
+        drop-shadow-blur: (50px * S.k);
+        drop-shadow-color: #000000cc;
+    }
+
+    // ---------------------------------------------------------------- the edited field, lifted
+    Rectangle {
+        property <length> fw: (1100px * S.k);
+        x: (root.width - fw) / 2;
+        y: root.py - (150px * S.k);
+        width: fw;
+        height: (110px * S.k);
+        Text {
+            x: 0;
+            y: 0;
+            text: root.field.label;
+            font-size: (19px * S.k);
+            font-weight: 600;
+            color: Theme.text2;
+        }
+        box := Rectangle {
+            y: (36px * S.k);
+            height: (70px * S.k);
+            border-radius: (16px * S.k);
+            background: #05070fe6;
+            border-width: (3px * S.k);
+            border-color: #ffffff;
+            drop-shadow-blur: (24px * S.k);
+            drop-shadow-color: Theme.glow;
+            property <length> tx: root.field.search ? (62px * S.k) : (22px * S.k);
+            property <length> right: root.field.secret ? (70px * S.k) : (22px * S.k);
+            if root.field.search: Image {
+                x: (22px * S.k);
+                source: Icons.search;
+                colorize: Theme.text2;
+                width: (26px * S.k);
+                height: (26px * S.k);
+            }
+            Rectangle {
+                x: box.tx;
+                width: box.width - box.tx - box.right;
+                clip: true;
+                if root.field.before == "" && root.field.after == "": Text {
+                    x: (10px * S.k);
+                    text: root.field.placeholder;
+                    font-size: (26px * S.k);
+                    color: Theme.text3;
+                    vertical-alignment: center;
+                }
+                // The text scrolls left so the caret stays in view.
+                Rectangle {
+                    x: min(0, parent.width - before.width - (12px * S.k));
+                    width: before.width + (3px * S.k) + after.width;
+                    before := Text {
+                        x: 0;
+                        width: self.preferred-width;
+                        text: root.field.before;
+                        font-size: (28px * S.k);
+                        font-family: root.field.mono ? "DejaVu Sans Mono" : "Inter";
+                        color: Theme.text;
+                        vertical-alignment: center;
+                    }
+                    Rectangle {
+                        x: before.width;
+                        y: (16px * S.k);
+                        width: (3px * S.k);
+                        height: parent.height - (32px * S.k);
+                        background: Theme.accent;
+                    }
+                    after := Text {
+                        x: before.width + (3px * S.k);
+                        width: self.preferred-width;
+                        text: root.field.after;
+                        font-size: (28px * S.k);
+                        font-family: root.field.mono ? "DejaVu Sans Mono" : "Inter";
+                        color: Theme.text;
+                        vertical-alignment: center;
+                    }
+                }
+            }
+            if root.field.secret: Image {
+                x: parent.width - (52px * S.k);
+                source: root.field.eye ? Icons.eye : Icons.eyeoff;
+                colorize: Theme.text2;
+                width: (30px * S.k);
+                height: (30px * S.k);
+            }
+        }
+    }
+
+    // ---------------------------------------------------------------- controller hints
+    HorizontalLayout {
+        x: (root.width - self.width) / 2;
+        y: root.py + (18px * S.k);
+        width: self.preferred-width;
+        height: root.hint-h;
+        spacing: (26px * S.k);
+        for h[i] in [
+            {k: "□", l: "Delete", c: #f5a3e6, r: true},
+            {k: "△", l: "Space", c: #6ee7c8, r: true},
+            {k: "L1 R1", l: "Cursor", c: #ffffff, r: false},
+            {k: "L2", l: root.field.shift, c: #ffffff, r: false},
+            {k: "R2", l: root.field.layer, c: #ffffff, r: false},
+            {k: "☰", l: "Done", c: #ffffff, r: false},
+            {k: "○", l: "Close", c: #ff8f9c, r: true},
+            {k: "hold ✕", l: "Accents", c: #8fb6ff, r: false},
+        ]: Rectangle {
+            width: hint.preferred-width;
+            hint := HorizontalLayout {
+                spacing: (8px * S.k);
+                KeyCap { text: h.k; round: h.r; fg: h.c; y: (12px * S.k); }
+                Text { text: h.l; font-size: (17px * S.k); color: Theme.text2; vertical-alignment: center; }
+            }
+            if i == 5 || i == 6: TouchArea {
+                mouse-cursor: pointer;
+                clicked => {
+                    if i == 5 { root.done(); } else { root.close(); }
+                }
+            }
+        }
+    }
+
+    // ---------------------------------------------------------------- title suggestions
+    if root.sugs.length > 0: HorizontalLayout {
+        x: root.kx;
+        y: root.ky - root.sug-h;
+        height: (50px * S.k);
+        spacing: (10px * S.k);
+        for s[i] in root.sugs: Rectangle {
+            property <bool> f: root.sug == i;
+            width: st.preferred-width + (40px * S.k);
+            border-radius: (25px * S.k);
+            background: f ? #ffffff : sta.has-hover ? #ffffff30 : #ffffff1f;
+            border-width: 1px;
+            border-color: Theme.line;
+            drop-shadow-blur: f ? (18px * S.k) : 0;
+            drop-shadow-color: f ? #8cb9ffaa : transparent;
+            st := Text { text: s; font-size: (19px * S.k); font-weight: 500; color: f ? #0a0d18 : Theme.text; }
+            sta := TouchArea { mouse-cursor: pointer; clicked => { root.pick(i); } }
+        }
+    }
+
+    // ---------------------------------------------------------------- the keys
+    for k[i] in root.keys: KeyBtn {
+        x: root.kx + k.x * (root.unit + root.kg);
+        y: root.ky + k.row * (root.kh + root.kg);
+        width: k.w * root.unit + (k.w - 1) * root.kg;
+        height: root.kh;
+        label: k.label;
+        icon: k.icon;
+        special: k.special;
+        lit: k.lit;
+        focused: root.focused == i;
+        clicked => { root.key(i); }
+    }
+
+    // ---------------------------------------------------------------- accents over the focused key
+    if root.accents.length > 0: popup := Rectangle {
+        property <length> aw: root.unit * 0.9;
+        width: root.accents.length * (aw + (6px * S.k)) + (10px * S.k);
+        height: root.kh + (16px * S.k);
+        x: min(root.kx + root.fk.x * (root.unit + root.kg) - (8px * S.k), root.width - self.width - (24px * S.k));
+        y: root.ky + root.fk.row * (root.kh + root.kg) - root.kh - (26px * S.k);
+        border-radius: (16px * S.k);
+        background: #26365f;
+        border-width: 1px;
+        border-color: #ffffff40;
+        drop-shadow-blur: (30px * S.k);
+        drop-shadow-color: #000000cc;
+        HorizontalLayout {
+            padding: (8px * S.k);
+            spacing: (6px * S.k);
+            for a[i] in root.accents: KeyBtn {
+                width: popup.aw;
+                label: a;
+                focused: root.accent == i;
+            }
+        }
+    }
+}

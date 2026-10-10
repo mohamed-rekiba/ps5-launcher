@@ -670,6 +670,10 @@ impl App {
                 audio::play(Sound::Select);
                 self.edit_index = i as i32;
                 let ui = self.ui();
+                ui.set_edit_caret(-1);
+                if self.last_input_pad {
+                    self.osk_open(crate::osk_ui::Field::Row(i, id), &text);
+                }
                 ui.set_edit_text(text.into());
                 ui.set_edit_index(i as i32);
             }
@@ -985,10 +989,17 @@ impl App {
         }
         self.settings_nav.find_editing = true;
         self.set_focus(Z_SETTINGS_FIND, 0);
-        self.ui().set_settings_find_editing(true);
+        let ui = self.ui();
+        ui.set_edit_caret(-1);
+        if self.last_input_pad {
+            let query = self.settings_nav.query.clone();
+            self.osk_open(crate::osk_ui::Field::SettingsFind, &query);
+        }
+        ui.set_settings_find_editing(true);
     }
 
     pub fn settings_find_stop(&mut self) {
+        self.osk_close_if(|f| f == crate::osk_ui::Field::SettingsFind);
         if !self.settings_nav.find_editing {
             return;
         }
