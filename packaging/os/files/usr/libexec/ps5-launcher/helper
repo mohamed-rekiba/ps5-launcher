@@ -7,6 +7,7 @@
 #
 #   helper set-next-session plasma   log in to Plasma once, at the next automatic login
 #   helper clear-next-session        forget that (Plasma's autostart, and every boot)
+#   helper status                    bootc status --json (it needs root on a booted system)
 #   helper update-check              is a system update available? (On the NVIDIA image it
 #                                    prints update-available <digest> or up-to-date.)
 #   helper update                    download a system update; it installs at the next restart
@@ -31,7 +32,7 @@ next_session="$sddm_dir/90-ps5-launcher-os-next-session.conf"
 cert_label=io.github.ps5-launcher.secureboot-cert-sha256
 
 usage() {
-    echo "usage: helper set-next-session plasma | clear-next-session | update-check | update | rollback | switch main|nvidia | queue-key" >&2
+    echo "usage: helper set-next-session plasma | clear-next-session | status | update-check | update | rollback | switch main|nvidia | queue-key" >&2
     exit 2
 }
 
@@ -128,6 +129,7 @@ case "$task $#" in
     mv -f "$tmp" "$next_session"
     ;;
 "clear-next-session 0") rm -f "$next_session" ;;
+"status 0") exec bootc status --json ;;
 "update-check 0")
     # bootc cannot see a newer image once it follows a digest, so the NVIDIA image asks the
     # channel itself.

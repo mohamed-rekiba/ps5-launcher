@@ -54,8 +54,9 @@ fn deployment(v: &serde_json::Value) -> Option<Deployment> {
     })
 }
 
+/// bootc status needs root on a booted system, so it goes through the helper.
 pub fn status_call() -> Call {
-    Call::new("bootc", &["status", "--json"], 30)
+    Call::new("pkexec", &[HELPER, "status"], 30)
 }
 
 /// A task of the root helper, through pkexec (polkit allows it for the user at the PC).
@@ -259,6 +260,14 @@ mod tests {
         assert_eq!(helper_call(Task::QueueKey).args, [HELPER, "queue-key"]);
         assert_eq!(helper_call(Task::Update).program, "pkexec");
         assert!(helper_call(Task::Update).secs >= 3600, "a download takes time");
+    }
+
+    #[test]
+    fn status_is_read_through_the_root_helper() {
+        // bootc status takes root on a booted system (prepare_for_write), so the user asks the
+        // helper, which polkit allows without a password.
+        assert_eq!(status_call().program, "pkexec");
+        assert_eq!(status_call().args, [HELPER, "status"]);
     }
 
     #[test]

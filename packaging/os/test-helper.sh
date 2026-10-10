@@ -186,6 +186,8 @@ printf 'IMAGE=nvidia\nIMAGE_REF=ghcr.io/owner/ps5-launcher-fedora:nvidia\n' > "$
 check "switch main needs no key" gate 0 switch main
 check "  and follows the main tag" grep -qx "switch ghcr.io/owner/ps5-launcher-fedora:main" "$work/bootc.log"
 check "switch to anything else is refused" gate 2 switch ../../evil
+check "status reads bootc's state" gate 0 status
+check "  as JSON" grep -qx "status --json" "$work/bootc.log"
 check "an unknown task is refused" fails helper rm -rf /
 check "no task is refused" fails helper
 check "extra arguments are refused" fails helper update --apply
