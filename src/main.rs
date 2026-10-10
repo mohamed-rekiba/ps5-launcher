@@ -27,7 +27,7 @@ mod config;
 mod display;
 mod download_ui;
 mod downloads;
-#[allow(dead_code, reason = "phase 1 of docs/plans/addons.md: main only loads the addons; resolution and the Settings actions have no caller yet")]
+#[allow(dead_code, reason = "phase 1 of docs/plans/addons.md: a read-only addon loader the app does not call until phase 2")]
 mod emulators;
 mod gamepad;
 mod gpu;
@@ -120,15 +120,7 @@ fn main() -> std::process::ExitCode {
         }
     }
 
-    // Emulator addons, phase 1 (docs/plans/addons.md): copy or update the default addons in the
-    // data folder and check every addon. Nothing uses the result yet; games still launch through
-    // kyty.rs, shad.rs and sessions.rs. Problems only go to the log.
-    let addons = emulators::startup::load_for_app();
-    log!("emulator addons: {} found, {} problems", addons.registry.emulators().len(), addons.problems.len());
-    for problem in &addons.problems {
-        log!("emulator addons: {problem}");
-    }
-    drop(addons);
+    // Phase 2 of docs/plans/addons.md calls emulators::startup::load_for_app() here, with the code that uses its snapshot.
 
     let cfg = config::Config::load();
     let mons = display::monitors();
