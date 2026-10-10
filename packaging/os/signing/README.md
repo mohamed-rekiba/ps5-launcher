@@ -86,8 +86,10 @@ repository.
 4. Create the environment `os-fedora-signing` (repository Settings → Environments → New
    environment), **before** you add its secrets, and before the workflow first runs: GitHub
    creates an environment the first time a workflow names it, with no rules at all. Under *Deployment branches and tags*, choose *Selected branches and tags* and
-   add only `main`. Add no required reviewers: every scheduled run signs its candidates. Protect
-   the `main` branch itself (Settings → Rules), so only reviewed changes reach it.
+   add the branch `main` and the tag pattern `v*` (a published launcher release runs from its
+   tag). Add no required reviewers: every run signs its candidates. Protect the `main` branch
+   and the `v*` tags (Settings → Rules; see docs/DEVELOPMENT.md, Releases), so only reviewed
+   changes reach them.
 
 5. Store the key and the password as secrets **of that environment**. `gh` reads them from
    standard input, so they are not in your shell history:
@@ -115,7 +117,7 @@ repository.
 
 | Environment | Used by | Its rules (the owner sets them) |
 |---|---|---|
-| `os-fedora-signing` | the `sign` job | Deployment branches: `main` only. No reviewers. Secrets `OS_IMAGE_SIGNING_KEY`, `COSIGN_PASSWORD`. |
+| `os-fedora-signing` | the `sign` job | Deployment branches and tags: `main` and `v*`. No reviewers. Secrets `OS_IMAGE_SIGNING_KEY`, `COSIGN_PASSWORD`. |
 | `os-fedora-release` | the `promote` job | Deployment branches: `main` only. Required reviewers, who approve only with hardware results for that exact run. |
 
 The signing key is not in `os-fedora-release`: its required reviewers would hold every daily run

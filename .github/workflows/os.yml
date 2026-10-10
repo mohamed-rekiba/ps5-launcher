@@ -1,6 +1,8 @@
-name: PS5 Launcher OS (Fedora)
+name: OS
 
-# The Fedora bootc OS image (packaging/os/) and its installer ISO. It replaces the Bazzite image
+# The Fedora bootc OS image (packaging/os/) and its installer ISO. It runs when a launcher release
+# is published (package.yml publishes it after its v* tag; prereleases are skipped) and by hand.
+# It replaces the Bazzite image
 # (os/ and os.yml, both removed). Never push to the Bazzite repository ps5-launcher-os or its
 # tags: installed Bazzite PCs still follow them. packaging/os/README.md describes the
 # images, the gates and the owner's setup.
@@ -22,7 +24,8 @@ name: PS5 Launcher OS (Fedora)
 # packaging/os/signing/cosign.pub.
 #
 # Each run:
-# 1. prepare: resolves the inputs once: the launcher release (input, or the latest), the
+# 1. prepare: resolves the inputs once: the launcher release (the published release, the tag the
+#    run was started from, or the latest), the
 #    digest of fedora-bootc:44 (so daily builds pick up Fedora's updates), the image name, the
 #    Secure Boot certificate and the image signing public key.
 # 2. main: checks the launcher tarball's checksum, builds its rpm, builds the main image, checks
@@ -32,7 +35,7 @@ name: PS5 Launcher OS (Fedora)
 # 4. test-images (CI only): the install test's upgrade target, the same image unsigned, and one
 #    signed with a throwaway key made in the job.
 # 5. sign: signs the main, NVIDIA and upgrade digests (environment os-fedora-signing, which only
-#    the protected main branch may use), with the run id, attempt and commit as annotations, then
+#    the protected main branch and the protected v* tags may use), with the run id, attempt and commit as annotations, then
 #    verifies them against the committed public key.
 # 6. Gates, all on a runner with KVM (no KVM fails them):
 #    boot-test     a qcow2 of the main candidate boots, and its checks pass (session included)
@@ -61,12 +64,12 @@ name: PS5 Launcher OS (Fedora)
 on:
   # TODO: bring back the nightly schedule (cron "45 4 * * *") once the signing environment and
   # SECUREBOOT_KEY exist and one manual run is green. Without them every scheduled run fails.
+  release:
+    types: [published]
+  # By hand, "Use workflow from" picks the launcher: a v* tag builds that release, and a branch
+  # builds the latest release (promotion runs only from main).
   workflow_dispatch:
     inputs:
-      launcher_tag:
-        description: Launcher release tag to put in the image (empty for the latest release)
-        type: string
-        default: ""
       promote:
         description: Promote the tested images to the release tags (needs the environment's approval)
         type: boolean
@@ -75,26 +78,6 @@ on:
         description: After promotion, attach the installer ISO to the launcher release
         type: boolean
         default: false
-  # For release.yml, after a launcher release. It must pass `secrets: inherit` (for SECUREBOOT_KEY;
-  # the signing secrets are environment secrets of os-fedora-signing).
-  workflow_call:
-    inputs:
-      launcher_tag:
-        type: string
-        default: ""
-      promote:
-        type: boolean
-        default: false
-      attach_iso:
-        type: boolean
-        default: false
-    secrets:
-      SECUREBOOT_KEY:
-        required: false
-      OS_IMAGE_SIGNING_KEY:
-        required: false
-      COSIGN_PASSWORD:
-        required: false
 
 permissions:
   contents: read
@@ -125,6 +108,8 @@ defaults:
 
 jobs:
   prepare:
+    # A prerelease is not a launcher release that installed PCs should get.
+    if: github.event_name != 'release' || !github.event.release.prerelease
     runs-on: ubuntu-24.04
     timeout-minutes: 10
     outputs:
@@ -141,7 +126,8 @@ jobs:
       - id: resolve
         env:
           GH_TOKEN: ${{ github.token }}
-          LAUNCHER_TAG: ${{ inputs.launcher_tag }}
+          # The published release, or the tag the run was started from; empty means the latest.
+          LAUNCHER_TAG: ${{ github.event.release.tag_name || (startsWith(github.ref, 'refs/tags/') && github.ref_name) || '' }}
         run: |
           if [ ! -f "$CERT" ]; then
             echo "::error::No Secure Boot certificate at $CERT. The owner makes it once: see packaging/os/secureboot/README.md"

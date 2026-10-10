@@ -1,40 +1,73 @@
 name: Package
 
-# Builds the release binaries for a tag and attaches them to its (draft) release.
-# Called by release.yml; it can also be run by hand to rebuild the files of a release made after this
-# workflow was added (it needs the helper actions and scripts that older commits don't have).
+# Builds the release files for a tag, attaches them to its draft release, checks them, and
+# publishes the release. It starts when a v* tag is pushed: Release Please pushes one when its
+# release pull request is merged (release.yml). The published release then starts os-fedora.yml.
+# By hand (workflow_dispatch), choose the release tag under "Use workflow from": it builds that
+# tag again. It never changes a release that is already published.
+#
+# Publishing uses the secret RELEASE_PLEASE_TOKEN, only in the publish job: a release published
+# with the workflow's own token would start no workflow, so os-fedora.yml would not run.
 on:
-  workflow_call:
-    inputs:
-      tag:
-        required: true
-        type: string
-      ref:
-        description: Commit to build
-        required: true
-        type: string
+  push:
+    tags: ["v*"]
   workflow_dispatch:
-    inputs:
-      tag:
-        description: Release tag (e.g. v1.13.0)
-        required: true
-        type: string
-      ref:
-        description: Commit or tag to build
-        required: true
-        type: string
 
 permissions:
   contents: write
 
+concurrency:
+  group: package-${{ github.ref_name }}
+  cancel-in-progress: false
+
 env:
   CARGO_TERM_COLOR: always
-  TAG: ${{ inputs.tag }}
+  # The tag this run is for: the pushed tag, or by hand the tag under "Use workflow from".
+  TAG: ${{ github.ref_name }}
   # The built app checks this repository for updates (a fork follows its own releases).
   PS5_LAUNCHER_REPO: ${{ github.repository }}
 
 jobs:
+  # The draft release the files go to: Release Please's, or a new draft for a tag pushed by hand.
+  # A published release is never changed.
+  release:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    steps:
+      - name: Find or create the draft release
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
+        run: |
+          if [ "$GITHUB_REF_TYPE" != tag ] || ! [[ $TAG =~ ^v[0-9]+\.[0-9]+\.[0-9]+([-+.][0-9A-Za-z.-]+)?$ ]]; then
+            echo "::error::Not a release tag: $TAG"
+            exit 1
+          fi
+          # Release Please makes the release and then the tag; give its API a moment to show it.
+          for attempt in 1 2 3 4 5 6; do
+            if draft=$(gh release view "$TAG" --json isDraft --jq .isDraft 2>err.txt); then
+              break
+            fi
+            if ! grep -qi 'release not found' err.txt; then
+              cat err.txt
+              echo "::error::Could not read the release $TAG"
+              exit 1
+            fi
+            draft=missing
+            sleep 10
+          done
+          case $draft in
+            true) echo "Draft release $TAG found" ;;
+            missing)
+              gh release create "$TAG" --draft --verify-tag --title "$TAG" --notes ""
+              echo "Made a draft release for $TAG" ;;
+            *)
+              echo "::error::$TAG is already published. Its files are not changed; make a new release."
+              exit 1 ;;
+          esac
+
   linux-x86_64:
+    needs: release
     # Ubuntu 22.04 (glibc 2.35) so the binary runs on most distros from the last few years.
     runs-on: ubuntu-22.04
     timeout-minutes: 60
@@ -44,7 +77,6 @@ jobs:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           persist-credentials: false
-          ref: ${{ inputs.ref }}
       - uses: ./.github/actions/rust-setup
         with:
           cache-key: release
@@ -78,13 +110,13 @@ jobs:
 
   # One universal app bundle (Apple Silicon + Intel).
   macos-universal:
+    needs: release
     runs-on: macos-14
     timeout-minutes: 60
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           persist-credentials: false
-          ref: ${{ inputs.ref }}
       - uses: ./.github/actions/rust-setup
         with:
           targets: aarch64-apple-darwin,x86_64-apple-darwin
@@ -108,3 +140,35 @@ jobs:
         env:
           GH_TOKEN: ${{ github.token }}
         run: gh release upload "$TAG" dist/ps5-launcher-macos-universal.zip dist/ps5-launcher-macos-universal.zip.sha256 --clobber
+
+  # Publishes the release once every file is attached.
+  publish:
+    needs: [linux-x86_64, macos-universal]
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    steps:
+      - name: Check the files and publish
+        env:
+          GH_TOKEN: ${{ secrets.RELEASE_PLEASE_TOKEN }}
+          GH_REPO: ${{ github.repository }}
+        run: |
+          if [ -z "$GH_TOKEN" ]; then
+            echo "::error::The secret RELEASE_PLEASE_TOKEN is missing, so the release stays a draft. See the top of .github/workflows/release.yml."
+            exit 1
+          fi
+          read -r draft assets < <(gh release view "$TAG" --json isDraft,assets --jq '"\(.isDraft) \([.assets[].name] | join(","))"')
+          if [ "$draft" != true ]; then
+            echo "::error::$TAG is already published; nothing to do"
+            exit 1
+          fi
+          missing=0
+          for name in ps5-launcher-linux-x86_64.tar.gz ps5-launcher-linux-x86_64.tar.gz.sha256 \
+              ps5-launcher-macos-universal.zip ps5-launcher-macos-universal.zip.sha256; do
+            [[ ",$assets," == *",$name,"* ]] || { echo "::error::Missing $name"; missing=1; }
+          done
+          for ext in .deb .rpm .pkg.tar.zst .AppImage; do
+            [[ ",$assets," == *"$ext,"* ]] || { echo "::error::Missing the $ext package"; missing=1; }
+          done
+          [ "$missing" = 0 ] || exit 1
+          gh release edit "$TAG" --draft=false
+          echo "Published $TAG"

@@ -6,6 +6,7 @@
       "package-name": "ps5-launcher",
       "include-component-in-tag": false,
       "draft": true,
+      "force-tag-creation": true,
       "bump-minor-pre-major": false,
       "changelog-path": "CHANGELOG.md"
     }

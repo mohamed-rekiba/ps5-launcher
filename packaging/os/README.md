@@ -278,10 +278,11 @@ Find the current base digest with
 
 ## The workflow and its gates
 
-`.github/workflows/os-fedora.yml` runs after each launcher release (release.yml calls it with
-the new tag, `secrets: inherit`, and no promotion yet) and by hand. Its daily schedule is off
-until the keys exist (a TODO in the file). It resolves its inputs once: the launcher release (the input `launcher_tag`, or the
-latest release), and the current digest of `fedora-bootc:44`, so each daily build picks up
+`.github/workflows/os-fedora.yml` (**PS5 Launcher OS**) runs when a launcher release is
+published (Package publishes it after its `v*` tag; prereleases are skipped) and by hand. Its
+daily schedule is off until the keys exist (a TODO in the file). It resolves its inputs once:
+the launcher release (the published release, the tag picked under "Use workflow from", or the
+latest release when started from a branch), and the current digest of `fedora-bootc:44`, so each daily build picks up
 Fedora's updates. Both go into the job summary and the image labels.
 
 1. **main:** checks the launcher tarball against its `.sha256`, builds the rpm with
@@ -296,7 +297,7 @@ Fedora's updates. Both go into the job summary and the image labels.
    one signed with a throwaway key made in the job.
 4. **sign**: signs the main, NVIDIA and upgrade digests with `OS_IMAGE_SIGNING_KEY`, with the run
    id, attempt, commit and variant as annotations, and verifies each against the committed
-   `cosign.pub`. It runs in the environment `os-fedora-signing`, which only `main` may use
+   `cosign.pub`. It runs in the environment `os-fedora-signing`, which only `main` and the `v*` tags may use
    ([signing/README.md](signing/README.md)).
 5. **Automated gates**, in a VM with KVM. A runner without `/dev/kvm` fails them; the repository
    variable `OS_VM_RUNNER` can name a self-hosted runner with KVM.
@@ -367,8 +368,8 @@ Then set it to `enabled` in a separate, reviewed change that cites that run's id
    certificate is committed and the secret is set, every run fails at the start with a pointer
    to it.
 2. **The image signing key and its environment:** follow [signing/README.md](signing/README.md):
-   the key pair, the environment `os-fedora-signing` (deployment branches: `main` only; no
-   reviewers) with the secrets `OS_IMAGE_SIGNING_KEY` and `COSIGN_PASSWORD`, and the committed
+   the key pair, the environment `os-fedora-signing` (deployment: the branch `main` and the
+   tags `v*`; no reviewers) with the secrets `OS_IMAGE_SIGNING_KEY` and `COSIGN_PASSWORD`, and the committed
    `cosign.pub`. Until `cosign.pub` is committed, every run fails at the start with a pointer to
    it; until the secrets are set, the `sign` job fails.
 3. **Package visibility:** the first push creates `ghcr.io/<owner>/ps5-launcher-fedora` as a
@@ -378,10 +379,12 @@ Then set it to `enabled` in a separate, reviewed change that cites that run's id
 4. **The environment `os-fedora-release`:** create it (Settings → Environments), add required
    reviewers, and allow only the `main` branch to deploy to it. Without reviewers, a run with
    `promote` on would promote right after the automated gates.
-5. **Branch protection on `main`:** the two environments trust `main`, so protect it (Settings →
-   Rules): changes only through reviewed pull requests.
-6. **After a launcher release:** release.yml's `os` job already calls this workflow. Once the
-   release guard is lifted, set its `promote` and `attach_iso` to true.
+5. **Protect `main` and the `v*` tags:** the environments trust them, so protect both (Settings →
+   Rules): `main` changes only through reviewed pull requests, and only the release token may
+   create, move or delete a `v*` tag.
+6. **After a launcher release:** the published release starts this workflow, without
+   promotion. Promote by hand after the hardware tests: start it from `main` with `promote` on
+   (and `attach_iso`, once the release guard is lifted).
 7. Optional repository variables: `OS_IMAGE_OWNER` (a fork's registry name), `OS_VM_RUNNER` (a
    runner with KVM).
 
@@ -422,4 +425,5 @@ switches to the candidate by digest.
 - Recovery mode is reached only by editing the GRUB entry; there is no menu entry for it, and
   PCs installed before the GRUB drop-in keep the 1-second menu.
 - Old `testing-*` tags are not deleted from the registry.
-- release.yml calls this workflow without promotion and the ISO: the release guard is still on.
+- A published release starts this workflow without promotion and the ISO: the release guard is
+  still on.

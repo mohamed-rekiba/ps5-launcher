@@ -295,19 +295,30 @@ workflow sets it to the repository it runs in).
 ## Releases
 
 Releases are automated with [Release Please](https://github.com/googleapis/release-please)
-(`.github/release-please-config.json`, `.github/release-please-manifest.json`, `.github/workflows/release.yml`, `package.yml`).
+(`.github/release-please-config.json`, `.github/release-please-manifest.json`, `.github/workflows/release.yml`, `package.yml`, `os-fedora.yml`).
 
 1. Write commit messages (or squash-merge titles) as [Conventional Commits](https://www.conventionalcommits.org):
    `fix:` bumps the patch version, `feat:` the minor, and `feat!:` or a `BREAKING CHANGE:` footer the major.
 2. Release Please keeps a release pull request open on `main` with the new version in
    `Cargo.toml` / `Cargo.lock` and the `CHANGELOG.md` entry.
-3. Merging it creates a draft release and tag. The same workflow builds the Linux tarball and the
-   universal macOS app, attaches them with their `.sha256` files, and then publishes the release.
-   The launcher's updater only ever sees published releases, so they always have their binaries.
+3. Merging it creates a draft release and pushes its `v*` tag at once (`force-tag-creation`).
+4. The tag starts **Package** (`package.yml`). It builds the Linux tarball and packages and the
+   universal macOS app, attaches them with their `.sha256` files, checks that every file is
+   there, and then publishes the release. The launcher's updater only ever sees published
+   releases, so they always have their files.
+5. The published release starts **PS5 Launcher OS** (`os-fedora.yml`), which builds and tests
+   the OS images with that release ([packaging/os](../packaging/os/README.md)). Prereleases are
+   skipped.
 
-One-time repository setting: *Settings → Actions → General → Allow GitHub Actions to create and
-approve pull requests*. Checks don't run on the release pull request itself (GitHub doesn't start
-workflows from the workflow token's events); the release workflow runs the tests before it builds.
+To run Package or PS5 Launcher OS by hand, pick the release tag under **Use workflow from**.
+
+One-time setup: the secret `RELEASE_PLEASE_TOKEN`, a fine-grained personal access token for this
+repository only, with Contents, Pull requests and Workflows set to "Read and write". GitHub
+starts no workflow from a tag, pull request or release made with the workflow's own token, so
+without it nothing after step 2 runs (release.yml fails with a pointer to this). With it, checks
+also run on the release pull request. Then protect the `v*` tags (Settings → Rules → Rulesets →
+New tag ruleset, target `v*`): restrict creation, update and deletion to the token's owner, since
+a tag starts the release and the OS image signing.
 
 ## Tests
 
