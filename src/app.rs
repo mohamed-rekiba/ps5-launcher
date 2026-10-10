@@ -1406,6 +1406,7 @@ impl App {
             self.push_quick();
         }
         let pads = crate::gamepad::count();
+        self.pads_tick(pads != self.pad_count);
         if pads != self.pad_count {
             ui.set_pad_count(pads as i32);
             self.pad_count = pads;

@@ -56,6 +56,15 @@ pub enum SId {
     WifiPassword,
     WifiScan,
     SavedNetwork(usize),
+    // Controllers: a connected controller, the Bluetooth switch, a paired device (Forget), and
+    // pairing a new controller (the indices are into `SystemUi`'s lists).
+    Pad(usize),
+    BtPower,
+    BtDevice(usize),
+    BtPair,
+    BtScan,
+    BtFound(usize),
+    BtPairClose,
     // Sound
     Volume,
     Mute,
@@ -104,6 +113,9 @@ pub enum Cat {
     System,
     /// Session and OS mode, each when its tool works: nmcli, wpctl, lsblk.
     Network,
+    /// The connected controllers and their battery, in Session and OS mode; and Bluetooth
+    /// (pairing, Forget) when bluetoothctl finds an adapter.
+    Controllers,
     Sound,
     /// The screen's GPU and driver, the NVIDIA driver, and the screen output: when a connected
     /// screen shows in sysfs.
@@ -130,6 +142,7 @@ impl Cat {
             Cat::Advanced => "Advanced",
             Cat::System => "System",
             Cat::Network => "Network",
+            Cat::Controllers => "Controllers",
             Cat::Sound => "Sound",
             Cat::Storage => "Storage",
             Cat::Display => "Display",
@@ -151,6 +164,7 @@ impl Cat {
             Cat::Advanced => "tune",
             Cat::System => "desktop",
             Cat::Network => "wifi",
+            Cat::Controllers => "pad",
             Cat::Sound => "sound",
             Cat::Storage => "disk",
             Cat::Display => "desktop",
@@ -161,7 +175,7 @@ impl Cat {
 
     /// In the System group, below the divider.
     pub fn system(self) -> bool {
-        matches!(self, Cat::System | Cat::Network | Cat::Sound | Cat::Display | Cat::Storage | Cat::OsUpdates | Cat::Time | Cat::About)
+        matches!(self, Cat::System | Cat::Network | Cat::Controllers | Cat::Sound | Cat::Display | Cat::Storage | Cat::OsUpdates | Cat::Time | Cat::About)
     }
 }
 
@@ -177,6 +191,8 @@ pub struct Tools {
     pub os_updates: bool,
     /// timedatectl.
     pub time: bool,
+    /// bluetoothctl, with an adapter.
+    pub bluetooth: bool,
 }
 
 /// The rail's categories in `mode`, with the System pages whose tools work.
@@ -187,10 +203,12 @@ pub fn categories(mode: Mode, tools: Tools) -> Vec<Cat> {
         cats.push(Cat::System);
         return cats;
     }
-    // Controllers and File sharing join in their own steps of Phase 6
-    // (docs/plans/ps5-launcher-os.md).
+    // File sharing joins in its own step of Phase 6 (docs/plans/ps5-launcher-os.md). Controllers
+    // is always there: without Bluetooth it still shows the connected controllers and their
+    // battery.
     let pages = [
         (Cat::Network, tools.network),
+        (Cat::Controllers, true),
         (Cat::Sound, tools.sound),
         (Cat::Display, tools.display),
         (Cat::Storage, tools.storage),
@@ -216,6 +234,7 @@ pub fn category(id: SId) -> Option<Cat> {
         Rawg | RawgRemove | Refresh => Cat::Advanced,
         OpenSystemSettings => Cat::System,
         WifiOn | Wired | Network(_) | WifiPassword | WifiScan | SavedNetwork(_) => Cat::Network,
+        Pad(_) | BtPower | BtDevice(_) | BtPair | BtScan | BtFound(_) | BtPairClose => Cat::Controllers,
         Volume | Mute | Output(_) => Cat::Sound,
         Drive(_) | Partition(..) => Cat::Storage,
         OsStatus | OsDownload | OsRollback => Cat::OsUpdates,
@@ -311,6 +330,10 @@ const PAGE_BOTTOM: f32 = 110.0;
 const KEY_CARD: f32 = 510.0;
 /// The NVIDIA driver's card on the Display page (the stepper, a title and its text).
 const NV_CARD: f32 = 300.0;
+/// The pairing card on the Controllers page: the stepper, a title, its text and the pictures of
+/// the buttons to hold; and without the pictures.
+const PAIR_CARD: f32 = 560.0;
+const PAIR_CARD_TEXT: f32 = 280.0;
 
 /// The rail and the page: which category is open, every row of every category (for search), and
 /// the search field.
@@ -331,7 +354,7 @@ pub struct SettingsNav {
 }
 
 /// Is `program` installed: an absolute path that exists, or a file in a `PATH` folder.
-fn installed(program: &str) -> bool {
+pub(crate) fn installed(program: &str) -> bool {
     let path = std::path::Path::new(program);
     if path.is_absolute() {
         return path.is_file();
@@ -662,6 +685,7 @@ impl App {
             .into(),
         );
         ui.set_settings_nv(if cat == Cat::Display { self.nv_card() } else { crate::NvCard::default() });
+        ui.set_settings_pair(if cat == Cat::Controllers { self.pair_card() } else { crate::PairCard::default() });
         ui.set_settings_mode(mode_label(Mode::current()).into());
         ui.set_settings(model(self.settings_rows.clone()));
         ui.set_edit_index(self.edit_index);
@@ -681,6 +705,14 @@ impl App {
         if cat == Some(Cat::Display) {
             let ui = self.ui();
             y += if ui.get_settings_nv().show { NV_CARD } else { 0.0 } + if self.nv_key_digits().is_empty() { 0.0 } else { KEY_CARD };
+        }
+        if cat == Some(Cat::Controllers) {
+            let pair = self.ui().get_settings_pair();
+            y += match (pair.show, pair.pictures) {
+                (false, _) => 0.0,
+                (true, true) => PAIR_CARD,
+                (true, false) => PAIR_CARD_TEXT,
+            };
         }
         let mut target = y;
         for (i, r) in self.settings_rows.iter().enumerate() {
@@ -744,7 +776,7 @@ impl App {
                 self.save_cfg(|c| c.monitor = next.clone());
                 self.move_to_monitor(&next);
             }
-            SId::WifiOn | SId::Mute | SId::Volume | SId::OutResolution | SId::OutRefresh | SId::Ntp => return self.sys_change(id, dir),
+            SId::WifiOn | SId::Mute | SId::Volume | SId::OutResolution | SId::OutRefresh | SId::Ntp | SId::BtPower => return self.sys_change(id, dir),
             SId::SeedCompleted => {
                 let on = dir > 0;
                 if let Err(error) = self.downloads.set_seed_after_download(on) {
@@ -801,16 +833,17 @@ impl App {
                 ui.set_edit_text(text.into());
                 ui.set_edit_index(i as i32);
             }
-            SId::Fullscreen | SId::Amd | SId::ReturnOnExit | SId::Sounds | SId::AutoUpdate | SId::SeedCompleted | SId::WifiOn | SId::Mute | SId::Ntp => {
+            SId::Fullscreen | SId::Amd | SId::ReturnOnExit | SId::Sounds | SId::AutoUpdate | SId::SeedCompleted | SId::WifiOn | SId::Mute | SId::Ntp | SId::BtPower => {
                 let on = self.settings_rows[i].on;
                 self.settings_change(i, if on { -1 } else { 1 });
             }
             SId::Resolution | SId::Present | SId::VideoOut | SId::Display | SId::OutResolution | SId::OutRefresh => self.settings_change(i, 1),
-            SId::Volume | SId::Wired | SId::Drive(_) | SId::Gpu => {}
+            SId::Volume | SId::Wired | SId::Drive(_) | SId::Gpu | SId::Pad(_) => {}
             SId::Network(_) | SId::WifiScan | SId::SavedNetwork(_) | SId::Output(_) | SId::Partition(..) | SId::OsStatus | SId::OsDownload | SId::OsRollback => self.sys_activate(id),
             SId::NvInstall | SId::NvLater | SId::NvRetry | SId::NvRestart | SId::NvOpenSource | SId::TimeZone | SId::TzBack | SId::TzRegion(_) | SId::TzZone(_) => {
                 self.sys_activate(id)
             }
+            SId::BtDevice(_) | SId::BtPair | SId::BtScan | SId::BtFound(_) | SId::BtPairClose => self.sys_activate(id),
             SId::RawgRemove => {
                 self.save_cfg(|c| c.rawg_key.clear());
                 self.rawg_status.clear();
@@ -1065,6 +1098,10 @@ impl App {
     }
 
     fn act_settings_page(&mut self, a: Act) {
+        // Back first leaves what a page has open: pairing a controller.
+        if a == Act::Back && self.sys_back() {
+            return;
+        }
         let n = self.settings_rows.len() as i32;
         let focusable = |rows: &Vec<crate::SettingData>, i: i32| i >= 0 && i < rows.len() as i32 && rows[i as usize].kind != 0;
         let to_rail = a == Act::Back || (a == Act::Left && !self.settings_rows.get(self.idx as usize).is_some_and(|r| left_changes(r.kind)));
@@ -1203,27 +1240,37 @@ mod tests {
         let launcher = [Cat::Games, Cat::Playing, Cat::Downloads, Cat::Emulators, Cat::Appearance, Cat::Updates, Cat::Advanced];
         let none = Tools::default();
         assert_eq!(categories(Mode::Desktop, none), [&launcher[..], &[Cat::System]].concat());
-        assert_eq!(categories(Mode::Session, none), [&launcher[..], &[Cat::About]].concat());
-        assert_eq!(categories(Mode::Os, none), [&launcher[..], &[Cat::About]].concat());
+        assert_eq!(categories(Mode::Session, none), [&launcher[..], &[Cat::Controllers, Cat::About]].concat());
+        assert_eq!(categories(Mode::Os, none), [&launcher[..], &[Cat::Controllers, Cat::About]].concat());
         assert!(Cat::System.system() && Cat::About.system());
         assert!(launcher.iter().all(|c| !c.system()));
     }
 
     #[test]
     fn system_pages_show_in_session_and_os_mode_when_their_tool_works() {
-        let all = Tools { network: true, sound: true, display: true, storage: true, os_updates: true, time: true };
+        let all = Tools { network: true, sound: true, display: true, storage: true, os_updates: true, time: true, bluetooth: true };
         let system = |mode| categories(mode, all).into_iter().filter(|c| c.system()).collect::<Vec<_>>();
         assert_eq!(system(Mode::Desktop), [Cat::System], "the desktop owns these");
-        assert_eq!(system(Mode::Session), [Cat::Network, Cat::Sound, Cat::Display, Cat::Storage, Cat::Time, Cat::About], "OS updates need the OS");
-        assert_eq!(system(Mode::Os), [Cat::Network, Cat::Sound, Cat::Display, Cat::Storage, Cat::OsUpdates, Cat::Time, Cat::About]);
+        assert_eq!(system(Mode::Session), [Cat::Network, Cat::Controllers, Cat::Sound, Cat::Display, Cat::Storage, Cat::Time, Cat::About], "OS updates need the OS");
+        assert_eq!(system(Mode::Os), [Cat::Network, Cat::Controllers, Cat::Sound, Cat::Display, Cat::Storage, Cat::OsUpdates, Cat::Time, Cat::About]);
         let sound_only = Tools { sound: true, ..Tools::default() };
         let cats = categories(Mode::Os, sound_only);
         assert_eq!(cats[cats.len() - 2..], [Cat::Sound, Cat::About]);
-        assert!([Cat::Network, Cat::Sound, Cat::Display, Cat::Storage, Cat::OsUpdates, Cat::Time].iter().all(|c| c.system()));
+        assert!([Cat::Network, Cat::Controllers, Cat::Sound, Cat::Display, Cat::Storage, Cat::OsUpdates, Cat::Time].iter().all(|c| c.system()));
         assert_eq!(Cat::OsUpdates.label(), "Updates");
         assert_eq!((Cat::Display.label(), Cat::Time.label()), ("Display", "Time"));
         let time_only = Tools { time: true, ..Tools::default() };
-        assert_eq!(categories(Mode::Session, time_only).iter().filter(|c| c.system()).copied().collect::<Vec<_>>(), [Cat::Time, Cat::About]);
+        assert_eq!(categories(Mode::Session, time_only).iter().filter(|c| c.system()).copied().collect::<Vec<_>>(), [Cat::Controllers, Cat::Time, Cat::About]);
+    }
+
+    #[test]
+    fn controllers_show_without_bluetooth_but_not_on_a_desktop() {
+        // The connected controllers and their battery need no tool; Bluetooth only adds rows.
+        let none = Tools::default();
+        assert!(categories(Mode::Session, none).contains(&Cat::Controllers));
+        assert!(categories(Mode::Os, none).contains(&Cat::Controllers));
+        assert!(!categories(Mode::Desktop, Tools { bluetooth: true, ..none }).contains(&Cat::Controllers), "the desktop owns Bluetooth");
+        assert_eq!((Cat::Controllers.label(), Cat::Controllers.icon()), ("Controllers", "pad"));
     }
 
     #[test]
@@ -1240,6 +1287,7 @@ mod tests {
             (Cat::Advanced, &[Rawg, RawgRemove, Refresh]),
             (Cat::System, &[OpenSystemSettings]),
             (Cat::Network, &[WifiOn, Wired, Network(0), WifiPassword, WifiScan, SavedNetwork(1)]),
+            (Cat::Controllers, &[Pad(0), BtPower, BtDevice(1), BtPair, BtScan, BtFound(2), BtPairClose]),
             (Cat::Sound, &[Volume, Mute, Output(2)]),
             (Cat::Storage, &[Drive(0), Partition(0, 3)]),
             (Cat::OsUpdates, &[OsStatus, OsDownload, OsRollback]),

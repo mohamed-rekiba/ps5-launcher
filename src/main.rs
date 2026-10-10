@@ -2,6 +2,8 @@
 
 mod app;
 mod audio;
+mod battery;
+mod bluetooth;
 mod boot;
 mod catalog;
 mod compat;

@@ -4,7 +4,7 @@
 // moves into the page. One focus style, the app's own: the focused rail entry or search hit turns
 // white; the focused row gets the white ring it has always had.
 
-import { S, Theme, Icons, Zone, SettingData, SettingsCat, SettingsHit, NvCard } from "theme.slint";
+import { S, Theme, Icons, Zone, SettingData, SettingsCat, SettingsHit, NvCard, PairCard } from "theme.slint";
 import { Switch, KeyCap } from "widgets.slint";
 import { AboutSlint } from "std-widgets.slint";
 
@@ -256,6 +256,170 @@ component NvidiaCard inherits VerticalLayout {
     }
 }
 
+// A button to hold while pairing: blue, with a ring. Others are dim.
+component PadButton inherits Rectangle {
+    in property <bool> hold;
+    in property <string> label;
+    background: hold ? Theme.accent : #ffffff1a;
+    border-width: hold ? (3px * S.k) : 1px;
+    border-color: hold ? #8fb6ff : #ffffff33;
+    if root.label != "": Text {
+        text: root.label;
+        font-size: (11px * S.k);
+        font-weight: 600;
+        color: root.hold ? #ffffff : Theme.text3;
+    }
+}
+
+// A controller drawn from plain shapes, with the buttons to hold for pairing. kind: 0 DualSense
+// and DualShock 4, 1 Xbox, 2 Switch Pro.
+component PadPicture inherits VerticalLayout {
+    in property <int> kind;
+    in property <string> title;
+    in property <string> text;
+    in property <length> text-w;
+    spacing: (10px * S.k);
+    Rectangle {
+        height: (150px * S.k);
+        // The body and its two grips.
+        body := Rectangle {
+            x: (parent.width - self.width) / 2;
+            y: (24px * S.k);
+            width: (220px * S.k);
+            height: (96px * S.k);
+            border-radius: (40px * S.k);
+            background: #ffffff10;
+            border-width: (2px * S.k);
+            border-color: #ffffff38;
+        }
+        for g[i] in [0, 1]: Rectangle {
+            x: body.x + (i == 0 ? (6px * S.k) : body.width - self.width - (6px * S.k));
+            y: body.y + (40px * S.k);
+            width: (64px * S.k);
+            height: (80px * S.k);
+            border-radius: (32px * S.k);
+            background: #ffffff10;
+            border-width: (2px * S.k);
+            border-color: #ffffff38;
+        }
+        // The d-pad and the face buttons, dim.
+        Rectangle { x: body.x + (44px * S.k); y: body.y + (26px * S.k); width: (24px * S.k); height: (8px * S.k); background: #ffffff26; }
+        Rectangle { x: body.x + (52px * S.k); y: body.y + (18px * S.k); width: (8px * S.k); height: (24px * S.k); background: #ffffff26; }
+        for b[i] in [{x: 160, y: 14}, {x: 148, y: 26}, {x: 172, y: 26}, {x: 160, y: 38}]: Rectangle {
+            x: body.x + (b.x * 1px * S.k);
+            y: body.y + (b.y * 1px * S.k);
+            width: (11px * S.k);
+            height: (11px * S.k);
+            border-radius: (5.5px * S.k);
+            background: #ffffff26;
+        }
+        // DualSense and DualShock 4: Create (Share) left of the touchpad, PS below it.
+        if root.kind == 0: Rectangle {
+            x: body.x + (80px * S.k);
+            y: body.y + (8px * S.k);
+            width: (60px * S.k);
+            height: (34px * S.k);
+            border-radius: (6px * S.k);
+            background: #ffffff0d;
+            border-width: 1px;
+            border-color: #ffffff33;
+        }
+        if root.kind == 0: PadButton { hold: true; x: body.x + (66px * S.k); y: body.y + (6px * S.k); width: (12px * S.k); height: (22px * S.k); border-radius: (5px * S.k); }
+        if root.kind == 0: PadButton { hold: true; label: "PS"; x: body.x + (96px * S.k); y: body.y + (54px * S.k); width: (28px * S.k); height: (28px * S.k); border-radius: (14px * S.k); }
+        if root.kind == 0: Text { x: body.x - (6px * S.k); y: (0px * S.k); text: "Create / Share"; font-size: (13px * S.k); color: #8fb6ff; }
+        // Xbox: the Xbox button lights up; the pair button is on the top edge, by the cable port.
+        if root.kind == 1: PadButton { hold: false; label: "X"; x: body.x + (96px * S.k); y: body.y + (8px * S.k); width: (28px * S.k); height: (28px * S.k); border-radius: (14px * S.k); }
+        if root.kind == 1: Rectangle { x: body.x + (100px * S.k); y: body.y - (6px * S.k); width: (20px * S.k); height: (8px * S.k); border-radius: (2px * S.k); background: #ffffff33; }
+        if root.kind == 1: PadButton { hold: true; x: body.x + (132px * S.k); y: body.y - (10px * S.k); width: (20px * S.k); height: (12px * S.k); border-radius: (4px * S.k); }
+        if root.kind == 1: Text { x: body.x + (112px * S.k); y: (0px * S.k); text: "Pair"; font-size: (13px * S.k); color: #8fb6ff; }
+        // Switch Pro: the small sync button on the top edge, left of the cable port.
+        if root.kind == 2: Rectangle { x: body.x + (100px * S.k); y: body.y - (6px * S.k); width: (20px * S.k); height: (8px * S.k); border-radius: (2px * S.k); background: #ffffff33; }
+        if root.kind == 2: PadButton { hold: true; x: body.x + (78px * S.k); y: body.y - (10px * S.k); width: (14px * S.k); height: (14px * S.k); border-radius: (7px * S.k); }
+        if root.kind == 2: PadButton { hold: false; label: "⌂"; x: body.x + (120px * S.k); y: body.y + (40px * S.k); width: (20px * S.k); height: (20px * S.k); border-radius: (10px * S.k); }
+        if root.kind == 2: Text { x: body.x + (48px * S.k); y: (0px * S.k); text: "Sync"; font-size: (13px * S.k); color: #8fb6ff; }
+    }
+    Text { text: root.title; font-size: (18px * S.k); font-weight: 600; color: Theme.text; horizontal-alignment: center; }
+    Text { text: root.text; width: root.text-w; font-size: (15px * S.k); color: Theme.text2; wrap: word-wrap; horizontal-alignment: center; }
+}
+
+// Pairing a controller on the Controllers page: the steps, then a card with the state, the
+// buttons to hold for each controller type, or the error. Its buttons are the rows under it.
+component PairSteps inherits VerticalLayout {
+    in property <PairCard> card;
+    in property <length> text-w;
+    padding-bottom: (28px * S.k);
+    spacing: (22px * S.k);
+    HorizontalLayout {
+        spacing: (8px * S.k);
+        for s[i] in ["1  Pairing mode", "2  Scan", "3  Pair", "4  Connect"]: VerticalLayout {
+            spacing: (8px * S.k);
+            horizontal-stretch: 1;
+            Rectangle {
+                height: (6px * S.k);
+                border-radius: (3px * S.k);
+                background: i < root.card.step ? Theme.ok : i == root.card.step ? (root.card.kind == 1 ? Theme.danger : Theme.accent) : #ffffff1f;
+            }
+            Text {
+                text: s;
+                font-size: (16px * S.k);
+                font-weight: i == root.card.step ? 600 : 400;
+                color: i == root.card.step ? Theme.text : Theme.text3;
+            }
+        }
+    }
+    Rectangle {
+        border-radius: (14px * S.k);
+        background: #121a31;
+        border-width: 1px;
+        border-color: root.card.kind == 1 ? Theme.danger : Theme.line;
+        VerticalLayout {
+            padding: (28px * S.k);
+            spacing: (12px * S.k);
+            HorizontalLayout {
+                spacing: (14px * S.k);
+                alignment: start;
+                Image {
+                    source: root.card.kind == 1 ? Icons.alert : root.card.kind == 2 ? Icons.check : Icons.pad;
+                    colorize: root.card.kind == 1 ? Theme.danger : root.card.kind == 2 ? Theme.ok : Theme.text;
+                    width: (34px * S.k);
+                    height: (34px * S.k);
+                    y: (3px * S.k);
+                }
+                Text { text: root.card.title; font-size: (28px * S.k); font-weight: 600; color: Theme.text; vertical-alignment: center; }
+            }
+            for line[i] in root.card.lines: Text {
+                text: line;
+                width: root.text-w;
+                wrap: word-wrap;
+                font-size: i == 0 ? (20px * S.k) : (16px * S.k);
+                color: i == 0 ? (root.card.kind == 1 ? #ffb3bb : Theme.text) : Theme.text3;
+            }
+            if root.card.pictures: HorizontalLayout {
+                padding-top: (12px * S.k);
+                spacing: (24px * S.k);
+                PadPicture {
+                    kind: 0;
+                    title: "DualSense · DualShock 4";
+                    text: "Hold PS and Create (Share on a DualShock 4) until the light bar flashes.";
+                    text-w: (root.text-w - (48px * S.k)) / 3;
+                }
+                PadPicture {
+                    kind: 1;
+                    title: "Xbox";
+                    text: "Turn it on, then hold the pair button on top until the Xbox button flashes fast.";
+                    text-w: (root.text-w - (48px * S.k)) / 3;
+                }
+                PadPicture {
+                    kind: 2;
+                    title: "Switch Pro";
+                    text: "Hold the small sync button on top, next to the cable port, until the lights run.";
+                    text-w: (root.text-w - (48px * S.k)) / 3;
+                }
+            }
+        }
+    }
+}
+
 export component SettingsPage inherits Rectangle {
     in property <[SettingsCat]> cats;
     in property <int> cat;
@@ -277,6 +441,8 @@ export component SettingsPage inherits Rectangle {
     in property <string> key-last;
     // The Display page: the NVIDIA driver's card over the rows.
     in property <NvCard> nv;
+    // The Controllers page: pairing a controller, over the rows.
+    in property <PairCard> pair;
     in property <string> version;
     in property <string> mode;
     in property <bool> pad;
@@ -338,6 +504,7 @@ export component SettingsPage inherits Rectangle {
                     height: self.preferred-height;
                     padding-bottom: (24px * S.k);
                     if root.nv.show: NvidiaCard { card: root.nv; text-w: page.width - (56px * S.k); }
+                    if root.pair.show: PairSteps { card: root.pair; text-w: page.width - (56px * S.k); }
                     if root.key.length > 0: KeySteps { digits: root.key; text-w: page.width - (56px * S.k); last: root.key-last; }
                     SettingRows {
                         rows: root.rows;

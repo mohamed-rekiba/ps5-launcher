@@ -235,6 +235,8 @@ export struct PowerRow { label: string, icon: string, danger: bool, sep: bool }
 // open: the chevron points down and the card's list shows below it. adjust: Left and Right change
 // the status (the volume), shown with arrows on both sides of it.
 export struct QuickCard { label: string, status: string, icon: string, danger: bool, sep: bool, more: bool, open: bool, adjust: bool }
+// A line under the Quick Menu's open Controllers card: the controller, and its battery.
+export struct QuickItem { label: string, status: string }
 // A category of the Settings rail. system: in the System group; sep: the divider above it.
 // dot: something waits there (an update).
 export struct SettingsCat { label: string, icon: string, dot: bool, system: bool, sep: bool }
@@ -242,6 +244,10 @@ export struct SettingsCat { label: string, icon: string, dot: bool, system: bool
 // stepper. kind: 0 the offer (NVIDIA green chip), 1 a warning (old or unknown card), 2 done or
 // ready (green check), 3 neutral. lines: the text under the title, the first one larger.
 export struct NvCard { show: bool, step: int, kind: int, title: string, lines: [string] }
+// Pairing a controller on System → Controllers. step: the stepper's step (0 pairing mode, 1 scan,
+// 2 pair, 3 connect, 4 all done). kind: 0 a step runs or waits, 1 an error, 2 done. lines: the text
+// under the title, the first one larger. pictures: the buttons to hold, for each controller type.
+export struct PairCard { show: bool, step: int, kind: int, title: string, lines: [string], pictures: bool }
 // A Settings search hit: the row's label and its category.
 export struct SettingsHit { label: string, place: string }
 export struct RunningData { active: bool, name: string, time: string }

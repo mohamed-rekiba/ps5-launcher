@@ -1,4 +1,4 @@
-import { S, Theme, Icons, Zone, DownloadData, BootStep, ChipData, ActionData, TileData, HeroData, CardData, CardRow, GenreChip, Fact, FactRow, Shot, HubData, SettingData, ToastData, MenuItem, RunningData, PowerRow, QuickCard, SettingsCat, SettingsHit, NvCard, OskKey, OskField } from "theme.slint";
+import { S, Theme, Icons, Zone, DownloadData, BootStep, ChipData, ActionData, TileData, HeroData, CardData, CardRow, GenreChip, Fact, FactRow, Shot, HubData, SettingData, ToastData, MenuItem, RunningData, PowerRow, QuickCard, QuickItem, SettingsCat, SettingsHit, NvCard, PairCard, OskKey, OskField } from "theme.slint";
 import { FocusRing, Chip, Btn, Kicker, Badge, Switch, KeyCap, BackButton, Shimmer, Cover } from "widgets.slint";
 import { DownloadsSheet, DownloadConsent } from "downloads.slint";
 import { LibraryFilter, LibrarySortPicker } from "library.slint";
@@ -270,6 +270,8 @@ export component AppWindow inherits Window {
     in property <string> settings-key-last;
     // The Display page: the NVIDIA driver's card.
     in property <NvCard> settings-nv;
+    // The Controllers page: pairing a controller (its steps, the buttons to hold, an error).
+    in property <PairCard> settings-pair;
 
     in property <image> viewer-image;
     in property <string> viewer-count;
@@ -298,7 +300,7 @@ export component AppWindow inherits Window {
     in property <int> power-seconds;
 
     in property <[QuickCard]> quick-cards;
-    in property <[string]> quick-items;
+    in property <[QuickItem]> quick-items;
     // The Quick Menu is open, also under a power overlay opened from it.
     in property <bool> quick-shown;
 
@@ -1210,7 +1212,7 @@ export component AppWindow inherits Window {
             rows: root.settings; edit-index: root.edit-index; edit-text <=> root.edit-text;
             scroll-y <=> root.settings-y; query <=> root.settings-query; find-editing: root.settings-find-editing;
             hits: root.settings-hits; about: root.settings-about; version: root.app-version; mode: root.settings-mode;
-            key: root.settings-key; key-last: root.settings-key-last; nv: root.settings-nv;
+            key: root.settings-key; key-last: root.settings-key-last; nv: root.settings-nv; pair: root.settings-pair;
             pad: root.pad-hints; osk: root.osk-open; caret: root.edit-caret;
             click(zone, i) => { root.click(zone, i); }
             edit-done(text, accepted) => { root.edit-done(text, accepted); }

@@ -1,15 +1,18 @@
-//! The System pages of Settings in Session and OS mode: Network, Sound, Display, Storage, Updates
-//! and Time (docs/plans/ps5-launcher-os.md, Phase 6), and the Quick Menu's volume. The backends
-//! (network, sound, gpu, nvidia, screen, storage, osupdate, timezone) build the command lines and
-//! read the answers; this file runs them off the UI thread and shows the result. A page shows
-//! only when its tool answered.
+//! The System pages of Settings in Session and OS mode: Network, Controllers, Sound, Display,
+//! Storage, Updates and Time (docs/plans/ps5-launcher-os.md, Phase 6), and the Quick Menu's volume
+//! and controller batteries. The backends (network, bluetooth, battery, sound, gpu, nvidia, screen,
+//! storage, osupdate, timezone) build the command lines and read the answers; this file runs them
+//! off the UI thread and shows the result. A page shows only when its tool answered; Controllers
+//! always shows, and gains its Bluetooth rows when bluetoothctl finds an adapter.
 
 use crate::app::*;
 use crate::audio::{self, Sound};
+use crate::battery::{self, Controller};
+use crate::bluetooth::{self, PairEnd, Step};
 use crate::network::{self, Join};
 use crate::nvidia::{self, Image, Offer, SwitchEnd};
 use crate::osupdate::{self, Task, UpdateEnd};
-use crate::settings::{categories, row, Cat, SId, Tools};
+use crate::settings::{categories, installed, row, Cat, SId, Tools};
 use crate::system::{self, Call, Mode, PowerAction};
 use crate::{gpu, screen, sound, storage, timezone, util, SettingData};
 use std::collections::HashMap;
@@ -27,6 +30,7 @@ pub struct SystemUi {
     pub os: Os,
     pub display: Disp,
     pub time: Time,
+    pub ctl: Ctl,
     /// When each page was last read on opening.
     opened: Vec<(Cat, Instant)>,
     gen: Gens,
@@ -70,6 +74,12 @@ pub struct Gens {
     os: Gen,
     display: Gen,
     time: Gen,
+    /// The connected controllers and their batteries.
+    pads: Gen,
+    /// The adapter and the paired devices.
+    bt: Gen,
+    /// A scan or a pairing. Cancel moves it on, so a late answer does not reopen the pairing.
+    pair: Gen,
 }
 
 /// Whether something done at `last` is due again at `now`.
@@ -143,6 +153,48 @@ pub struct Time {
     pub setting: bool,
 }
 
+/// The Controllers page: the connected controllers, then Bluetooth.
+#[derive(Default)]
+pub struct Ctl {
+    /// The connected controllers with their battery; None until the first read.
+    pub pads: Option<Vec<Controller>>,
+    /// When the controllers were last read.
+    read_at: Option<Instant>,
+    pub adapter: Option<bluetooth::Adapter>,
+    pub paired: Vec<bluetooth::Info>,
+    /// "Turning on…" or "Turning off…" while the switch changes.
+    pub busy: Option<&'static str>,
+    /// The MAC of the device being forgotten.
+    pub forgetting: Option<String>,
+    pub pairing: Option<Pairing>,
+}
+
+/// Pairing a new controller: where it stands, and what the last scan found.
+#[derive(Clone, Default)]
+pub struct Pairing {
+    pub stage: Stage,
+    pub found: Vec<bluetooth::Info>,
+}
+
+#[derive(Clone, Default, PartialEq, Eq, Debug)]
+pub enum Stage {
+    /// The buttons to hold, before the scan.
+    #[default]
+    Ready,
+    Scanning,
+    /// The scan ended: `found` lists the controllers.
+    Results,
+    Running { mac: String, step: Step },
+    /// `step` None: the scan failed.
+    Failed { step: Option<Step>, what: &'static str, reason: &'static str, detail: String },
+    Done { name: String },
+}
+
+/// The batteries are read again this often while the Quick Menu or the Controllers page shows.
+const BATTERY_EVERY: Duration = Duration::from_secs(30);
+/// At most this many devices from a scan are asked what they are.
+const SCAN_INFOS: usize = 40;
+
 /// The time zone picker: the regions, or the zones of one.
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub enum Picker {
@@ -205,6 +257,42 @@ fn load_time() -> Result<(timezone::Clock, Vec<(String, Vec<String>)>), String> 
     let clock = timezone::parse_show(&system::call(&timezone::show_call())?)?;
     let zones = timezone::parse_list(&system::call(&timezone::list_call())?);
     Ok((clock, timezone::regions(&zones)))
+}
+
+/// The connected controllers, each with its battery.
+fn load_pads() -> Vec<Controller> {
+    battery::controllers(crate::gamepad::pads(), Path::new(battery::SYS))
+}
+
+/// `info` on a device; what `devices` said when info has no answer.
+fn device_info(device: bluetooth::Device, paired: bool) -> bluetooth::Info {
+    let asked = bluetooth::info_call(&device.mac).and_then(|call| system::call(&call)).ok().and_then(|out| bluetooth::parse_info(&out));
+    asked.unwrap_or(bluetooth::Info { mac: device.mac, name: device.name, paired, ..bluetooth::Info::default() })
+}
+
+/// The adapter and the paired devices. An error when there is no adapter (`list` prints none) or
+/// no bluetoothd (the call runs out of time).
+fn load_bt() -> Result<(bluetooth::Adapter, Vec<bluetooth::Info>), String> {
+    if bluetooth::parse_list(&system::call(&bluetooth::list_call())?).is_empty() {
+        return Err("no Bluetooth adapter".into());
+    }
+    let adapter = bluetooth::parse_show(&system::call(&bluetooth::show_call())?)?;
+    let paired = bluetooth::parse_devices(&system::call(&bluetooth::paired_call())?);
+    Ok((adapter, paired.into_iter().map(|d| device_info(d, true)).collect()))
+}
+
+/// Scan, then the controllers it found that are not paired yet.
+fn scan_bt() -> Result<Vec<bluetooth::Info>, String> {
+    let call = bluetooth::scan_call();
+    let ran = system::call_status(&call)?;
+    if let Some(error) = bluetooth::scan_error(&ran.stdout) {
+        return Err(error);
+    }
+    if ran.code != Some(0) {
+        return Err(ran.error(&call));
+    }
+    let devices = bluetooth::parse_devices(&system::call(&bluetooth::devices_call())?);
+    Ok(bluetooth::found(devices.into_iter().take(SCAN_INFOS).map(|d| device_info(d, false)).collect()))
 }
 
 /// `bootc status`. An OS update needs bootc and the root helper.
@@ -273,6 +361,8 @@ impl App {
                     os_updates: os.is_ok(),
                     display: display.is_ok(),
                     time: time.is_ok(),
+                    // Read on its own: bluetoothctl can take its whole time limit.
+                    bluetooth: app.sys.tools.bluetooth,
                 };
                 // A page read or a change since the probe started is newer: keep it.
                 let g = &app.sys.gen;
@@ -299,6 +389,8 @@ impl App {
                 app.sys_show();
             },
         );
+        self.pads_load();
+        self.bt_load();
     }
 
     fn sys_set_net(&mut self, net: NetState) {
@@ -319,6 +411,10 @@ impl App {
         self.sys.opened.push((cat, now));
         match cat {
             Cat::Network => self.net_load(true),
+            Cat::Controllers => {
+                self.pads_load();
+                self.bt_load();
+            }
             Cat::Sound => self.sound_load(true),
             Cat::Storage => self.storage_load(),
             Cat::Display => self.display_load(),
@@ -390,6 +486,9 @@ impl App {
         if cats.contains(&Cat::Network) {
             self.network_rows(&mut rows);
         }
+        if cats.contains(&Cat::Controllers) {
+            self.controllers_rows(&mut rows);
+        }
         if cats.contains(&Cat::Sound) {
             self.sound_rows(&mut rows);
         }
@@ -431,6 +530,11 @@ impl App {
             SId::TzBack => self.tz_pick(Picker::Regions),
             SId::TzRegion(i) => self.tz_pick(Picker::Region(i)),
             SId::TzZone(j) => self.tz_set(j),
+            SId::BtDevice(i) => self.bt_forget(i),
+            SId::BtPair => self.pair_open(),
+            SId::BtScan => self.pair_scan(),
+            SId::BtFound(i) => self.pair_start(i),
+            SId::BtPairClose => self.pair_close(),
             _ => {}
         }
     }
@@ -444,6 +548,7 @@ impl App {
             SId::OutResolution => self.out_step(dir, false),
             SId::OutRefresh => self.out_step(dir, true),
             SId::Ntp => self.time_ntp(dir > 0),
+            SId::BtPower => self.bt_power(dir > 0),
             _ => {}
         }
     }
@@ -619,6 +724,393 @@ impl App {
             }
             app.net_load(false);
         });
+    }
+
+    // ------------------------------------------------------------------ Controllers
+
+    /// The connected controllers: the last read, or, before the first one, the list without
+    /// batteries.
+    pub fn controllers(&self) -> Vec<Controller> {
+        match &self.sys.ctl.pads {
+            Some(pads) => pads.clone(),
+            None => crate::gamepad::pads().into_iter().map(|pad| Controller { pad, battery: None }).collect(),
+        }
+    }
+
+    /// Read the controllers and their batteries again, off the UI thread: reading a battery can
+    /// ask the controller.
+    pub fn pads_load(&mut self) {
+        let ticket = self.sys.gen.pads.next();
+        self.sys.ctl.read_at = Some(Instant::now());
+        bg(load_pads, move |app, pads| {
+            if !app.sys.gen.pads.current(ticket) {
+                return;
+            }
+            app.sys.ctl.pads = Some(pads);
+            app.sys_show();
+            if app.quick_open() {
+                app.push_quick();
+            }
+        });
+    }
+
+    /// Each clock tick: read the controllers again when one came or went, and the batteries now
+    /// and then while the Quick Menu or the Controllers page shows them.
+    pub fn pads_tick(&mut self, count_changed: bool) {
+        let page = self.overlay == Overlay::Settings && self.settings_nav.cats.get(self.settings_nav.cat) == Some(&Cat::Controllers);
+        let shown = self.overlay == Overlay::Quick || page;
+        if count_changed || (shown && due(self.sys.ctl.read_at, Instant::now(), BATTERY_EVERY)) {
+            self.pads_load();
+        }
+    }
+
+    fn controllers_rows(&self, rows: &mut Vec<(Cat, SId, SettingData)>) {
+        let ctl = &self.sys.ctl;
+        if let Some(pairing) = &ctl.pairing {
+            return Self::pairing_rows(pairing, rows);
+        }
+        header(rows, Cat::Controllers, "CONNECTED");
+        let pads = self.controllers();
+        if pads.is_empty() {
+            let mut r = row(4, "No controller connected");
+            r.hint = if self.sys.tools.bluetooth { "Connect one with a USB cable, or pair it over Bluetooth below" } else { "Connect one with a USB cable" }.into();
+            rows.push((Cat::Controllers, SId::Pad(0), r));
+        }
+        for (i, c) in pads.iter().enumerate() {
+            let mut r = row(4, &c.pad.name);
+            if let Some(b) = &c.battery {
+                r.value = battery::text(b).into();
+                r.value_kind = if b.charging { 1 } else { 0 };
+            }
+            let bus = match c.pad.bus {
+                Some(crate::gamepad::Bus::Bluetooth) => " · Bluetooth",
+                Some(crate::gamepad::Bus::Usb) => " · USB",
+                None => "",
+            };
+            r.hint = format!("Player {}{bus}", i + 1).into();
+            rows.push((Cat::Controllers, SId::Pad(i), r));
+        }
+        let Some(adapter) = ctl.adapter.as_ref().filter(|_| self.sys.tools.bluetooth) else { return };
+        header(rows, Cat::Controllers, "BLUETOOTH");
+        let mut r = row(2, "Bluetooth");
+        r.on = adapter.powered;
+        r.hint = match ctl.busy {
+            Some(busy) => busy.into(),
+            None => format!("This PC shows up as {}", adapter.name).into(),
+        };
+        rows.push((Cat::Controllers, SId::BtPower, r));
+        if adapter.powered {
+            let mut r = row(4, "Pair a new controller");
+            r.hint = "DualSense, DualShock 4, Xbox and Switch Pro controllers".into();
+            rows.push((Cat::Controllers, SId::BtPair, r));
+        }
+        if !ctl.paired.is_empty() {
+            header(rows, Cat::Controllers, "PAIRED DEVICES");
+            for (i, d) in ctl.paired.iter().enumerate() {
+                let mut r = row(4, &d.name);
+                (r.value, r.value_kind) = if ctl.forgetting.as_deref() == Some(d.mac.as_str()) { ("Forgetting…".into(), 0) } else { ("Forget".into(), 3) };
+                r.hint = match (d.connected, d.battery) {
+                    (true, Some(level)) => format!("Connected · battery {level}%"),
+                    (true, None) => "Connected".into(),
+                    (false, _) => "Not connected".into(),
+                }
+                .into();
+                rows.push((Cat::Controllers, SId::BtDevice(i), r));
+            }
+        }
+    }
+
+    fn pairing_rows(pairing: &Pairing, rows: &mut Vec<(Cat, SId, SettingData)>) {
+        let push = |rows: &mut Vec<(Cat, SId, SettingData)>, id: SId, label: &str, hint: &str| {
+            let mut r = row(4, label);
+            r.hint = hint.into();
+            rows.push((Cat::Controllers, id, r));
+        };
+        let cancel = |rows: &mut Vec<(Cat, SId, SettingData)>| push(rows, SId::BtPairClose, "Cancel", "");
+        match &pairing.stage {
+            Stage::Ready => {
+                push(rows, SId::BtScan, "Start scanning", &format!("Hold the buttons first. The scan takes {} seconds.", bluetooth::SCAN_SECS));
+                cancel(rows);
+            }
+            Stage::Scanning => {
+                push(rows, SId::BtScan, "Scanning…", "Keep the light flashing");
+                cancel(rows);
+            }
+            Stage::Done { .. } => push(rows, SId::BtPairClose, "Done", ""),
+            Stage::Results | Stage::Running { .. } | Stage::Failed { .. } => {
+                let running = match &pairing.stage {
+                    Stage::Running { mac, step } => Some((mac.as_str(), *step)),
+                    _ => None,
+                };
+                if !pairing.found.is_empty() {
+                    header(rows, Cat::Controllers, "CONTROLLERS FOUND");
+                    for (i, info) in pairing.found.iter().enumerate() {
+                        let mut r = row(4, &info.name);
+                        (r.value, r.value_kind) = match running {
+                            Some((mac, step)) if mac == info.mac => (step.doing().into(), 0),
+                            _ => ("Pair".into(), 3),
+                        };
+                        r.hint = info.mac.clone().into();
+                        rows.push((Cat::Controllers, SId::BtFound(i), r));
+                    }
+                    header(rows, Cat::Controllers, "");
+                }
+                let hint = if pairing.found.is_empty() { "No controllers found. Hold the buttons until the light flashes, then scan again." } else { "" };
+                push(rows, SId::BtScan, "Scan again", hint);
+                cancel(rows);
+            }
+        }
+    }
+
+    /// The pairing card over the Controllers page's rows.
+    pub fn pair_card(&self) -> crate::PairCard {
+        let Some(pairing) = &self.sys.ctl.pairing else { return crate::PairCard::default() };
+        let lines = |l: &[&str]| model(l.iter().map(|s| (*s).into()).collect());
+        let card = |step: i32, kind: i32, title: &str, text: &[&str], pictures: bool| crate::PairCard { show: true, step, kind, title: title.into(), lines: lines(text), pictures };
+        let name = |mac: &str| pairing.found.iter().find(|i| i.mac == mac).map(|i| i.name.clone()).unwrap_or_else(|| mac.to_string());
+        match &pairing.stage {
+            Stage::Ready => card(0, 0, "Put the controller in pairing mode", &["Hold its buttons until the light flashes, then choose Start scanning.", "Pair one controller at a time."], true),
+            Stage::Scanning => card(1, 0, "Looking for controllers…", &[&format!("Keep the light flashing. The scan takes up to {} seconds.", bluetooth::SCAN_SECS)], true),
+            Stage::Results if pairing.found.is_empty() => card(1, 1, "No controllers found", &["Hold the buttons until the light flashes, then choose Scan again."], true),
+            Stage::Results => card(2, 0, "Choose your controller", &["It stays in pairing mode for a short while only. Choose it now."], false),
+            Stage::Running { mac, step } => {
+                let at = if *step == Step::Connect { 3 } else { 2 };
+                card(at, 0, &format!("{} {}", step.doing().trim_end_matches('…'), name(mac)), &["Keep the controller close to the PC."], false)
+            }
+            Stage::Failed { step, what, reason, detail } => {
+                let at = match step {
+                    None => 1,
+                    Some(Step::Connect) => 3,
+                    Some(_) => 2,
+                };
+                card(at, 1, what, &[reason, detail], true)
+            }
+            Stage::Done { name } => card(4, 2, "Controller connected", &[&format!("{name} is ready to play."), "Next time, press its PS or Xbox button and it connects by itself."], false),
+        }
+    }
+
+    /// Read the adapter and the paired devices again. Without bluetoothctl or an adapter the
+    /// page keeps only the connected controllers.
+    fn bt_load(&mut self) {
+        let ticket = self.sys.gen.bt.next();
+        if !installed("bluetoothctl") {
+            self.sys.tools.bluetooth = false;
+            return;
+        }
+        bg(load_bt, move |app, res| {
+            if !app.sys.gen.bt.current(ticket) {
+                return;
+            }
+            match res {
+                Ok((adapter, paired)) => {
+                    (app.sys.ctl.adapter, app.sys.ctl.paired) = (Some(adapter), paired);
+                    app.sys.tools.bluetooth = true;
+                }
+                Err(e) => {
+                    crate::log!("Bluetooth rows hidden: {e}");
+                    (app.sys.ctl.adapter, app.sys.ctl.paired) = (None, Vec::new());
+                    app.sys.tools.bluetooth = false;
+                    app.sys.ctl.pairing = None;
+                }
+            }
+            app.sys_show();
+        });
+    }
+
+    /// A bluetoothctl error as a toast: the plain sentence, with the tool's words in the log.
+    fn bt_error(&mut self, title: &str, error: &str) {
+        crate::log!("{title}: {error}");
+        audio::play(Sound::Error);
+        self.toast(title, bluetooth::explain(error), 2);
+    }
+
+    fn bt_power(&mut self, on: bool) {
+        let Some(adapter) = self.sys.ctl.adapter.as_mut() else { return };
+        if adapter.powered == on || self.sys.ctl.busy.is_some() {
+            return;
+        }
+        adapter.powered = on;
+        audio::play(Sound::Move);
+        self.sys.gen.bt.next();
+        self.sys.ctl.busy = Some(if on { "Turning on…" } else { "Turning off…" });
+        if !on {
+            self.sys.ctl.pairing = None;
+        }
+        self.sys_show();
+        let call = bluetooth::power_call(on);
+        bg(move || system::call(&call), |app, res| {
+            app.sys.ctl.busy = None;
+            if let Err(e) = res {
+                app.bt_error("Couldn't switch Bluetooth", &e);
+            }
+            app.bt_load();
+        });
+    }
+
+    fn bt_forget(&mut self, i: usize) {
+        let Some(device) = self.sys.ctl.paired.get(i).cloned() else { return };
+        if self.sys.ctl.forgetting.is_some() {
+            return;
+        }
+        let call = match bluetooth::remove_call(&device.mac) {
+            Ok(call) => call,
+            Err(e) => return self.bt_error("Couldn't forget the device", &e),
+        };
+        audio::play(Sound::Select);
+        self.sys.gen.bt.next();
+        self.sys.ctl.forgetting = Some(device.mac.clone());
+        self.sys_show();
+        bg(move || system::call(&call), move |app, res| {
+            app.sys.ctl.forgetting = None;
+            match res {
+                Ok(_) => app.toast(&format!("Forgot {}", device.name), "Pair it again to use it over Bluetooth.", 1),
+                Err(e) => app.bt_error(&format!("Couldn't forget {}", device.name), &e),
+            }
+            app.bt_load();
+            app.pads_load();
+        });
+    }
+
+    /// "Pair a new controller": the buttons to hold, and Start scanning.
+    fn pair_open(&mut self) {
+        audio::play(Sound::Select);
+        self.sys.ctl.pairing = Some(Pairing::default());
+        self.ui().set_settings_y(0.0);
+        self.sys_focus(SId::BtScan);
+    }
+
+    /// Scan for controllers. Nothing starts while a scan or a pairing runs.
+    fn pair_scan(&mut self) {
+        let Some(pairing) = self.sys.ctl.pairing.as_mut() else { return };
+        if matches!(pairing.stage, Stage::Scanning | Stage::Running { .. }) {
+            return;
+        }
+        audio::play(Sound::Select);
+        pairing.stage = Stage::Scanning;
+        let ticket = self.sys.gen.pair.next();
+        self.sys_focus(SId::BtScan);
+        bg(scan_bt, move |app, res| {
+            if !app.sys.gen.pair.current(ticket) {
+                return;
+            }
+            let Some(pairing) = app.sys.ctl.pairing.as_mut() else { return };
+            match res {
+                Ok(found) => {
+                    pairing.stage = Stage::Results;
+                    pairing.found = found;
+                }
+                Err(e) => {
+                    crate::log!("Bluetooth scan: {e}");
+                    audio::play(Sound::Error);
+                    pairing.stage = Stage::Failed { step: None, what: "The scan failed", reason: bluetooth::explain(&e), detail: e };
+                }
+            }
+            let focus = if pairing.found.is_empty() { SId::BtScan } else { SId::BtFound(0) };
+            app.pair_focus(focus);
+        });
+    }
+
+    /// Pair, trust and connect the controller the scan found at `i`, a step at a time.
+    fn pair_start(&mut self, i: usize) {
+        let Some(pairing) = self.sys.ctl.pairing.as_mut() else { return };
+        let Some(info) = pairing.found.get(i).cloned() else { return };
+        if matches!(pairing.stage, Stage::Scanning | Stage::Running { .. }) {
+            return;
+        }
+        audio::play(Sound::Select);
+        pairing.stage = Stage::Running { mac: info.mac.clone(), step: Step::Pair };
+        let ticket = self.sys.gen.pair.next();
+        self.sys_show();
+        let mac = info.mac.clone();
+        bg(
+            move || {
+                let steps_mac = mac.clone();
+                bluetooth::pair_flow(&system::call_status, &mac, &move |step| {
+                    let mac = steps_mac.clone();
+                    let _ = slint::invoke_from_event_loop(move || with_app(move |app| app.pair_step(ticket, mac, step)));
+                })
+            },
+            move |app, end| app.pair_done(ticket, info, end),
+        );
+    }
+
+    /// A step of pairing started.
+    fn pair_step(&mut self, ticket: u64, mac: String, step: Step) {
+        let Some(pairing) = self.sys.ctl.pairing.as_mut().filter(|_| self.sys.gen.pair.current(ticket)) else { return };
+        pairing.stage = Stage::Running { mac, step };
+        self.sys_show();
+    }
+
+    fn pair_done(&mut self, ticket: u64, info: bluetooth::Info, end: PairEnd) {
+        // Paired or not, the lists changed.
+        self.bt_load();
+        self.pads_load();
+        if !self.sys.gen.pair.current(ticket) || self.sys.ctl.pairing.is_none() {
+            return;
+        }
+        let gone = end == PairEnd::Gone;
+        let stage = match end {
+            PairEnd::Connected => {
+                audio::play(Sound::Select);
+                self.toast("Controller connected", &info.name, 1);
+                Stage::Done { name: info.name.clone() }
+            }
+            PairEnd::Gone => {
+                audio::play(Sound::Error);
+                Stage::Failed {
+                    step: Some(Step::Pair),
+                    what: "The controller left pairing mode",
+                    reason: "Hold its buttons again until the light flashes, then choose Scan again.",
+                    detail: String::new(),
+                }
+            }
+            PairEnd::Failed { step, error } => {
+                crate::log!("Pairing {}: {error}", info.mac);
+                audio::play(Sound::Error);
+                Stage::Failed { step: Some(step), what: "Pairing failed", reason: bluetooth::explain(&error), detail: error }
+            }
+        };
+        let focus = if matches!(stage, Stage::Done { .. }) { SId::BtPairClose } else { SId::BtScan };
+        if let Some(pairing) = self.sys.ctl.pairing.as_mut() {
+            if gone {
+                // bluetoothd forgot it: choosing it again cannot work.
+                pairing.found.retain(|f| f.mac != info.mac);
+            }
+            pairing.stage = stage;
+        }
+        self.pair_focus(focus);
+    }
+
+    /// Focus on `id` when the Controllers page has focus; otherwise only show the change.
+    fn pair_focus(&mut self, id: SId) {
+        let page = self.overlay == Overlay::Settings && self.settings_nav.cats.get(self.settings_nav.cat) == Some(&Cat::Controllers);
+        if page && self.zone == Z_SETTINGS {
+            self.sys_focus(id);
+        } else {
+            self.sys_show();
+        }
+    }
+
+    /// Close the pairing. A pairing that runs goes on; its answer is dropped.
+    fn pair_close(&mut self) {
+        if self.sys.ctl.pairing.take().is_none() {
+            return;
+        }
+        audio::play(Sound::Back);
+        self.sys.gen.pair.next();
+        self.ui().set_settings_y(0.0);
+        let to = if self.sys.ctl.adapter.as_ref().is_some_and(|a| a.powered) { SId::BtPair } else { SId::BtPower };
+        self.sys_focus(to);
+    }
+
+    /// Back on a System page: close what it has open. True when Back was used.
+    pub fn sys_back(&mut self) -> bool {
+        let page = self.settings_nav.cats.get(self.settings_nav.cat) == Some(&Cat::Controllers);
+        if page && self.sys.ctl.pairing.is_some() {
+            self.pair_close();
+            return true;
+        }
+        false
     }
 
     // ------------------------------------------------------------------ Sound

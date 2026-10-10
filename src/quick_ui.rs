@@ -4,6 +4,7 @@
 
 use crate::app::*;
 use crate::audio::{self, Sound};
+use crate::battery::{self, Controller};
 use crate::downloads::State;
 use crate::power_ui::{self, Row};
 use crate::system::{PowerAction, Work};
@@ -15,7 +16,7 @@ pub struct QuickUi {
     /// The Controllers card is open and lists the controllers.
     pub open: bool,
     /// What the drawer shows, so the clock tick only touches the UI when something changed.
-    shown: (Vec<QuickCard>, Vec<String>),
+    shown: (Vec<QuickCard>, Vec<(String, String)>),
 }
 
 /// A card of the Quick Menu, top to bottom.
@@ -75,9 +76,23 @@ pub fn sound_status(output: &crate::sound::Output) -> String {
     if output.muted { format!("Muted · {volume}") } else { volume }
 }
 
-/// "2 connected".
-pub fn controllers_status(count: usize) -> String {
-    if count == 0 { "None connected".into() } else { format!("{count} connected") }
+/// The Controllers card's status: each player's battery, "P1 80% · P2 15%, charging", or
+/// "2 connected" when no battery level is known.
+pub fn controllers_status(pads: &[Controller]) -> String {
+    let levels: Vec<String> = pads.iter().map(|c| c.battery.as_ref().map(battery::text).unwrap_or_default()).collect();
+    if pads.is_empty() {
+        return "None connected".into();
+    }
+    if levels.iter().all(String::is_empty) {
+        return format!("{} connected", pads.len());
+    }
+    let players = levels.iter().enumerate().map(|(i, level)| if level.is_empty() { format!("P{}", i + 1) } else { format!("P{} {level}", i + 1) });
+    players.collect::<Vec<_>>().join(" · ")
+}
+
+/// The open Controllers card's lines: each controller's name and battery.
+pub fn controller_items(pads: &[Controller]) -> Vec<(String, String)> {
+    pads.iter().map(|c| (c.pad.name.clone(), c.battery.as_ref().map(battery::text).unwrap_or_default())).collect()
 }
 
 /// What the top bar's progress shows, in one line: the install first, then the downloads.
@@ -146,6 +161,7 @@ impl App {
         if crate::system::Mode::current() != crate::system::Mode::Desktop {
             self.sound_load(false);
         }
+        self.pads_load();
     }
 
     /// Close the Quick Menu and anything opened over it.
@@ -165,6 +181,7 @@ impl App {
         let jobs = self.downloads.snapshot();
         let waiting = jobs.iter().filter(|j| matches!(j.state, State::Paused | State::Ready)).count();
         let eta = jobs.iter().find(|j| j.state.active()).map(|j| j.eta.as_str()).unwrap_or("");
+        let pads = self.controllers();
         let data: Vec<QuickCard> = list.iter().zip(seps(&list)).map(|(card, sep)| match card {
             Card::CloseGame => {
                 let status = self.live.first().map(|s| format!("{} · {}", s.name, util::fmt_clock(util::now_secs() - s.since))).unwrap_or_default();
@@ -180,7 +197,7 @@ impl App {
             },
             Card::Controllers => QuickCard {
                 label: "Controllers".into(),
-                status: controllers_status(crate::gamepad::count()).into(),
+                status: controllers_status(&pads).into(),
                 icon: "pad".into(),
                 sep,
                 more: true,
@@ -202,11 +219,11 @@ impl App {
                 QuickCard { label: label.into(), status: status.into(), icon: icon.into(), sep, ..Default::default() }
             }
         }).collect();
-        let items = if self.quick.open { crate::gamepad::connected() } else { Vec::new() };
+        let items = if self.quick.open { controller_items(&pads) } else { Vec::new() };
         if (&data, &items) != (&self.quick.shown.0, &self.quick.shown.1) {
             let ui = self.ui();
             ui.set_quick_cards(model(data.clone()));
-            ui.set_quick_items(model(items.iter().map(|n| n.into()).collect()));
+            ui.set_quick_items(model(items.iter().map(|(label, status)| crate::QuickItem { label: label.into(), status: status.into() }).collect()));
             self.quick.shown = (data, items);
         }
         if let Some(card) = focused {
@@ -235,6 +252,9 @@ impl App {
                     audio::play(Sound::Select);
                     self.quick.open = !self.quick.open;
                     self.push_quick();
+                    if self.quick.open {
+                        self.pads_load();
+                    }
                 }
                 Some(Card::Downloads) => {
                     self.close_quick();
@@ -251,6 +271,7 @@ impl App {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::battery::Level;
     use crate::system::Job;
     use PowerAction::*;
 
@@ -297,11 +318,33 @@ mod tests {
         assert_eq!(seps(&cards(false, false, &[])), [false, false]);
     }
 
+    fn pad(battery: Option<(Level, bool)>) -> Controller {
+        let pad = crate::gamepad::InputPad { name: "DualSense Wireless Controller".into(), bus: None, uniq: String::new(), sysfs: String::new() };
+        let battery = battery.map(|(level, charging)| crate::battery::Battery::fake(level, charging));
+        Controller { pad, battery }
+    }
+
     #[test]
-    fn controllers_say_how_many() {
-        assert_eq!(controllers_status(0), "None connected");
-        assert_eq!(controllers_status(1), "1 connected");
-        assert_eq!(controllers_status(2), "2 connected");
+    fn controllers_say_how_many_without_a_battery() {
+        assert_eq!(controllers_status(&[]), "None connected");
+        assert_eq!(controllers_status(&[pad(None)]), "1 connected");
+        assert_eq!(controllers_status(&[pad(None), pad(None)]), "2 connected");
+        assert_eq!(controllers_status(&[pad(Some((Level::Unknown, false)))]), "1 connected", "no level read yet");
+    }
+
+    #[test]
+    fn controllers_show_each_players_battery() {
+        assert_eq!(controllers_status(&[pad(Some((Level::Percent(80), false)))]), "P1 80%");
+        assert_eq!(controllers_status(&[pad(Some((Level::Percent(80), false))), pad(Some((Level::Percent(15), true)))]), "P1 80% · P2 15%, charging");
+        assert_eq!(controllers_status(&[pad(None), pad(Some((Level::Coarse("Low".into()), false)))]), "P1 · P2 Low", "a pad without a battery keeps its number");
+    }
+
+    #[test]
+    fn the_open_card_lists_each_controller_with_its_battery() {
+        assert_eq!(
+            controller_items(&[pad(Some((Level::Percent(80), true))), pad(None)]),
+            [("DualSense Wireless Controller".to_string(), "80%, charging".to_string()), ("DualSense Wireless Controller".to_string(), String::new())]
+        );
     }
 
     #[test]

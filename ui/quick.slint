@@ -2,7 +2,7 @@
 // Phase 3; the prototype's pick B). One focus style, the app's own: the focused card turns white.
 // A dangerous card only gets a red icon, never a red fill.
 
-import { S, Theme, Icons, QuickCard } from "theme.slint";
+import { S, Theme, Icons, QuickCard, QuickItem } from "theme.slint";
 import { KeyCap } from "widgets.slint";
 
 export component QuickMenu inherits Rectangle {
@@ -11,8 +11,8 @@ export component QuickMenu inherits Rectangle {
     in property <string> clock;
     // The running game's name, or empty.
     in property <string> game;
-    // The names under the open card (the controllers).
-    in property <[string]> items;
+    // The lines under the open card: each controller and its battery.
+    in property <[QuickItem]> items;
     in property <bool> pad;
     callback choose(int);
     callback close();
@@ -115,12 +115,14 @@ export component QuickMenu inherits Rectangle {
                 if card.open: VerticalLayout {
                     padding-left: (24px * S.k);
                     padding-bottom: (6px * S.k);
-                    for name in root.items: HorizontalLayout {
+                    for item in root.items: HorizontalLayout {
                         height: (50px * S.k);
                         padding-left: (14px * S.k);
+                        padding-right: (18px * S.k);
                         spacing: (12px * S.k);
                         Image { source: Icons.pad; colorize: Theme.text2; width: (22px * S.k); height: (22px * S.k); y: (14px * S.k); }
-                        Text { text: name; font-size: (18px * S.k); color: Theme.text; vertical-alignment: center; overflow: elide; horizontal-stretch: 1; }
+                        Text { text: item.label; font-size: (18px * S.k); color: Theme.text; vertical-alignment: center; overflow: elide; horizontal-stretch: 1; }
+                        if item.status != "": Text { text: item.status; font-size: (16px * S.k); color: Theme.text3; vertical-alignment: center; horizontal-alignment: right; }
                     }
                     if root.items.length == 0: HorizontalLayout {
                         height: (50px * S.k);

@@ -143,10 +143,39 @@ pub fn count() -> usize {
 /// The name of every connected controller, one entry per device.
 #[cfg(target_os = "linux")]
 fn device_names() -> Vec<String> {
-    let Ok(text) = std::fs::read_to_string("/proc/bus/input/devices") else { return Vec::new() };
-    let mut names: Vec<String> = Vec::new();
+    pads().into_iter().map(|p| p.name).collect()
+}
+
+/// The list of input devices the kernel keeps.
+pub const INPUT_DEVICES: &str = "/proc/bus/input/devices";
+
+/// How a controller is connected, from the `I: Bus=` field (linux/input.h: BUS_USB 0x03,
+/// BUS_BLUETOOTH 0x05).
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub enum Bus {
+    Usb,
+    Bluetooth,
+}
+
+/// A connected controller, as /proc/bus/input/devices lists it.
+#[derive(Clone, PartialEq, Eq, Debug)]
+pub struct InputPad {
+    pub name: String,
+    /// None for a bus other than USB and Bluetooth, and on macOS.
+    pub bus: Option<Bus>,
+    /// `U: Uniq=`: the controller's MAC address for hid-playstation, hid-sony and Bluetooth HID
+    /// devices; often empty for others.
+    pub uniq: String,
+    /// `S: Sysfs=`: the input device's folder, under /sys (it starts with /devices/).
+    pub sysfs: String,
+}
+
+/// The gamepads in /proc/bus/input/devices: devices with a joystick handler and a south face
+/// button or a PS / Guide button, in the kernel's order.
+pub fn parse_pads(text: &str) -> Vec<InputPad> {
+    let mut pads = Vec::new();
     for block in text.split("\n\n") {
-        let (mut name, mut handlers, mut keys) = ("", "", "");
+        let (mut name, mut handlers, mut keys, mut bus, mut uniq, mut sysfs) = ("", "", "", None, "", "");
         for line in block.lines() {
             if let Some(n) = line.strip_prefix("N: Name=") {
                 name = n.trim_matches('"');
@@ -154,6 +183,16 @@ fn device_names() -> Vec<String> {
                 handlers = h;
             } else if let Some(k) = line.strip_prefix("B: KEY=") {
                 keys = k;
+            } else if let Some(i) = line.strip_prefix("I: Bus=") {
+                bus = match i.split_whitespace().next() {
+                    Some("0003") => Some(Bus::Usb),
+                    Some("0005") => Some(Bus::Bluetooth),
+                    _ => None,
+                };
+            } else if let Some(u) = line.strip_prefix("U: Uniq=") {
+                uniq = u.trim();
+            } else if let Some(s) = line.strip_prefix("S: Sysfs=") {
+                sysfs = s.trim();
             }
         }
         if keys.is_empty() || !handlers.split_whitespace().any(|h| h.starts_with("js")) {
@@ -165,10 +204,22 @@ fn device_names() -> Vec<String> {
             words.len() > w && words[words.len() - 1 - w] >> b & 1 == 1
         };
         if (bit(BTN_SOUTH) || bit(BTN_MODE)) && !name.is_empty() {
-            names.push(name.to_string());
+            pads.push(InputPad { name: name.into(), bus, uniq: uniq.into(), sysfs: sysfs.into() });
         }
     }
-    names
+    pads
+}
+
+/// Every connected controller, one entry per device, with what the battery match needs.
+#[cfg(target_os = "linux")]
+pub fn pads() -> Vec<InputPad> {
+    parse_pads(&std::fs::read_to_string(INPUT_DEVICES).unwrap_or_default())
+}
+
+/// macOS: the names gilrs reports. No sysfs, so no battery.
+#[cfg(target_os = "macos")]
+pub fn pads() -> Vec<InputPad> {
+    connected().into_iter().map(|name| InputPad { name, bus: None, uniq: String::new(), sysfs: String::new() }).collect()
 }
 
 /// Names of the controllers macOS reports, kept current by the `run` loop below.
@@ -963,6 +1014,69 @@ mod tests {
         assert_eq!(trigger_level(1023, 0, 1023), 1.0, "Xbox One pads under xpad");
         assert_eq!(trigger_level(-10, 0, 255), 0.0, "clamped below");
         assert_eq!(trigger_level(300, 0, 255), 1.0, "clamped above");
+    }
+
+    /// /proc/bus/input/devices with a DualSense over Bluetooth (its gamepad, then its motion
+    /// sensors), a keyboard, and a DualShock 4 by USB.
+    const PROC: &str = "\
+I: Bus=0005 Vendor=054c Product=0ce6 Version=8100
+N: Name=\"DualSense Wireless Controller\"
+P: Phys=e8:48:b8:c8:20:00
+S: Sysfs=/devices/virtual/misc/uhid/0005:054C:0CE6.0001/input/input20
+U: Uniq=a0:ab:51:5f:23:1a
+H: Handlers=event18 js0
+B: PROP=0
+B: EV=20000b
+B: KEY=7fdb000000000000 0 0 0 0
+B: ABS=3003f
+
+I: Bus=0005 Vendor=054c Product=0ce6 Version=8100
+N: Name=\"DualSense Wireless Controller Motion Sensors\"
+P: Phys=e8:48:b8:c8:20:00
+S: Sysfs=/devices/virtual/misc/uhid/0005:054C:0CE6.0001/input/input21
+U: Uniq=a0:ab:51:5f:23:1a
+H: Handlers=event19
+B: PROP=40
+B: EV=19
+
+I: Bus=0003 Vendor=046d Product=c31c Version=0110
+N: Name=\"Logitech USB Keyboard\"
+P: Phys=usb-0000:00:14.0-1/input0
+S: Sysfs=/devices/pci0000:00/0000:00:14.0/usb1/1-1/1-1:1.0/0003:046D:C31C.0002/input/input5
+U: Uniq=
+H: Handlers=sysrq kbd leds event3
+B: KEY=1000000000007 ff9f207ac14057ff febeffdfffefffff fffffffffffffffe
+
+I: Bus=0003 Vendor=054c Product=09cc Version=8111
+N: Name=\"Sony Interactive Entertainment Wireless Controller\"
+P: Phys=usb-0000:00:14.0-2/input3
+S: Sysfs=/devices/pci0000:00/0000:00:14.0/usb1/1-2/1-2:1.3/0003:054C:09CC.0003/input/input24
+U: Uniq=1c:a0:b8:4e:91:02
+H: Handlers=event21 js1
+B: KEY=7fdb000000000000 0 0 0 0
+";
+
+    #[test]
+    fn the_input_list_gives_each_gamepad_with_its_sysfs_path_and_mac() {
+        assert_eq!(
+            parse_pads(PROC),
+            [
+                InputPad {
+                    name: "DualSense Wireless Controller".into(),
+                    bus: Some(Bus::Bluetooth),
+                    uniq: "a0:ab:51:5f:23:1a".into(),
+                    sysfs: "/devices/virtual/misc/uhid/0005:054C:0CE6.0001/input/input20".into(),
+                },
+                InputPad {
+                    name: "Sony Interactive Entertainment Wireless Controller".into(),
+                    bus: Some(Bus::Usb),
+                    uniq: "1c:a0:b8:4e:91:02".into(),
+                    sysfs: "/devices/pci0000:00/0000:00:14.0/usb1/1-2/1-2:1.3/0003:054C:09CC.0003/input/input24".into(),
+                },
+            ],
+            "the motion sensors and the keyboard are not gamepads"
+        );
+        assert_eq!(parse_pads(""), []);
     }
 
     #[test]
