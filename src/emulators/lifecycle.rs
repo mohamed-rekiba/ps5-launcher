@@ -316,7 +316,7 @@ pub fn reset_to_default(root: &Path, source: &dyn DefaultSource, files: &dyn Fil
             _ => return run.stop(Problem::new(STATE, "the file is missing or cannot be read. Restore missing defaults first")),
         }
         let revision = digest_files(&addon.files);
-        if present(&run.target(id)) { run.replace(&addon, &revision) } else { run.copy(&addon, &revision) }
+        if present(&run.target(id)) { run.replace(&addon, &revision, None).map(|_| ()) } else { run.copy(&addon, &revision) }
     })
 }
 
@@ -515,8 +515,10 @@ impl Run<'_> {
         self.end()
     }
 
-    /// Replace an addon's folder with its default.
-    fn replace(&mut self, addon: &ShippedAddon, revision: &str) -> Result<(), Stopped> {
+    /// Replace an addon's folder with its default. With `unchanged`, the copy moved aside must
+    /// still have that digest: if the user changed it meanwhile, it goes back in place, nothing
+    /// is replaced, and the result is false.
+    fn replace(&mut self, addon: &ShippedAddon, revision: &str, unchanged: Option<&str>) -> Result<bool, Stopped> {
         let subject = format!("emulators/{}", addon.id);
         self.begin(Step::Replace, &addon.id, revision)?;
         let staged = self.stage(&addon.id, addon, revision)?;
@@ -524,11 +526,20 @@ impl Run<'_> {
         self.remove(&old)?;
         let target = self.target(&addon.id);
         self.rename(&target, &old, &subject, "the old copy cannot be moved aside")?;
+        if let Some(expected) = unchanged {
+            if digest_folder(&old).ok().as_deref() != Some(expected) {
+                self.rename(&old, &target, &subject, "the changed copy cannot be put back")?;
+                self.remove(&staged)?;
+                self.end()?;
+                return Ok(false);
+            }
+        }
         self.rename(&staged, &target, &subject, "the default cannot be put in place")?;
         self.state.insert(addon.id.clone(), Record::clean(revision));
         self.save()?;
         self.remove(&old)?;
-        self.end()
+        self.end()?;
+        Ok(true)
     }
 
     /// Write a default as a proposal next to the user's copy, and record the offer.
@@ -580,15 +591,26 @@ impl Run<'_> {
                 self.state.insert(id.to_string(), Record::clean(&revision));
                 self.save()
             }
-            Ok(d) if d == record.digest => self.replace(addon, &revision),
-            _ if record.offered.as_deref() == Some(revision.as_str()) => Ok(()),
-            _ => {
-                let dest = self.offer(addon, &revision, record)?;
-                let message = format!("you changed this addon, so the launcher kept it; its new default is in {}", shown(self.root, &dest));
-                self.problems.push(Problem::new(subject, message));
-                Ok(())
+            Ok(d) if d == record.digest => {
+                if self.replace(addon, &revision, Some(&record.digest))? {
+                    return Ok(());
+                }
+                // The user changed it while the launcher was replacing it.
+                self.offer_changed(addon, &revision, record)
             }
+            _ => self.offer_changed(addon, &revision, record),
         }
+    }
+
+    /// Keep a copy the user changed and offer the new default, once per revision.
+    fn offer_changed(&mut self, addon: &ShippedAddon, revision: &str, record: Record) -> Result<(), Stopped> {
+        if record.offered.as_deref() == Some(revision) {
+            return Ok(());
+        }
+        let dest = self.offer(addon, revision, record)?;
+        let message = format!("you changed this addon, so the launcher kept it; its new default is in {}", shown(self.root, &dest));
+        self.problems.push(Problem::new(format!("emulators/{}", addon.id), message));
+        Ok(())
     }
 
     /// Finish or undo the change an earlier run left in the journal. A change is finished only

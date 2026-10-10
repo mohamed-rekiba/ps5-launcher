@@ -585,6 +585,27 @@ fn an_interrupted_reset_leaves_the_edit_or_the_default() {
 }
 
 #[test]
+fn an_edit_made_during_an_update_is_kept() {
+    let r = root();
+    run(r.path(), &[kyty_v1()]);
+    let folder = r.path().join("emulators/kyty");
+    // The user saves an edit just before the launcher moves the checked copy aside.
+    let editor = Injected::new(real(), |_, op, path| {
+        if op == Op::Rename && path == folder {
+            fs::write(folder.join("emulator.yaml"), "edited meanwhile\n").unwrap();
+        }
+        Ok(())
+    });
+    let problems = reconcile(r.path(), &src(&[kyty_v2()]), &editor);
+    assert_eq!(read(r.path(), "emulators/kyty/emulator.yaml"), "edited meanwhile\n");
+    assert_eq!(read(r.path(), "emulators/kyty/media/icon.svg"), "<svg/>");
+    assert_eq!(problems, [Problem::new("emulators/kyty", "you changed this addon, so the launcher kept it; its new default is in proposals/emulators/kyty/0fbea35eea7f7b82")]);
+    assert_eq!(read(&proposal_folder(r.path(), "kyty", V2), "emulator.yaml"), "kyty v2\n");
+    assert_eq!(record(r.path(), "kyty"), Some(Record { offered: Some(V2.into()), ..clean(V1) }));
+    assert_tidy(r.path());
+}
+
+#[test]
 fn a_damaged_journal_leaves_every_folder_as_it_is() {
     for journal in ["step: offer\nid: kyty\nrevision: \"ééééééééééééééééé\"\n", "step: copy\nid: ../kyty\nrevision: aaaa\n", "step: [\n"] {
         let r = root();
