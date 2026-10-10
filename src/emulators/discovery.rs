@@ -100,6 +100,13 @@ pub fn scan(root: &Path, launcher: Version) -> Scan {
                     }
                 }
             }
+            for (i, catalog) in e.catalogs.iter().enumerate() {
+                if let (Some(path), Some(folder)) = (&catalog.bundled_snapshot, &handle) {
+                    if let Err(message) = resource(folder, path.as_str()) {
+                        issues.push(Issue::new(format!("catalogs[{i}].bundled_snapshot"), message));
+                    }
+                }
+            }
             if issues.is_empty() { Ok(e) } else { Err(issues) }
         });
         match emulator {

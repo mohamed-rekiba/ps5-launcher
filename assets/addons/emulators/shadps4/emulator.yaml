@@ -100,6 +100,16 @@ compatibility:
     - release-assets.githubusercontent.com
     - objects.githubusercontent.com
 
+catalogs:
+  - console: ps4
+    source: https://rutracker.net/forum/viewforum.php?f=973
+    snapshot: ps4-topics.json
+    cache: catalog-rutracker-ps4.json
+    refresh_seconds: 21600
+    optional: true
+    override_env: PS5_LAUNCHER_PS4_CATALOG_PATH
+    bundled_snapshot: catalog.json
+
 content:
   metadata: ps4_param_sfo
   layout:

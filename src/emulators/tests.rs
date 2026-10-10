@@ -56,6 +56,23 @@ fn the_default_documents_load_and_are_within_the_limits() {
 }
 
 #[test]
+fn catalogs_are_optional_and_checked_with_the_addon() {
+    assert!(document::parse(PS4_LAB, Version::current()).unwrap().catalogs.is_empty());
+    let text = include_str!("../../assets/addons/emulators/kyty/emulator.yaml");
+    for (from, to, issue) in [
+        ("refresh_seconds: 21600", "refresh_seconds: 0", "catalogs[0].refresh_seconds"),
+        ("- console: ps5", "- console: ps4", "catalogs[0].console"),
+        ("bundled_snapshot: catalog.json", "bundled_snapshot: ../escape.json", "relative path"),
+        ("override_env: PS5_LAUNCHER_CATALOG_PATH", "override_env: bad-name", "catalogs[0].override_env"),
+        ("snapshot: ps5-topics.json", "snapshot: ../escape.json", "relative path"),
+    ] {
+        let errors = document::parse(&text.replace(from, to), Version::current()).unwrap_err();
+        let messages = errors.iter().map(ToString::to_string).collect::<Vec<_>>().join("; ");
+        assert!(messages.contains(issue), "expected {issue}: {messages}");
+    }
+}
+
+#[test]
 fn the_bundle_holds_every_file_of_the_default_folders() {
     let assets = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("assets/addons/emulators");
     let mut folders: Vec<String> = std::fs::read_dir(&assets).unwrap().flatten().filter(|e| e.path().is_dir()).map(|e| e.file_name().to_string_lossy().into_owned()).collect();
@@ -65,9 +82,13 @@ fn the_bundle_holds_every_file_of_the_default_folders() {
     for addon in shipped {
         let mut files: Vec<String> = std::fs::read_dir(assets.join(&addon.id)).unwrap().flatten().map(|e| e.file_name().to_string_lossy().into_owned()).collect();
         files.sort();
-        assert_eq!(addon.files.iter().map(|(p, _)| p.clone()).collect::<Vec<_>>(), files, "{}", addon.id);
+        assert_eq!(addon.files.iter().filter(|(p, _)| p != "catalog.json").map(|(p, _)| p.clone()).collect::<Vec<_>>(), files, "{}", addon.id);
         for (path, bytes) in &addon.files {
-            assert_eq!(&std::fs::read(assets.join(&addon.id).join(path)).unwrap(), bytes, "{}/{path}", addon.id);
+            let source = if path == "catalog.json" {
+                let emulator = document::parse(addon.document().unwrap(), Version::current()).unwrap();
+                PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("assets/rutracker").join(emulator.catalogs[0].snapshot.as_str())
+            } else { assets.join(&addon.id).join(path) };
+            assert_eq!(&std::fs::read(source).unwrap_or_default(), bytes, "{}/{path}", addon.id);
         }
     }
 }

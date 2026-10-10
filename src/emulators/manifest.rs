@@ -200,6 +200,15 @@ impl From<crate::platform::Platform> for Console {
     }
 }
 
+impl From<Console> for crate::platform::Platform {
+    fn from(console: Console) -> Self {
+        match console {
+            Console::Ps5 => Self::Ps5,
+            Console::Ps4 => Self::Ps4,
+        }
+    }
+}
+
 /// One value for each host OS.
 #[derive(Clone, Debug, PartialEq, Deserialize, JsonSchema)]
 #[serde(deny_unknown_fields)]
@@ -252,11 +261,34 @@ pub struct Emulator {
     pub launch: Launch,
     pub settings: Settings,
     pub compatibility: CompatibilityParser,
+    /// Offline release catalogs contributed to the shared Library. Launching does not
+    /// require a catalog; existing and user-added addons may omit this section.
+    #[serde(default)]
+    pub catalogs: Vec<Catalog>,
     pub content: Content,
     pub session: Session,
     /// Automatic updates. Required with a `github_latest` release.
     pub update: Option<Update>,
     pub macos: Option<Macos>,
+}
+
+/// Configuration for the compiled offline RuTracker snapshot importer. Paths are relative
+/// to the launcher's rutracker data folder and cache folder, respectively.
+#[derive(Clone, Debug, PartialEq, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
+pub struct Catalog {
+    pub console: Console,
+    pub source: HttpsUrl,
+    pub snapshot: RelPath,
+    pub cache: RelPath,
+    pub refresh_seconds: u64,
+    /// A missing, uncollected snapshot may contribute no games.
+    pub optional: bool,
+    /// Legacy environment override, containing a snapshot file path.
+    pub override_env: Option<String>,
+    /// Fallback snapshot file inside this addon's folder. Default bundles copy their
+    /// snapshot there; user-added addons can supply any compatible snapshot.
+    pub bundled_snapshot: Option<RelPath>,
 }
 
 // ------------------------------------------------------------------ release

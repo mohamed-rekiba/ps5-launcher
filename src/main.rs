@@ -120,7 +120,8 @@ fn main() -> std::process::ExitCode {
         }
     }
 
-    // Phase 2 of docs/plans/addons.md calls emulators::startup::load_for_app() here, with the code that uses its snapshot.
+    // Catalog loading reconciles and reads the addons lazily. Phase 2 will share the
+    // startup registry here with the remaining emulator consumers.
 
     let cfg = config::Config::load();
     let mons = display::monitors();

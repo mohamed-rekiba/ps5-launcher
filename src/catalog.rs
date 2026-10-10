@@ -9,33 +9,93 @@ use std::collections::HashSet;
 use std::path::PathBuf;
 use std::sync::LazyLock;
 
-pub const CATALOG_TTL: f64 = 6.0 * 3600.0;
 pub const CATALOG_SCHEMA: u32 = 4;
-pub const SOURCE_PS4: &str = "https://rutracker.net/forum/viewforum.php?f=973";
-pub const SOURCE_PS5: &str = "https://rutracker.net/forum/viewforum.php?f=546";
-/// Empty until the PS4 snapshot is collected and bundled (see build.rs).
-const BUNDLED_PS4: &[u8] = include_bytes!(concat!(env!("OUT_DIR"), "/ps4-topics.json"));
-const BUNDLED_PS5: &[u8] = include_bytes!("../assets/rutracker/ps5-topics.json");
-
-/// One console's RuTracker forum snapshot and where it's cached.
+/// One addon's contribution to the shared Library. The importer stays compiled; its
+/// source, paths, refresh policy and optionality come from the validated document.
+#[derive(Debug, PartialEq)]
 struct Source {
     platform: Platform,
-    url: &'static str,
-    file: &'static str,
-    cache: &'static str,
-    env: &'static str,
-    bundled: &'static [u8],
+    url: String,
+    file: String,
+    cache: String,
+    env: Option<String>,
+    bundled: Vec<u8>,
+    refresh_seconds: u64,
+    optional: bool,
 }
 
-/// The order does not matter: code finds a console by its `platform`, never by position.
-const SOURCES: [Source; 2] = [
-    Source { platform: Platform::Ps4, url: SOURCE_PS4, file: "ps4-topics.json", cache: "catalog-rutracker-ps4.json", env: "PS5_LAUNCHER_PS4_CATALOG_PATH", bundled: BUNDLED_PS4 },
-    Source { platform: Platform::Ps5, url: SOURCE_PS5, file: "ps5-topics.json", cache: "catalog-rutracker.json", env: "PS5_LAUNCHER_CATALOG_PATH", bundled: BUNDLED_PS5 },
-];
+fn sources(emulators: &[crate::emulators::manifest::Emulator], root: &std::path::Path) -> Vec<Source> {
+    use crate::emulators::safefs::{Dir, MAX_FILE};
+    use std::ffi::OsStr;
+    let mut sources = Vec::new();
+    for emulator in emulators {
+        for c in &emulator.catalogs {
+            let bundled = match &c.bundled_snapshot {
+                None => Vec::new(),
+                Some(path) => match Dir::open(root)
+                    .and_then(|dir| dir.dir(OsStr::new("emulators")))
+                    .and_then(|dir| dir.dir(OsStr::new(emulator.id.as_str())))
+                    .and_then(|dir| dir.read_relative(path.as_str(), MAX_FILE)) {
+                    Ok(bytes) => bytes,
+                    Err(error) => {
+                        crate::log!("Addon {} catalog fallback {} {error}", emulator.id, path.as_str());
+                        continue;
+                    }
+                },
+            };
+            let source = Source {
+                platform: c.console.into(),
+                url: c.source.as_str().to_string(),
+                file: c.snapshot.as_str().to_string(),
+                cache: c.cache.as_str().to_string(),
+                env: c.override_env.clone(),
+                bundled,
+                refresh_seconds: c.refresh_seconds,
+                optional: c.optional,
+            };
+            // Identical contributions from several emulators are imported once.
+            if !sources.contains(&source) { sources.push(source); }
+        }
+    }
+    // Conflicting cache owners are all rejected: folder scan order must not decide
+    // which source overwrites the other. Other catalogs remain available.
+    let mut conflicts = HashSet::new();
+    for (i, a) in sources.iter().enumerate() {
+        for b in &sources[i + 1..] {
+            if a.cache == b.cache { conflicts.insert(a.cache.clone()); }
+        }
+    }
+    sources.retain(|src| {
+        if conflicts.contains(&src.cache) {
+            crate::log!("RuTracker catalog {} rejected: cache {} is used by conflicting addon catalogs", src.url, src.cache);
+            false
+        } else { true }
+    });
+    sources
+}
+
+/// Immutable for this run, just like the addon registry. Catalogs are shared Library
+/// data, so disabling an emulator does not remove its catalog contribution.
+static SOURCES: LazyLock<Vec<Source>> = LazyLock::new(|| {
+    let loaded = crate::emulators::startup::load_for_app();
+    for problem in loaded.problems { crate::log!("Addon: {problem}"); }
+    sources(loaded.registry.emulators(), &crate::emulators::startup::root())
+});
 
 #[cfg(test)]
 fn source_of(platform: Platform) -> &'static Source {
-    SOURCES.iter().find(|src| src.platform == platform).expect("every console has a source")
+    // Tests use shipped definitions, without reconciling the real user's addon folders.
+    static SHIPPED: LazyLock<Vec<Source>> = LazyLock::new(|| {
+        let root = tempfile::tempdir().unwrap();
+        let loaded = crate::emulators::startup::load(
+            root.path(), &crate::emulators::bundle::Embedded,
+            &crate::emulators::lifecycle::RealFiles::default(),
+            crate::emulators::document::Version::current(),
+        );
+        assert!(loaded.problems.is_empty(), "{:?}", loaded.problems);
+        sources(loaded.registry.emulators(), root.path())
+    });
+    SHIPPED.iter().find(|src| src.platform == platform).expect("every shipped console has a source")
 }
 
 #[derive(Serialize, Deserialize, Clone, Debug, Default)]
@@ -92,7 +152,7 @@ pub struct CatalogFile {
 }
 
 impl CatalogFile {
-    /// Every console's catalog, merged. The PS4 catalog is empty until it has been collected.
+    /// All catalog contributions from the emulator addons, merged into one Library.
     pub fn load() -> Self {
         merge(SOURCES.iter().map(|src| (src.platform, load_one(src))).collect())
     }
@@ -103,22 +163,24 @@ impl CatalogFile {
             if bytes.is_empty() { return false; }
             let cache = read_cache(src);
             cache.schema != CATALOG_SCHEMA || cache.source != src.url || cache.games.is_empty()
-                || now_secs() - cache.updated > CATALOG_TTL || fingerprint(&bytes) != cache.fingerprint
+                || now_secs() - cache.updated > src.refresh_seconds as f64 || fingerprint(&bytes) != cache.fingerprint
         })
     }
 }
 
 fn read_cache(src: &Source) -> CatalogFile {
-    std::fs::read(cache_dir().join(src.cache)).ok().and_then(|bytes| serde_json::from_slice(&bytes).ok()).unwrap_or_default()
+    let cache: CatalogFile = std::fs::read(cache_dir().join(&src.cache)).ok().and_then(|bytes| serde_json::from_slice(&bytes).ok()).unwrap_or_default();
+    // Changing a declaration must not reuse games tagged for a different console.
+    if cache.source == src.url && cache.games.iter().all(|game| game.platform == src.platform) { cache } else { CatalogFile::default() }
 }
 
 /// One console's catalog: the cache when it matches the source, else a fresh import.
 fn load_one(src: &Source) -> CatalogFile {
     let cache = read_cache(src);
     let valid = cache.schema == CATALOG_SCHEMA && cache.source == src.url && !cache.games.is_empty();
-    let bundled = || if src.bundled.is_empty() { CatalogFile::default() } else { import_for(src, src.bundled).unwrap_or_default() };
+    let bundled = || if src.bundled.is_empty() { CatalogFile::default() } else { import_for(src, &src.bundled).unwrap_or_default() };
     match source_bytes(src) {
-        Ok(bytes) if bytes.is_empty() => CatalogFile::default(), // not collected yet (PS4)
+        Ok(bytes) if bytes.is_empty() => CatalogFile::default(), // no snapshot collected
         Ok(bytes) if valid && cache.fingerprint == fingerprint(&bytes) => cache,
         Ok(bytes) => match import_for(src, &bytes).and_then(|file| save(src, file)) {
             Ok(file) => file,
@@ -134,35 +196,35 @@ fn load_one(src: &Source) -> CatalogFile {
     }
 }
 
-/// One Library from every console's catalog. PS5's snapshot details describe the result.
+/// One Library from every source, in the registry's deterministic order.
 fn merge(files: Vec<(Platform, CatalogFile)>) -> CatalogFile {
-    let (ps5, others): (Vec<_>, Vec<_>) = files.into_iter().partition(|(platform, _)| *platform == Platform::Ps5);
-    let mut merged = ps5.into_iter().next().map(|(_, file)| file).unwrap_or_default();
-    for (_, file) in others {
+    let mut files = files.into_iter();
+    let mut merged = files.next().map(|(_, file)| file).unwrap_or_default();
+    for (_, file) in files {
         merged.games.extend(file.games);
     }
     merged.games.sort_by(|a, b| b.id.cmp(&a.id));
+    let mut seen = HashSet::new();
+    merged.games.retain(|game| seen.insert((game.platform, game.id)));
     merged
 }
 
 /// Explicit override, then user data, then a source checkout's generated JSON.
-/// Installed binaries always have a bundled snapshot if none of those exist.
+/// The addon can select a bundled snapshot if none of those exist.
 fn source_path(src: &Source) -> Option<PathBuf> {
-    if let Some(path) = std::env::var_os(src.env).filter(|path| !path.is_empty()) {
+    if let Some(path) = src.env.as_ref().and_then(std::env::var_os).filter(|path| !path.is_empty()) {
         return Some(PathBuf::from(path));
     }
-    let data = std::env::var_os("XDG_DATA_HOME").map(PathBuf::from).unwrap_or_else(|| {
-        std::env::var_os("HOME").map(PathBuf::from).unwrap_or_else(|| PathBuf::from("/tmp")).join(".local/share")
-    }).join("ps5-launcher/rutracker").join(src.file);
+    let data = crate::util::data_dir().join("rutracker").join(&src.file);
     if data.is_file() { return Some(data); }
-    let generated = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("dist/rutracker").join(src.file);
+    let generated = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("dist/rutracker").join(&src.file);
     generated.is_file().then_some(generated)
 }
 
 fn source_bytes(src: &Source) -> Result<Vec<u8>, String> {
     match source_path(src) {
         Some(path) => std::fs::read(&path).map_err(|error| format!("{}: {error}", path.display())),
-        None => Ok(src.bundled.to_vec()),
+        None => Ok(src.bundled.clone()),
     }
 }
 
@@ -225,7 +287,7 @@ fn is_game(title: &str, genre: &str, title_id: &str, magnet: &str) -> bool {
 
 fn import_for(src: &Source, bytes: &[u8]) -> Result<CatalogFile, String> {
     let report: Value = serde_json::from_slice(bytes).map_err(|error| format!("Invalid RuTracker JSON: {error}"))?;
-    if report["complete"].as_bool() != Some(true) || report["source"].as_str() != Some(src.url) {
+    if report["complete"].as_bool() != Some(true) || report["source"].as_str() != Some(src.url.as_str()) {
         return Err(format!("Expected a complete {} forum listing ({}); partial results are not imported", src.platform.label(), src.url));
     }
     if report["translation"]["language"].as_str() != Some("en") {
@@ -278,29 +340,28 @@ fn import_for(src: &Source, bytes: &[u8]) -> Result<CatalogFile, String> {
     }
     // Topics, not title IDs, are the identity: retain regional/version variants.
     games.sort_by(|a, b| b.id.cmp(&a.id));
-    Ok(CatalogFile { updated: now_secs(), schema: CATALOG_SCHEMA, source: src.url.into(),
+    Ok(CatalogFile { updated: now_secs(), schema: CATALOG_SCHEMA, source: src.url.clone(),
         fingerprint: fingerprint(bytes), snapshot_at, games })
 }
 
 fn save(src: &Source, file: CatalogFile) -> Result<CatalogFile, String> {
     let bytes = serde_json::to_vec(&file).map_err(|error| error.to_string())?;
-    atomic_write(&cache_dir().join(src.cache), &bytes).map_err(|error| format!("Could not cache RuTracker catalog: {error}"))?;
+    atomic_write(&cache_dir().join(&src.cache), &bytes).map_err(|error| format!("Could not cache RuTracker catalog: {error}"))?;
     Ok(file)
 }
 
-/// Re-import local metadata only: no website requests, torrent client or browser. The PS5
-/// catalog must import; a PS4 catalog is optional until it has been collected.
+/// Re-import local metadata only: no website requests, torrent client or browser.
+/// Each addon declares whether its catalog is required or optional.
 pub fn sync(progress: &dyn Fn(String)) -> Result<CatalogFile, String> {
     progress("Loading RuTracker snapshots".into());
     let mut files = Vec::new();
-    for src in &SOURCES {
-        let optional = src.platform != Platform::Ps5;
-        let bytes = source_bytes(src)?;
-        if bytes.is_empty() && optional {
-            files.push((src.platform, CatalogFile::default()));
-            continue;
-        }
-        match import_for(src, &bytes).and_then(|file| save(src, file)) {
+    for src in SOURCES.iter() {
+        let optional = src.optional;
+        let imported = source_bytes(src).and_then(|bytes| {
+            if bytes.is_empty() && optional { return Ok(CatalogFile::default()); }
+            import_for(src, &bytes).and_then(|file| save(src, file))
+        });
+        match imported {
             Ok(file) => files.push((src.platform, file)),
             Err(error) if optional => {
                 crate::log!("RuTracker {} catalog import failed: {error}", src.platform.label());
@@ -318,14 +379,105 @@ pub fn sync(progress: &dyn Fn(String)) -> Result<CatalogFile, String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn addon() -> crate::emulators::manifest::Emulator {
+        crate::emulators::document::parse(
+            include_str!("../assets/addons/emulators/kyty/emulator.yaml"),
+            crate::emulators::document::Version::current(),
+        ).map(|mut emulator| {
+            emulator.catalogs[0].bundled_snapshot = None;
+            emulator
+        }).unwrap()
+    }
+
+    fn sources(emulators: &[crate::emulators::manifest::Emulator]) -> Vec<Source> {
+        super::sources(emulators, std::path::Path::new("/unused"))
+    }
+
+    #[test]
+    fn a_user_addon_supplies_its_own_fallback_snapshot() {
+        use crate::emulators::{discovery, document::Version};
+        let root = tempfile::tempdir().unwrap();
+        let folder = root.path().join("emulators/custom-emulator");
+        std::fs::create_dir_all(folder.join("releases")).unwrap();
+        let text = include_str!("../assets/addons/emulators/kyty/emulator.yaml")
+            .replace("id: kyty\n", "id: custom-emulator\n")
+            .replace("https://rutracker.net/forum/viewforum.php?f=546", "https://example.com/releases")
+            .replace("bundled_snapshot: catalog.json", "bundled_snapshot: releases/offline.json");
+        std::fs::write(folder.join("emulator.yaml"), text).unwrap();
+        let snapshot = serde_json::to_vec(&serde_json::json!({
+            "source": "https://example.com/releases", "complete": true,
+            "translation": { "language": "en" }, "topic_count": 1,
+            "topics": [{ "id": "42", "title": "Custom game", "game_info": { "title_id": "PPSA00042" } }]
+        })).unwrap();
+        std::fs::write(folder.join("releases/offline.json"), &snapshot).unwrap();
+        let scan = discovery::scan(root.path(), Version::current());
+        assert!(scan.rejected.is_empty(), "{:?}", scan.rejected);
+        let emulators = scan.addons.into_iter().map(|addon| addon.emulator).collect::<Vec<_>>();
+        let configured = super::sources(&emulators, root.path());
+        assert_eq!(configured.len(), 1);
+        assert_eq!(configured[0].bundled, snapshot);
+        assert_eq!(import_for(&configured[0], &configured[0].bundled).unwrap().games[0].name, "Custom game");
+
+        // A resource cannot redirect the importer out of the addon folder.
+        std::fs::remove_file(folder.join("releases/offline.json")).unwrap();
+        let outside = root.path().join("outside.json");
+        std::fs::write(&outside, snapshot).unwrap();
+        std::os::unix::fs::symlink(outside, folder.join("releases/offline.json")).unwrap();
+        assert_eq!(discovery::scan(root.path(), Version::current()).rejected.len(), 1);
+        assert!(super::sources(&emulators, root.path()).is_empty());
+    }
+
+    #[test]
+    fn addon_catalog_configuration_drives_the_importer() {
+        let mut emulator = addon();
+        let catalog = &mut emulator.catalogs[0];
+        catalog.source = "https://example.com/forum".to_string().try_into().unwrap();
+        catalog.snapshot = "custom.json".to_string().try_into().unwrap();
+        catalog.cache = "custom-cache.json".to_string().try_into().unwrap();
+        catalog.refresh_seconds = 120;
+        catalog.optional = true;
+        catalog.override_env = None;
+        catalog.bundled_snapshot = None;
+        let configured = sources(&[emulator]);
+        let src = &configured[0];
+        assert_eq!((&*src.file, &*src.cache, src.refresh_seconds, src.optional), ("custom.json", "custom-cache.json", 120, true));
+        assert!(src.env.is_none() && src.bundled.is_empty());
+        let bytes = fixture(serde_json::json!([{ "id": "100", "title": "[PS5] Example", "game_info": { "title_id": "PPSA12345" } }]));
+        assert!(import_for(src, &bytes).is_err(), "the configured source is required, not the old hardcoded forum");
+        let mut report: Value = serde_json::from_slice(&bytes).unwrap();
+        report["source"] = serde_json::json!(src.url);
+        assert_eq!(import_for(src, &serde_json::to_vec(&report).unwrap()).unwrap().games.len(), 1);
+    }
+
+    #[test]
+    fn shared_sources_are_imported_once_and_cache_conflicts_are_rejected() {
+        let a = addon();
+        assert_eq!(sources(&[a.clone(), a.clone()]).len(), 1);
+        let mut b = a.clone();
+        b.catalogs[0].source = "https://example.com/another-forum".to_string().try_into().unwrap();
+        assert!(sources(&[a.clone(), b.clone()]).is_empty());
+        b.catalogs[0].cache = "another.json".to_string().try_into().unwrap();
+        assert_eq!(sources(&[a, b]).len(), 2);
+    }
+
+    #[test]
+    fn multiple_catalogs_for_one_console_merge_without_duplicate_topics() {
+        let file = |ids: &[i64]| CatalogFile {
+            games: ids.iter().map(|id| Game { id: *id, platform: Platform::Ps5, ..Game::default() }).collect(),
+            ..CatalogFile::default()
+        };
+        let merged = merge(vec![(Platform::Ps5, file(&[1, 2])), (Platform::Ps5, file(&[2, 3]))]);
+        assert_eq!(merged.games.iter().map(|g| g.id).collect::<Vec<_>>(), [3, 2, 1]);
+    }
     fn fixture(topics: Value) -> Vec<u8> {
-        serde_json::to_vec(&serde_json::json!({ "source": SOURCE_PS5, "complete": true,
+        serde_json::to_vec(&serde_json::json!({ "source": source_of(Platform::Ps5).url, "complete": true,
             "translation": { "language": "en" }, "collected_at": "2026-09-30T00:56:18Z",
             "topic_count": topics.as_array().unwrap().len(), "topics": topics })).unwrap()
     }
     #[test]
     fn ps4_snapshot_imports_as_ps4_and_merges() {
-        let ps4 = serde_json::to_vec(&serde_json::json!({ "source": SOURCE_PS4, "complete": true,
+        let ps4 = serde_json::to_vec(&serde_json::json!({ "source": source_of(Platform::Ps4).url, "complete": true,
             "translation": { "language": "en" }, "collected_at": "2026-10-02T00:00:00Z", "topic_count": 1,
             "topics": [{ "id": "900", "title": "[PS4] Firewatch [CUSA04118] [EUR]", "game_info": { "title_id": "CUSA04118" } }] })).unwrap();
         let file = import_for(source_of(Platform::Ps4), &ps4).unwrap();
@@ -410,7 +562,8 @@ mod tests {
     }
     #[test]
     fn bundled_snapshot_is_complete_and_keeps_magnets() {
-        let file = import(BUNDLED_PS5).unwrap();
+        let src = source_of(Platform::Ps5);
+        let file = import_for(src, &src.bundled).unwrap();
         assert_eq!(file.games.len(), 614);
         assert!(file.games.iter().all(|game| !game.magnet.is_empty()));
         assert!(file.games.iter().all(|game| game.seeders.is_some() && game.leechers.is_some()));

@@ -187,6 +187,22 @@ impl Validator {
         self.launch(e, &format!("{at}.launch"));
         self.settings(e, &format!("{at}.settings"));
         self.compatibility(&e.compatibility, &format!("{at}.compatibility"));
+        self.count(&format!("{at}.catalogs"), &e.catalogs);
+        for (i, c) in e.catalogs.iter().enumerate() {
+            let path = format!("{at}.catalogs[{i}]");
+            if !e.consoles.contains(&c.console) {
+                self.err(format!("{path}.console"), "must be one of the emulated consoles");
+            }
+            if c.refresh_seconds < 60 {
+                self.err(format!("{path}.refresh_seconds"), "at least 60 seconds");
+            }
+            if let Some(env) = &c.override_env {
+                if env.is_empty() || env.len() > 128 || !env.bytes().all(|b| b.is_ascii_uppercase() || b.is_ascii_digit() || b == b'_')
+                    || env.as_bytes()[0].is_ascii_digit() {
+                    self.err(format!("{path}.override_env"), "an uppercase environment variable name, up to 128 characters");
+                }
+            }
+        }
         if let ContentLayout::ShadPs4 { patch_suffix, .. } = &e.content.layout {
             if patch_suffix.is_empty() || patch_suffix.contains(['/', '\0']) {
                 self.err(format!("{at}.content.layout.patch_suffix"), "a non-empty name part without /");

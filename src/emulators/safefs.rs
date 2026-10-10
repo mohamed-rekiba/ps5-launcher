@@ -170,6 +170,15 @@ impl Dir {
         Ok(bytes)
     }
 
+    /// Read a relative resource path through directory handles, refusing links and
+    /// special files at every step. Each component is checked by `dir` or `read`.
+    pub fn read_relative(&self, relative: &str, limit: u64) -> Result<Vec<u8>, Refused> {
+        match relative.split_once('/') {
+            Some((first, rest)) => self.dir(OsStr::new(first))?.read_relative(rest, limit),
+            None => self.read(OsStr::new(relative), limit),
+        }
+    }
+
     /// The names in this folder, with what each is, in byte order.
     pub fn entries(&self) -> io::Result<Vec<(OsString, Kind)>> {
         // SAFETY: dup gives fdopendir a descriptor of its own, which closedir closes.

@@ -29,11 +29,18 @@ pub trait DefaultSource {
 /// The defaults built into this binary.
 pub struct Embedded;
 
-/// Every file of every default emulator addon (assets/addons/emulators/<id>/). A test checks
-/// that this list and the folders hold the same files.
+/// Every file copied into the default emulator addons. Documents come from
+/// assets/addons/emulators/<id>/; catalog resources come from the published snapshots in
+/// assets/rutracker/. A test checks both sources against the copied files.
 const EMULATORS: [(&str, &[(&str, &[u8])]); 2] = [
-    ("kyty", &[("emulator.yaml", include_bytes!("../../assets/addons/emulators/kyty/emulator.yaml"))]),
-    ("shadps4", &[("emulator.yaml", include_bytes!("../../assets/addons/emulators/shadps4/emulator.yaml"))]),
+    ("kyty", &[
+        ("emulator.yaml", include_bytes!("../../assets/addons/emulators/kyty/emulator.yaml")),
+        ("catalog.json", include_bytes!("../../assets/rutracker/ps5-topics.json")),
+    ]),
+    ("shadps4", &[
+        ("emulator.yaml", include_bytes!("../../assets/addons/emulators/shadps4/emulator.yaml")),
+        ("catalog.json", include_bytes!(concat!(env!("OUT_DIR"), "/ps4-topics.json"))),
+    ]),
 ];
 
 impl DefaultSource for Embedded {

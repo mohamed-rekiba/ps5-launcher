@@ -147,6 +147,16 @@ compatibility:
     url: https://github.com/KytyPS5/KytyPS5/issues/new?template=kytyps5-game-emulation.yaml
   allowed_hosts: [kytyps5.github.io, github.com]
 
+catalogs:
+  - console: ps5
+    source: https://rutracker.net/forum/viewforum.php?f=546
+    snapshot: ps5-topics.json
+    cache: catalog-rutracker.json
+    refresh_seconds: 21600
+    optional: false
+    override_env: PS5_LAUNCHER_CATALOG_PATH
+    bundled_snapshot: catalog.json
+
 content:
   metadata: ps5_param_json
   layout: {kind: plain_folder}

@@ -12,6 +12,24 @@ by path after an lstat check of each parent, so a parent swapped for a link betw
 and the change is not caught. Reads already go through folder handles. The fix is mkdirat,
 renameat and unlinkat through handles (TODOs in `lifecycle.rs`).
 
+The catalog importer now consumes addon configuration at runtime. Its first use reconciles
+and scans the addons and retains an immutable snapshot for the run. Other emulator consumers
+still need the Phase 2 wiring. Each addon may declare a `catalogs` list: console, RuTracker
+source URL, snapshot filename, cache filename, refresh interval, optionality, optional
+environment override name, and optional `bundled_snapshot` path inside the addon folder. Snapshot paths are relative
+to `<data>/rutracker/` (or `dist/rutracker/` in a checkout); cache paths are relative to the
+launcher cache folder. The importer is offline: source URLs identify snapshots and are never
+fetched. Parsing stays compiled into the launcher. The default bundle copies its snapshots
+into each addon as `catalog.json`; the importer reads only the user copy, through folder
+handles with size limits and link checks. User-added addons can provide their own fallback
+file, including in a subfolder, without Rust changes.
+
+Catalogs contribute to the shared Library even when the declaring emulator is disabled.
+Identical declarations are imported once; different declarations using the same cache path
+are all rejected and logged. Multiple catalogs per console merge with duplicate console/topic
+IDs removed. An addon with no `catalogs` section contributes no releases; installed games and
+emulator resolution are independent of this section. Changes take effect on the next start.
+
 ## Decisions
 1. Emulators and themes are addons: one folder per addon, each with its own YAML file. The launcher finds them by scanning folders.
 2. YAML, parsed strictly into typed Rust structs: unknown fields and duplicate keys rejected, YAML aliases and tags blocked. serde_norway.
@@ -139,8 +157,8 @@ fallback go away. The embedded data stays only as the source of the default copi
 4. **The registry:** injected preferences; the choice order, an unavailable default, and a
    second PS4 emulator from a test folder. **Done** (`registry.rs`, `testdata/addons/`).
 5. **Startup:** reconcile, scan, an immutable snapshot and one combined list of problems. The
-   launcher still launches through the existing code. **Done** (`startup.rs`). `main` does not
-   call it yet: Phase 2 wires it in with the code that uses the snapshot.
+   launcher still launches through the existing code. **Done** (`startup.rs`). Catalog loading
+   now calls it lazily; Phase 2 shares its snapshot with the other consumers in `main`.
 
 Showing the second emulator in the UI and launching it stay with the later phases. Themes come
 after the emulator phases.

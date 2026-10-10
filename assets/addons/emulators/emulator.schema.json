@@ -4,6 +4,13 @@
   "description": "One emulator addon: the whole of emulators/<id>/emulator.yaml.",
   "type": "object",
   "properties": {
+    "catalogs": {
+      "description": "Offline release catalogs contributed to the shared Library. Launching does not\nrequire a catalog; existing and user-added addons may omit this section.",
+      "type": "array",
+      "items": {
+        "$ref": "#/$defs/Catalog"
+      }
+    },
     "compatibility": {
       "$ref": "#/$defs/CompatibilityParser"
     },
@@ -227,6 +234,60 @@
         "host_arch",
         "name_suffixes",
         "case_sensitive"
+      ]
+    },
+    "Catalog": {
+      "description": "Configuration for the compiled offline RuTracker snapshot importer. Paths are relative\nto the launcher's rutracker data folder and cache folder, respectively.",
+      "type": "object",
+      "properties": {
+        "bundled_snapshot": {
+          "description": "Fallback snapshot file inside this addon's folder. Default bundles copy their\nsnapshot there; user-added addons can supply any compatible snapshot.",
+          "anyOf": [
+            {
+              "$ref": "#/$defs/RelPath"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "cache": {
+          "$ref": "#/$defs/RelPath"
+        },
+        "console": {
+          "$ref": "#/$defs/Console"
+        },
+        "optional": {
+          "description": "A missing, uncollected snapshot may contribute no games.",
+          "type": "boolean"
+        },
+        "override_env": {
+          "description": "Legacy environment override, containing a snapshot file path.",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "refresh_seconds": {
+          "type": "integer",
+          "format": "uint64",
+          "minimum": 0
+        },
+        "snapshot": {
+          "$ref": "#/$defs/RelPath"
+        },
+        "source": {
+          "$ref": "#/$defs/HttpsUrl"
+        }
+      },
+      "additionalProperties": false,
+      "required": [
+        "console",
+        "source",
+        "snapshot",
+        "cache",
+        "refresh_seconds",
+        "optional"
       ]
     },
     "Choice": {
