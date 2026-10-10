@@ -5,7 +5,8 @@ open points. The advisor's fixes and decisions follow the plan and win where the
 
 Progress: the revised Phase 1 (below) is **done** for emulators, slices 1 to 5, in
 `src/emulators/`. Not done yet: themes, the Settings actions in the UI, the on/off and choice
-preferences (Phase 2), media size limits and SVG loading, and the "Show the folder" route.
+preferences (Phase 2), the startup call (Phase 2), image size and SVG loading, and the "Show the
+folder" route. Addon files have size limits (16 MiB a file, 64 MiB a folder).
 
 ## Decisions
 1. Emulators and themes are addons: one folder per addon, each with its own YAML file. The launcher finds them by scanning folders.
@@ -134,8 +135,8 @@ fallback go away. The embedded data stays only as the source of the default copi
 4. **The registry:** injected preferences; the choice order, an unavailable default, and a
    second PS4 emulator from a test folder. **Done** (`registry.rs`, `testdata/addons/`).
 5. **Startup:** reconcile, scan, an immutable snapshot and one combined list of problems. The
-   launcher still launches through the existing code. **Done** (`startup.rs`; `main` logs the
-   problems).
+   launcher still launches through the existing code. **Done** (`startup.rs`). `main` does not
+   call it yet: Phase 2 wires it in with the code that uses the snapshot.
 
 Showing the second emulator in the UI and launching it stay with the later phases. Themes come
 after the emulator phases.
