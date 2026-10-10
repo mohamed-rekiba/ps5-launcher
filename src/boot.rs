@@ -413,5 +413,7 @@ impl App {
             self.set_status(&p, true);
         }
         self.shad_tick();
+        // PS5 Launcher OS: the first-start setup, then the boot health notice, before Home.
+        self.after_welcome();
     }
 }

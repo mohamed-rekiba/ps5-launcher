@@ -2,7 +2,7 @@
 // One focus style, the app's own: the focused row or button turns white. A dangerous action
 // only gets a red icon or red text, never a red fill.
 
-import { S, Theme, Icons, PowerRow } from "theme.slint";
+import { S, Theme, Icons, PowerRow, NoticeView } from "theme.slint";
 import { KeyCap } from "widgets.slint";
 
 // The centred list: a title, then one row per action with an icon.
@@ -73,7 +73,7 @@ export component PowerMenu inherits Rectangle {
 }
 
 // A dialog button: white when focused, like the app's Btn. A dangerous one has red text.
-component PowerButton inherits Rectangle {
+export component PowerButton inherits Rectangle {
     in property <string> text;
     in property <bool> focused;
     in property <bool> danger;
@@ -175,6 +175,57 @@ export component PowerCountdown inherits Rectangle {
             spacing: (12px * S.k);
             KeyCap { text: root.pad ? "○" : "Esc"; round: root.pad; fg: root.pad ? #ff8f9c : #ffffff; }
             Text { text: "Cancel"; font-size: (22px * S.k); color: Theme.text2; vertical-alignment: center; }
+        }
+    }
+}
+
+// The boot health check's notice (PS5 Launcher OS): what happened at a start that failed, in
+// plain words, calm: an info icon, no alarm colours. One short line of details, then OK.
+export component NoticeDialog inherits Rectangle {
+    in property <NoticeView> notice;
+    in property <bool> focused;
+    callback ok();
+    background: #03050ccc;
+    TouchArea {}
+    Rectangle {
+        x: (root.width - self.width) / 2;
+        y: (root.height - self.height) / 2;
+        width: (980px * S.k);
+        height: body.preferred-height;
+        border-radius: (28px * S.k);
+        background: #121a31;
+        border-width: 1px;
+        border-color: Theme.line;
+        drop-shadow-blur: (60px * S.k);
+        drop-shadow-color: #000000cc;
+        body := VerticalLayout {
+            padding: (48px * S.k);
+            spacing: (16px * S.k);
+            HorizontalLayout {
+                spacing: (16px * S.k);
+                alignment: start;
+                Image { source: Icons.info; colorize: Theme.text2; width: (36px * S.k); height: (36px * S.k); y: (4px * S.k); }
+                Text { text: root.notice.title; font-size: (34px * S.k); font-weight: 600; color: Theme.text; vertical-alignment: center; }
+            }
+            for line[i] in root.notice.lines: Text {
+                text: line;
+                width: (884px * S.k);
+                wrap: word-wrap;
+                font-size: i == 0 ? (22px * S.k) : (19px * S.k);
+                color: i == 0 ? Theme.text : Theme.text2;
+            }
+            if root.notice.details != "": Text {
+                text: root.notice.details;
+                width: (884px * S.k);
+                overflow: elide;
+                font-size: (15px * S.k);
+                color: Theme.text3;
+            }
+            HorizontalLayout {
+                alignment: start;
+                padding-top: (18px * S.k);
+                PowerButton { text: "OK"; focused: root.focused; clicked => { root.ok(); } }
+            }
         }
     }
 }

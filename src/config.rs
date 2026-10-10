@@ -45,6 +45,12 @@ pub struct Config {
     /// System → Display: the screen output for the next session start; None is Automatic. The
     /// session wrapper reads it from session.conf (`screen::save`).
     pub session_output: Option<crate::screen::Output>,
+    /// PS5 Launcher OS: the first-start setup ran to its end ("Done"). Settings → About can run
+    /// it again.
+    pub setup_done: bool,
+    /// The setup's step on screen, so it comes back to it after a restart (the NVIDIA driver's
+    /// key restarts the PC in the middle of it).
+    pub setup_step: Option<crate::setup::Step>,
 }
 
 impl Default for Config {
@@ -74,6 +80,8 @@ impl Default for Config {
             rawg_art: Vec::new(),
             nvidia: crate::nvidia::Flow::default(),
             session_output: None,
+            setup_done: false,
+            setup_step: None,
         }
     }
 }

@@ -96,6 +96,8 @@ pub enum SId {
     TzZone(usize),
     // About (Session and OS mode)
     RestartLauncher,
+    /// PS5 Launcher OS: the first-start setup again.
+    RunSetup,
 }
 
 /// A category of the Settings rail, top to bottom. The Launcher group comes first; the System
@@ -128,6 +130,8 @@ pub enum Cat {
     Time,
     /// Session and OS mode: version, mode, Restart launcher.
     About,
+    /// The first-start setup's last step; never on the rail. It has no rows, only buttons.
+    Setup,
 }
 
 impl Cat {
@@ -150,6 +154,7 @@ impl Cat {
             // Under the SYSTEM heading, so not mixed up with the launcher's Updates.
             Cat::OsUpdates => "Updates",
             Cat::About => "About",
+            Cat::Setup => "Setup",
         }
     }
 
@@ -169,7 +174,7 @@ impl Cat {
             Cat::Storage => "disk",
             Cat::Display => "desktop",
             Cat::Time => "cal",
-            Cat::About => "info",
+            Cat::About | Cat::Setup => "info",
         }
     }
 
@@ -240,7 +245,7 @@ pub fn category(id: SId) -> Option<Cat> {
         OsStatus | OsDownload | OsRollback => Cat::OsUpdates,
         Gpu | NvInstall | NvLater | NvRetry | NvRestart | NvOpenSource | OutResolution | OutRefresh => Cat::Display,
         TimeZone | Ntp | TzBack | TzRegion(_) | TzZone(_) => Cat::Time,
-        RestartLauncher => Cat::About,
+        RestartLauncher | RunSetup => Cat::About,
     })
 }
 
@@ -334,6 +339,10 @@ const NV_CARD: f32 = 300.0;
 /// the buttons to hold; and without the pictures.
 const PAIR_CARD: f32 = 560.0;
 const PAIR_CARD_TEXT: f32 = 280.0;
+/// The setup's page (ui/setup.slint): its rows start under the stepper, the title and the text,
+/// and end over the buttons.
+const SETUP_TOP: f32 = 330.0;
+const SETUP_BOTTOM: f32 = 150.0;
 
 /// The rail and the page: which category is open, every row of every category (for search), and
 /// the search field.
@@ -608,6 +617,11 @@ impl App {
             let mut r = row(4, "Restart launcher");
             r.hint = "Starts PS5 Launcher again, for when something looks stuck".into();
             add(&mut rows, SId::RestartLauncher, r);
+            if Mode::current() == Mode::Os {
+                let mut r = row(4, "Run the setup again");
+                r.hint = "Network, time zone, controllers, the graphics driver and a drive for games".into();
+                add(&mut rows, SId::RunSetup, r);
+            }
         }
 
         self.settings_nav.all = rows;
@@ -677,7 +691,9 @@ impl App {
         };
         ui.set_settings_key(model(key));
         ui.set_settings_key_last(
-            if cat == Cat::Display {
+            if self.overlay == Overlay::Setup {
+                "Choose \"Reboot\". The setup comes back, checks the key by itself and downloads the driver."
+            } else if cat == Cat::Display {
                 "Choose \"Reboot\". Back here, the launcher checks the key by itself; then download the driver."
             } else {
                 "Choose \"Reboot\". Back here, choose Download update again."
@@ -689,15 +705,18 @@ impl App {
         ui.set_settings_mode(mode_label(Mode::current()).into());
         ui.set_settings(model(self.settings_rows.clone()));
         ui.set_edit_index(self.edit_index);
+        self.push_setup();
     }
 
     /// Keep the focused row of the page in view.
     pub fn scroll_settings(&mut self) {
-        // Estimated heights matching ui/settings.slint.
+        // Estimated heights matching ui/settings.slint and ui/setup.slint.
         let (w, h) = self.logical_size();
-        // The page is at most 1100 wide, right of the folded rail; hints wrap at about 8 px a
-        // character (15 px text).
-        let hint_w = (w - RAIL_FOLDED - 72.0 - 96.0).min(1100.0) - 36.0;
+        // The page is at most 1100 wide, right of the folded rail; the setup's is centred, with
+        // no rail. Hints wrap at about 8 px a character (15 px text).
+        let setup = self.overlay == Overlay::Setup;
+        let (left, page_top, page_bottom) = if setup { (0.0, SETUP_TOP, SETUP_BOTTOM) } else { (RAIL_FOLDED + 72.0, PAGE_TOP, PAGE_BOTTOM) };
+        let hint_w = (w - left - 96.0 * if setup { 2.0 } else { 1.0 }).min(1100.0) - 36.0;
         let per_line = (hint_w / 8.0).max(20.0) as usize;
         // The key's steps on the Updates page come before the rows.
         let cat = self.settings_nav.cats.get(self.settings_nav.cat).copied();
@@ -728,7 +747,7 @@ impl App {
         if self.ui().get_settings_about() {
             y += 36.0 + 120.0; // the About card under the rows
         }
-        let view = h - PAGE_TOP - PAGE_BOTTOM;
+        let view = h - page_top - page_bottom;
         let max = (y - view).max(0.0);
         self.ui().set_settings_y(-(target - view * 0.4).clamp(0.0, max) * self.scale);
     }
@@ -923,6 +942,7 @@ impl App {
                 audio::play(Sound::Select);
                 self.restart_launcher();
             }
+            SId::RunSetup => self.setup_again(),
             SId::Downloads => self.open_downloads(None),
             SId::Share => self.share_results(),
             SId::Controls => self.open_controls(),
@@ -1097,7 +1117,7 @@ impl App {
         }
     }
 
-    fn act_settings_page(&mut self, a: Act) {
+    pub(crate) fn act_settings_page(&mut self, a: Act) {
         // Back first leaves what a page has open: pairing a controller.
         if a == Act::Back && self.sys_back() {
             return;
@@ -1293,7 +1313,7 @@ mod tests {
             (Cat::OsUpdates, &[OsStatus, OsDownload, OsRollback]),
             (Cat::Display, &[Gpu, NvInstall, NvLater, NvRetry, NvRestart, NvOpenSource, OutResolution, OutRefresh]),
             (Cat::Time, &[TimeZone, Ntp, TzBack, TzRegion(3), TzZone(40)]),
-            (Cat::About, &[RestartLauncher]),
+            (Cat::About, &[RestartLauncher, RunSetup]),
         ] {
             for id in ids {
                 assert_eq!(category(*id), Some(cat), "{id:?}");

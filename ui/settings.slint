@@ -9,7 +9,7 @@ import { Switch, KeyCap } from "widgets.slint";
 import { AboutSlint } from "std-widgets.slint";
 
 // The rows of one page. Rows between two headers share a card.
-component SettingRows inherits VerticalLayout {
+export component SettingRows inherits VerticalLayout {
     in property <[SettingData]> rows;
     in property <int> selected: -1;
     in property <int> edit-index: -1;
@@ -145,7 +145,7 @@ component SettingRows inherits VerticalLayout {
 
 // The NVIDIA image's Secure Boot key waits for the blue MOK screen at the next start: its password
 // in large digits, numbered, because the screen may ask for single digits; then the steps.
-component KeySteps inherits VerticalLayout {
+export component KeySteps inherits VerticalLayout {
     in property <[string]> digits;
     in property <length> text-w;
     // The last step: what to do back in the launcher.
@@ -201,7 +201,7 @@ component KeySteps inherits VerticalLayout {
 
 // The NVIDIA driver on the Display page (the prototype's stepper): the numbered steps, then a
 // card with a title and its text. Its buttons are the rows under it.
-component NvidiaCard inherits VerticalLayout {
+export component NvidiaCard inherits VerticalLayout {
     in property <NvCard> card;
     in property <length> text-w;
     padding-bottom: (28px * S.k);
@@ -344,7 +344,7 @@ component PadPicture inherits VerticalLayout {
 
 // Pairing a controller on the Controllers page: the steps, then a card with the state, the
 // buttons to hold for each controller type, or the error. Its buttons are the rows under it.
-component PairSteps inherits VerticalLayout {
+export component PairSteps inherits VerticalLayout {
     in property <PairCard> card;
     in property <length> text-w;
     padding-bottom: (28px * S.k);

@@ -47,6 +47,10 @@ pub const Z_QUICK: i32 = 21;
 pub const Z_SETTINGS_RAIL: i32 = 22;
 pub const Z_SETTINGS_FIND: i32 = 23;
 pub const Z_SETTINGS_HITS: i32 = 24;
+/// The setup's buttons (Back, Skip, Next…) under the step's rows; the rows are Z_SETTINGS.
+pub const Z_SETUP_NAV: i32 = 25;
+/// The boot health notice's OK button.
+pub const Z_NOTICE: i32 = 26;
 
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub enum Overlay {
@@ -64,6 +68,10 @@ pub enum Overlay {
     PowerCountdown = 12,
     PowerDialog = 13,
     Quick = 14,
+    /// PS5 Launcher OS's first-start setup.
+    Setup = 15,
+    /// The boot health check's notice.
+    Notice = 16,
 }
 
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
@@ -285,6 +293,9 @@ pub struct App {
     /// The System pages of Settings (Session and OS mode).
     pub sys: crate::system_ui::SystemUi,
     pub osk: crate::osk_ui::OskUi,
+    /// PS5 Launcher OS: the first-start setup and the boot health notice.
+    pub setup: crate::setup_ui::SetupUi,
+    pub notice: crate::setup_ui::NoticeUi,
     /// The last input came from a controller (not a key or a click): text fields open the
     /// on-screen keyboard.
     pub last_input_pad: bool,
@@ -446,6 +457,8 @@ pub fn run(ui: AppWindow, monitors: Vec<Monitor>, target_monitor: Option<Monitor
         quick: Default::default(),
         sys: Default::default(),
         osk: Default::default(),
+        setup: Default::default(),
+        notice: Default::default(),
         last_input_pad: false,
     };
     ui.set_grid_rows(ModelRc::from(app.grid_model.clone()));
@@ -478,6 +491,10 @@ pub fn run(ui: AppWindow, monitors: Vec<Monitor>, target_monitor: Option<Monitor
     // PS5 Launcher OS: resume the NVIDIA driver's install after a restart, and compare the
     // screen's card with the image.
     with_app(|app| app.nvidia_start());
+    // PS5 Launcher OS: read what the first-start setup needs while the welcome screen shows, and
+    // the boot health check's notice. Both show once the welcome screen is done.
+    with_app(|app| app.setup_start());
+    with_app(|app| app.notice_start());
 
     wire_callbacks(&ui);
     crate::gamepad::spawn(|p| post(move |app| app.on_pad(p)));
@@ -535,7 +552,7 @@ fn wire_callbacks(ui: &AppWindow) {
         app.push_all();
         app.set_grid_scroll(app.grid_scroll, 0);
         if app.view == 1 && app.zone == Z_GRID { app.ensure_grid_visible(); }
-        if app.overlay == Overlay::Settings {
+        if matches!(app.overlay, Overlay::Settings | Overlay::Setup) {
             app.scroll_settings();
         }
     }));
@@ -1770,6 +1787,8 @@ impl App {
             Overlay::PowerDialog => self.act_power_dialog(a),
             Overlay::PowerCountdown => self.act_power_countdown(a),
             Overlay::Quick => self.act_quick(a),
+            Overlay::Setup => self.act_setup(a),
+            Overlay::Notice => self.act_notice(a),
             Overlay::None => self.act_main(a),
         }
     }

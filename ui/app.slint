@@ -1,10 +1,11 @@
-import { S, Theme, Icons, Zone, DownloadData, BootStep, ChipData, ActionData, TileData, HeroData, CardData, CardRow, GenreChip, Fact, FactRow, Shot, HubData, SettingData, ToastData, MenuItem, RunningData, PowerRow, QuickCard, QuickItem, SettingsCat, SettingsHit, NvCard, PairCard, OskKey, OskField } from "theme.slint";
+import { S, Theme, Icons, Zone, DownloadData, BootStep, ChipData, ActionData, TileData, HeroData, CardData, CardRow, GenreChip, Fact, FactRow, Shot, HubData, SettingData, ToastData, MenuItem, RunningData, PowerRow, QuickCard, QuickItem, SettingsCat, SettingsHit, NvCard, PairCard, OskKey, OskField, SetupView, NoticeView } from "theme.slint";
 import { FocusRing, Chip, Btn, Kicker, Badge, Switch, KeyCap, BackButton, Shimmer, Cover } from "widgets.slint";
 import { DownloadsSheet, DownloadConsent } from "downloads.slint";
 import { LibraryFilter, LibrarySortPicker } from "library.slint";
-import { PowerMenu, PowerDialog, PowerCountdown } from "power.slint";
+import { PowerMenu, PowerDialog, PowerCountdown, NoticeDialog } from "power.slint";
 import { QuickMenu } from "quick.slint";
 import { SettingsPage } from "settings.slint";
+import { SetupPage } from "setup.slint";
 import { Osk } from "osk.slint";
 import { Palette } from "std-widgets.slint";
 
@@ -149,7 +150,7 @@ export component AppWindow inherits Window {
 
     // ---------------------------------------------------------------- state from Rust
     in property <int> view;          // 0 home, 1 library
-    in property <int> overlay;       // 0 none, 1 hub, 2 settings, 3 viewer, 4 launch, 5 menu, 11-13 power, 14 quick (Overlay in app.rs)
+    in property <int> overlay;       // 0 none, 1 hub, 2 settings, 3 viewer, 4 launch, 5 menu, 11-13 power, 14 quick, 15 setup, 16 notice (Overlay in app.rs)
     in property <int> zone;
     in property <int> idx;
     in property <string> clock;
@@ -272,6 +273,11 @@ export component AppWindow inherits Window {
     in property <NvCard> settings-nv;
     // The Controllers page: pairing a controller (its steps, the buttons to hold, an error).
     in property <PairCard> settings-pair;
+    // PS5 Launcher OS's first-start setup: its stepper, title, text and buttons. Its rows and
+    // cards are the Settings ones above.
+    in property <SetupView> setup;
+    // The boot health check's notice.
+    in property <NoticeView> notice;
 
     in property <image> viewer-image;
     in property <string> viewer-count;
@@ -1221,6 +1227,17 @@ export component AppWindow inherits Window {
             back => { root.settings-back(); }
         }
 
+        // ------------------------------------------------------------ FIRST-START SETUP
+        if root.overlay == 15: SetupPage {
+            view: root.setup; zone: root.zone; idx: root.idx;
+            rows: root.settings; edit-index: root.edit-index; edit-text <=> root.edit-text;
+            scroll-y <=> root.settings-y;
+            key: root.settings-key; key-last: root.settings-key-last; nv: root.settings-nv; pair: root.settings-pair;
+            pad: root.pad-hints; osk: root.osk-open; caret: root.edit-caret;
+            click(zone, i) => { root.click(zone, i); }
+            edit-done(text, accepted) => { root.edit-done(text, accepted); }
+        }
+
         // ------------------------------------------------------------ BACKGROUND DOWNLOADS
         if root.overlay == 8: LibrarySortPicker {
             options: root.sort-options; selected: root.idx; current: root.sort-selected;
@@ -1858,6 +1875,12 @@ export component AppWindow inherits Window {
         if root.overlay == 12: PowerCountdown {
             text: root.power-counting; seconds: root.power-seconds; pad: root.pad-hints;
             close => { root.click(Zone.power, -1); }
+        }
+
+        // ------------------------------------------------------------ BOOT HEALTH NOTICE
+        if root.overlay == 16: NoticeDialog {
+            notice: root.notice; focused: root.zone == Zone.notice;
+            ok => { root.click(Zone.notice, 0); }
         }
 
         // ------------------------------------------------------------ ON-SCREEN KEYBOARD

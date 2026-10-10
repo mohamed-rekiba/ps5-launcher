@@ -148,7 +148,8 @@ impl App {
     }
 
     pub fn open_quick_menu(&mut self) {
-        if self.boot.active || self.quick_open() || power_ui::is_power(self.overlay) {
+        // Not over the setup or the notice: its cards open Settings pages, which the setup uses.
+        if self.boot.active || self.quick_open() || power_ui::is_power(self.overlay) || self.setup.active || self.overlay == Overlay::Notice {
             return;
         }
         self.end_editing();

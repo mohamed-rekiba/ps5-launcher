@@ -121,6 +121,8 @@ export global Zone {
     out property <int> settings-rail: 22;
     out property <int> settings-find: 23;
     out property <int> settings-hits: 24;
+    out property <int> setup-nav: 25;
+    out property <int> notice: 26;
 }
 
 // dot: KytyPS5 compatibility level (0 none, 1 in-game, 2 menus, 3 boots, 4 doesn't boot, 5 untested)
@@ -248,6 +250,11 @@ export struct NvCard { show: bool, step: int, kind: int, title: string, lines: [
 // 2 pair, 3 connect, 4 all done). kind: 0 a step runs or waits, 1 an error, 2 done. lines: the text
 // under the title, the first one larger. pictures: the buttons to hold, for each controller type.
 export struct PairCard { show: bool, step: int, kind: int, title: string, lines: [string], pictures: bool }
+// The first-start setup (PS5 Launcher OS): the line over the stepper, the steps' labels, the
+// step on screen (from 0), its title and text, and its buttons, the main one last.
+export struct SetupView { kicker: string, steps: [string], at: int, title: string, text: string, buttons: [string] }
+// The boot health check's notice: a title, its text, and one short line of details.
+export struct NoticeView { title: string, lines: [string], details: string }
 // A Settings search hit: the row's label and its category.
 export struct SettingsHit { label: string, place: string }
 export struct RunningData { active: bool, name: string, time: string }

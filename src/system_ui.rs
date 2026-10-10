@@ -304,7 +304,7 @@ pub fn load_os() -> Result<osupdate::Status, String> {
 }
 
 /// Run `work` off the UI thread, then `done` with its result on it.
-fn bg<T: Send + 'static>(work: impl FnOnce() -> T + Send + 'static, done: impl FnOnce(&mut App, T) + Send + 'static) {
+pub(crate) fn bg<T: Send + 'static>(work: impl FnOnce() -> T + Send + 'static, done: impl FnOnce(&mut App, T) + Send + 'static) {
     std::thread::spawn(move || {
         let out = work();
         let _ = slint::invoke_from_event_loop(move || with_app(move |app| done(app, out)));
@@ -387,6 +387,7 @@ impl App {
                     (app.sys.time.clock, app.sys.time.regions) = (Some(clock), regions);
                 }
                 app.sys_show();
+                app.setup_probed();
             },
         );
         self.pads_load();
@@ -431,13 +432,29 @@ impl App {
         }
     }
 
-    /// Show what changed: the rail's pages and the open page. A row being typed in keeps the page
-    /// as it is until the typing ends.
+    /// The System page on screen, in Settings or in the setup.
+    pub fn sys_page(&self) -> Option<Cat> {
+        let shown = matches!(self.overlay, Overlay::Settings | Overlay::Setup);
+        shown.then(|| self.settings_nav.cats.get(self.settings_nav.cat).copied()).flatten()
+    }
+
+    /// Close what a page has open (pairing, the zone picker), when the setup leaves it.
+    pub fn sys_close_pages(&mut self) {
+        if self.sys.ctl.pairing.take().is_some() {
+            self.sys.gen.pair.next();
+        }
+        self.sys.time.picker = None;
+    }
+
+    /// Show what changed: the rail's pages and the open page, in Settings or in the setup. A row
+    /// being typed in keeps the page as it is until the typing ends.
     fn sys_show(&mut self) {
-        if self.overlay != Overlay::Settings {
+        let setup = self.overlay == Overlay::Setup;
+        if self.overlay != Overlay::Settings && !setup {
             return;
         }
-        let cats = categories(Mode::current(), self.sys.tools);
+        // The setup shows one page at a time: its rail does not change.
+        let cats = if setup { self.settings_nav.cats.clone() } else { categories(Mode::current(), self.sys.tools) };
         let nav = &mut self.settings_nav;
         if cats != nav.cats {
             let open = nav.cats.get(nav.cat).copied();
@@ -452,16 +469,24 @@ impl App {
         if self.edit_index >= 0 {
             return self.push_settings();
         }
+        if setup && self.setup.machine.is_none() {
+            return self.push_setup();
+        }
         self.build_settings();
         if self.zone == Z_SETTINGS {
             let headers: Vec<bool> = self.settings_rows.iter().map(|r| r.kind == 0).collect();
             match settle(&headers, self.idx.max(0) as usize) {
                 Some(i) if i as i32 != self.idx => self.set_focus(Z_SETTINGS, i as i32),
                 Some(_) => {}
+                // The setup's page has no rows left: its buttons.
+                None if setup => self.set_focus(Z_SETUP_NAV, self.setup_main_button()),
                 None => self.set_focus(Z_SETTINGS_RAIL, self.settings_nav.cat as i32),
             }
         }
         self.push_settings();
+        if setup {
+            self.setup_changed();
+        }
     }
 
     fn sys_error(&mut self, title: &str, error: &str) {
@@ -471,7 +496,7 @@ impl App {
     }
 
     /// Run `call`; a failure shows as a toast titled `fail`. `done` gets whether it worked.
-    fn sys_run(&mut self, call: Call, fail: &'static str, done: impl FnOnce(&mut App, bool) + Send + 'static) {
+    pub(crate) fn sys_run(&mut self, call: Call, fail: &'static str, done: impl FnOnce(&mut App, bool) + Send + 'static) {
         bg(move || system::call(&call), move |app, res| {
             if let Err(e) = &res {
                 app.sys_error(fail, e);
@@ -492,11 +517,13 @@ impl App {
         if cats.contains(&Cat::Sound) {
             self.sound_rows(&mut rows);
         }
+        // The setup shows only the driver on Display, and only the drives for games on Storage.
+        let setup = self.setup.active;
         if cats.contains(&Cat::Display) {
-            self.display_rows(&mut rows);
+            self.display_rows(&mut rows, setup);
         }
         if cats.contains(&Cat::Storage) {
-            self.storage_rows(&mut rows);
+            self.storage_rows(&mut rows, setup);
         }
         if cats.contains(&Cat::OsUpdates) {
             self.os_rows(&mut rows);
@@ -757,7 +784,7 @@ impl App {
     /// Each clock tick: read the controllers again when one came or went, and the batteries now
     /// and then while the Quick Menu or the Controllers page shows them.
     pub fn pads_tick(&mut self, count_changed: bool) {
-        let page = self.overlay == Overlay::Settings && self.settings_nav.cats.get(self.settings_nav.cat) == Some(&Cat::Controllers);
+        let page = self.sys_page() == Some(Cat::Controllers);
         let shown = self.overlay == Overlay::Quick || page;
         if count_changed || (shown && due(self.sys.ctl.read_at, Instant::now(), BATTERY_EVERY)) {
             self.pads_load();
@@ -1091,7 +1118,7 @@ impl App {
 
     /// Focus on `id` when the Controllers page has focus; otherwise only show the change.
     fn pair_focus(&mut self, id: SId) {
-        let page = self.overlay == Overlay::Settings && self.settings_nav.cats.get(self.settings_nav.cat) == Some(&Cat::Controllers);
+        let page = self.sys_page() == Some(Cat::Controllers);
         if page && self.zone == Z_SETTINGS {
             self.sys_focus(id);
         } else {
@@ -1244,12 +1271,16 @@ impl App {
     // ------------------------------------------------------------------ Storage
 
     /// Whether `dir` is one of the game folders.
-    fn is_game_dir(&self, dir: &Path) -> bool {
+    pub(crate) fn is_game_dir(&self, dir: &Path) -> bool {
         self.cfg.lock().unwrap().game_dirs.iter().any(|d| util::expand_home(d) == dir)
     }
 
-    fn storage_rows(&self, rows: &mut Vec<(Cat, SId, SettingData)>) {
+    /// `games`: only the drives that are not the system's and have a file system mounted.
+    fn storage_rows(&self, rows: &mut Vec<(Cat, SId, SettingData)>, games: bool) {
         for (d, drive) in self.sys.drives.iter().enumerate() {
+            if games && (drive.system || !drive.partitions.iter().any(|p| p.mountpoint.as_deref().is_some_and(|mp| mp.starts_with('/')))) {
+                continue;
+            }
             header(rows, Cat::Storage, &storage::drive_title(drive));
             let listed: Vec<(usize, &storage::Partition)> = drive.partitions.iter().enumerate().filter(|(_, p)| storage::listed(p)).collect();
             if listed.is_empty() {
@@ -1474,7 +1505,7 @@ impl App {
     // ------------------------------------------------------------------ Display
 
     /// The NVIDIA driver's offer for the screen's card.
-    fn nv_offer(&self) -> Offer {
+    pub(crate) fn nv_offer(&self) -> Offer {
         let Some(d) = &self.sys.display.state else { return Offer::Nothing };
         nvidia::offer(d.image, Some(&d.screen.card), &self.cfg.lock().unwrap().nvidia)
     }
@@ -1490,7 +1521,7 @@ impl App {
     }
 
     /// `helper switch nvidia` runs.
-    fn nv_downloading(&self) -> bool {
+    pub(crate) fn nv_downloading(&self) -> bool {
         self.sys.display.busy == Some("Downloading…")
     }
 
@@ -1523,7 +1554,8 @@ impl App {
         self.sys.display.key.as_deref().unwrap_or_default().chars().map(|c| c.to_string().into()).collect()
     }
 
-    fn display_rows(&self, rows: &mut Vec<(Cat, SId, SettingData)>) {
+    /// `driver`: only the card and the NVIDIA driver (the setup's Graphics step: Skip is its Later).
+    fn display_rows(&self, rows: &mut Vec<(Cat, SId, SettingData)>, driver: bool) {
         let Some(d) = &self.sys.display.state else { return };
         let busy = self.sys.display.busy;
         let mut r = row(4, &Self::gpu_name(d));
@@ -1546,7 +1578,7 @@ impl App {
                     (install.2.value, install.2.value_kind) = (download.into(), 3);
                 }
                 rows.push(install);
-                if busy.is_none() {
+                if busy.is_none() && !driver {
                     rows.push(action(SId::NvLater, "Later", "The offer stays here, on System → Display"));
                 }
             }
@@ -1576,6 +1608,9 @@ impl App {
             Offer::UseOpenSource => rows.push(action(SId::NvOpenSource, "Use the open-source driver", "Switches the system back at the next restart. Games run slower on it.")),
             Offer::SwitchBack => rows.push(action(SId::NvOpenSource, "Switch to the open-source driver", "Starts the main system at the next restart")),
             Offer::Nothing | Offer::OldCard | Offer::UnknownCard => {}
+        }
+        if driver {
+            return;
         }
 
         header(rows, Cat::Display, "SCREEN OUTPUT");
@@ -1648,6 +1683,8 @@ impl App {
     /// compare the screen's card with the image.
     pub fn nvidia_start(&mut self) {
         let Some(image) = system::os_image() else { return };
+        // The setup's Graphics step tells the player instead of these toasts.
+        let quiet = self.setup_due();
         let before = self.cfg.lock().unwrap().nvidia.clone();
         let mut flow = before.clone();
         let resumed = nvidia::resume(&mut flow, image, &Self::boot());
@@ -1672,6 +1709,7 @@ impl App {
                 app.sys.display.state = Some(state);
             }
             match app.nv_offer() {
+                _ if quiet => {}
                 Offer::Install => app.toast("NVIDIA card found", "Install the NVIDIA driver in Settings → Display to play at full speed.", 0),
                 Offer::SwitchBack => app.toast("No NVIDIA card drives the screen", "Switch to the open-source driver in Settings → Display.", 0),
                 _ => {}
@@ -1692,6 +1730,8 @@ impl App {
                         nvidia::key_checked(&mut flow, state);
                         app.save_cfg(|c| c.nvidia = flow);
                         match state {
+                            // The setup's Graphics step shows it.
+                            _ if app.setup_due() => {}
                             nvidia::KeyState::Enrolled | nvidia::KeyState::SecureBootOff => {
                                 app.toast("Key enrolled", "Download the NVIDIA driver in Settings → Display.", 1)
                             }
@@ -1734,7 +1774,7 @@ impl App {
     }
 
     /// Install driver (to the NVIDIA image), or the way back (to main).
-    fn nv_switch(&mut self, to: Image) {
+    pub(crate) fn nv_switch(&mut self, to: Image) {
         if self.sys.display.busy.is_some() {
             return;
         }
@@ -1750,13 +1790,19 @@ impl App {
             match end {
                 SwitchEnd::Staged => {
                     app.sys.display.key = None;
-                    app.toast("Ready: restart to finish", "Choose Restart now on Settings → Display.", 1);
+                    if app.setup.active {
+                        app.toast("NVIDIA driver downloaded", "Restart at the end of the setup to finish installing it.", 1);
+                    } else {
+                        app.toast("Ready: restart to finish", "Choose Restart now on Settings → Display.", 1);
+                    }
                     // The Power menu's Restart follows the staged system.
                     app.check_staged();
                 }
                 SwitchEnd::Password(password) => {
                     app.sys.display.key = Some(password);
-                    app.toast("Enroll the driver's key", "The steps and the password are on Settings → Display.", 0);
+                    if !app.setup.active {
+                        app.toast("Enroll the driver's key", "The steps and the password are on Settings → Display.", 0);
+                    }
                     app.ui().set_settings_y(0.0);
                 }
                 SwitchEnd::Failed(e) => {
@@ -1805,7 +1851,7 @@ impl App {
     }
 
     /// Restart now: the Power menu's restart, with its countdown and what a restart would lose.
-    fn nv_restart(&mut self) {
+    pub(crate) fn nv_restart(&mut self) {
         let staged = self.sys.os.status.as_ref().is_some_and(|s| s.staged.is_some()) || matches!(self.cfg.lock().unwrap().nvidia.step, nvidia::Step::Staged { .. });
         self.guard_power(PowerAction::Restart { update: staged });
     }

@@ -78,6 +78,8 @@ pub enum Task {
     KeyState,
     /// Change to the main or the NVIDIA image (next restart).
     Switch(Image),
+    /// Delete the boot health check's notice: the launcher showed it.
+    HealthAck,
 }
 
 /// A helper task's call. Its time is the helper's own deadline for the task, plus a margin.
@@ -93,6 +95,8 @@ pub fn helper_call(task: Task) -> Call {
         Task::KeyState => (&["key-state"], 120 + 2 * 30 + HELPER_MARGIN),
         Task::Switch(Image::Main) => (&["switch", "main"], 30 + 2 * 60 * 60 + LONG_HELPER_MARGIN),
         Task::Switch(Image::Nvidia) => (&["switch", "nvidia"], 30 + 120 + 2 * 30 + 2 * 60 * 60 + LONG_HELPER_MARGIN),
+        // The helper only deletes a file.
+        Task::HealthAck => (&["health-ack"], HELPER_MARGIN),
     };
     let mut all = vec![HELPER];
     all.extend_from_slice(args);
