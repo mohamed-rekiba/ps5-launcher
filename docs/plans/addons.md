@@ -162,3 +162,37 @@ fallback go away. The embedded data stays only as the source of the default copi
 
 Showing the second emulator in the UI and launching it stay with the later phases. Themes come
 after the emulator phases.
+
+## Emulator media (advisor's decision)
+
+An emulator addon carries its **identity**; the theme owns the **look**.
+
+| Owner | Media |
+|---|---|
+| Emulator addon | a square icon, an optional transparent logo, an optional background, the controls data, and the media notices |
+| Theme | colours, fonts, gradients, panel backgrounds, sounds, controller button pictures, the loading animation, the layout choice; it may also override an emulator's icon, logo or background by emulator id |
+| Console (PS4, PS5) | the id, name, abilities and controller meaning, stored once. A theme may add console badges and backgrounds by console id |
+| Game | the covers, logos, screenshots and hero art the launcher already fetches. Showcase stays about games; the emulator's background only fills in when a game has no art |
+
+New optional fields in `emulator.yaml`, next to `icon` and `controls`: `logo`, `background` and
+`media_notices` (all `RelPath`). No emulator colours, fonts, sounds or layout fields.
+
+```text
+emulators/<id>/emulator.yaml, controls.yaml, media/icon.svg, media/logo.png,
+               media/background.webp, MEDIA-NOTICES.md, licenses/<licence>.txt
+themes/<id>/theme.yaml, backgrounds/, icons/, emulators/<emulator-id>/, consoles/<console-id>/
+```
+
+- **Choice order for each picture:** the theme's override, then the addon's file, then a generic
+  icon (or the name as text) or the theme's background, then the compiled emergency picture. The
+  emulator's name always shows. A missing or broken picture gives one problem message and never
+  stops a launch.
+- **Formats:** SVG only for icons and logos, static only: no scripts, no external references,
+  no embedded active content, no animation. PNG and WebP for every picture. Sizes: icons
+  512×512, logos within 1024×256, backgrounds 1920×1080. Decoding stops above 4096 pixels on a
+  side or 8 megapixels, on top of the 16 MiB file and 64 MiB folder limits.
+- **Licences:** shadPS4's logo files are GPL-2.0-or-later (their `REUSE.toml`); credit Xphalnos
+  and keep the notices. KytyPS5 is GPL-2.0-only, but its logo's licence is not confirmed: ship a
+  generic icon until it is.
+- **When:** after Phase 2, before Phase 5's generated Settings rows: the safe picture loading
+  and the fallbacks, then the cleared pictures. Theme overrides come with the theme loader.
