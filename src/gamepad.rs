@@ -24,7 +24,10 @@ pub enum Pad {
     L2,
     R2,
     Options,
+    /// The PS / Guide button, pressed and let go within 2 seconds (sent on release).
     Ps,
+    /// The PS / Guide button held for 2 seconds (sent once, while it is still held).
+    PsHold,
 }
 
 const EV_KEY: u16 = 1;
@@ -77,6 +80,7 @@ struct Device {
     ranges: HashMap<u16, (i32, i32)>,
     axes: HashMap<u16, f32>,
     buttons: [bool; 4], // dpad buttons up/down/left/right
+    ps: PsButton,
 }
 
 /// evdev nodes of gamepads (devices with a joystick handler and a south face button).
@@ -199,7 +203,7 @@ fn open_device(path: &str) -> Option<Device> {
         }
     }
     crate::log!("controller connected: {path}");
-    Some(Device { fd, path: path.to_string(), ranges, axes: HashMap::new(), buttons: [false; 4] })
+    Some(Device { fd, path: path.to_string(), ranges, axes: HashMap::new(), buttons: [false; 4], ps: PsButton::default() })
 }
 
 /// Spawns the input thread. `emit` receives presses (directions auto-repeat while held).
@@ -245,6 +249,54 @@ impl Repeater {
     }
 }
 
+/// The PS button of one controller: a short press is `Pad::Ps` when it is let go; holding it for
+/// 2 seconds is `Pad::PsHold`, sent once while it is held, and then letting go sends nothing.
+#[derive(Default)]
+struct PsButton {
+    held_since: Option<Instant>,
+    /// PsHold was sent for the current press.
+    fired: bool,
+}
+
+const PS_HOLD: Duration = Duration::from_secs(2);
+
+impl PsButton {
+    fn press(&mut self, now: Instant) {
+        // A press while already held keeps the first press's deadline.
+        if self.held_since.is_none() {
+            self.held_since = Some(now);
+            self.fired = false;
+        }
+    }
+
+    fn release(&mut self, now: Instant, mut emit: impl FnMut(Pad)) {
+        let Some(since) = self.held_since.take() else { return };
+        if self.fired {
+            return;
+        }
+        // The release can arrive before an update has seen the deadline pass.
+        emit(if now >= since + PS_HOLD { Pad::PsHold } else { Pad::Ps });
+    }
+
+    /// Sends PsHold when the button has been held for 2 seconds at `now`.
+    fn update(&mut self, now: Instant, mut emit: impl FnMut(Pad)) {
+        if let Some(since) = self.held_since {
+            if !self.fired && now >= since + PS_HOLD {
+                self.fired = true;
+                emit(Pad::PsHold);
+            }
+        }
+    }
+
+    /// How long until PsHold is due (zero if overdue), or None if nothing is pending.
+    fn next_due(&self, now: Instant) -> Option<Duration> {
+        match self.held_since {
+            Some(since) if !self.fired => Some((since + PS_HOLD).saturating_duration_since(now)),
+            _ => None,
+        }
+    }
+}
+
 #[cfg(target_os = "linux")]
 fn run(emit: impl Fn(Pad)) {
     let mut devices: Vec<Device> = Vec::new();
@@ -266,9 +318,14 @@ fn run(emit: impl Fn(Pad)) {
             std::thread::sleep(Duration::from_secs(3));
             continue;
         }
-        // Wait for input, or until the next key-repeat is due.
+        // Wait for input, or until the next key-repeat or PS hold is due.
         let now = Instant::now();
-        let timeout = repeater.next_due(now).unwrap_or(Duration::from_millis(3000));
+        let timeout = devices
+            .iter()
+            .filter_map(|d| d.ps.next_due(now))
+            .chain(repeater.next_due(now))
+            .min()
+            .unwrap_or(Duration::from_millis(3000));
         let mut fds: Vec<libc::pollfd> = devices.iter().map(|d| libc::pollfd { fd: d.fd, events: libc::POLLIN, revents: 0 }).collect();
         unsafe { libc::poll(fds.as_mut_ptr(), fds.len() as _, timeout.as_millis().min(3000) as i32) };
 
@@ -294,6 +351,12 @@ fn run(emit: impl Fn(Pad)) {
                 let code = u16::from_ne_bytes([ev[18], ev[19]]);
                 let value = i32::from_ne_bytes([ev[20], ev[21], ev[22], ev[23]]);
                 match typ {
+                    // 1 = pressed, 0 = released; 2 is the kernel's key repeat.
+                    EV_KEY if code == BTN_MODE => match value {
+                        1 => dev.ps.press(Instant::now()),
+                        0 => dev.ps.release(Instant::now(), |p| emit(p)),
+                        _ => {}
+                    },
                     EV_KEY => match map_button(code) {
                         Some(p @ (Pad::Up | Pad::Down | Pad::Left | Pad::Right)) => {
                             dev.buttons[p as usize] = value != 0;
@@ -327,7 +390,11 @@ fn run(emit: impl Fn(Pad)) {
             dirs[2] |= d.buttons[2] || ax(16) < -0.5 || ax(0) < -0.55;
             dirs[3] |= d.buttons[3] || ax(16) > 0.5 || ax(0) > 0.55;
         }
-        repeater.update(dirs, Instant::now(), |p| emit(p));
+        let now = Instant::now();
+        repeater.update(dirs, now, |p| emit(p));
+        for d in &mut devices {
+            d.ps.update(now, |p| emit(p));
+        }
     }
 }
 
@@ -364,6 +431,7 @@ fn run(emit: impl Fn(Pad)) {
     struct State {
         dpad: [bool; 4],
         stick: [f32; 2], // x, y (gilrs reports up as positive y)
+        ps: PsButton,
     }
 
     let mut gilrs = match Gilrs::new() {
@@ -376,8 +444,16 @@ fn run(emit: impl Fn(Pad)) {
     let mut states: HashMap<GamepadId, State> = HashMap::new();
     let mut repeater = Repeater::default();
     loop {
-        // Sleep until input arrives or a direction repeat is due (never long: pads can appear).
-        let wait = repeater.next_due(Instant::now()).unwrap_or(Duration::from_millis(500)).min(Duration::from_millis(500));
+        // Sleep until input arrives or a direction repeat or PS hold is due (never long: pads can
+        // appear).
+        let now = Instant::now();
+        let wait = states
+            .values()
+            .filter_map(|st| st.ps.next_due(now))
+            .chain(repeater.next_due(now))
+            .min()
+            .unwrap_or(Duration::from_millis(500))
+            .min(Duration::from_millis(500));
         let mut first = gilrs.next_event_blocking(Some(wait));
         while let Some(Event { id, event, .. }) = first.take().or_else(|| gilrs.next_event()) {
             let st = states.entry(id).or_default();
@@ -385,16 +461,15 @@ fn run(emit: impl Fn(Pad)) {
                 // Directions are tracked as held state; the Repeater turns them into presses.
                 EventType::ButtonPressed(b, _) => match map_gilrs_button(b) {
                     Some(p) if (p as usize) < 4 => st.dpad[p as usize] = true,
+                    Some(Pad::Ps) => st.ps.press(Instant::now()),
                     Some(p) => emit(p),
                     None => {}
                 },
-                EventType::ButtonReleased(b, _) => {
-                    if let Some(p) = map_gilrs_button(b) {
-                        if (p as usize) < 4 {
-                            st.dpad[p as usize] = false;
-                        }
-                    }
-                }
+                EventType::ButtonReleased(b, _) => match map_gilrs_button(b) {
+                    Some(p) if (p as usize) < 4 => st.dpad[p as usize] = false,
+                    Some(Pad::Ps) => st.ps.release(Instant::now(), |p| emit(p)),
+                    _ => {}
+                },
                 EventType::AxisChanged(Axis::LeftStickX, v, _) => st.stick[0] = v,
                 EventType::AxisChanged(Axis::LeftStickY, v, _) => st.stick[1] = v,
                 EventType::Connected => crate::log!("controller connected: {}", gilrs.gamepad(id).name()),
@@ -430,7 +505,11 @@ fn run(emit: impl Fn(Pad)) {
             dirs[2] |= st.dpad[2] || st.stick[0] < -0.55;
             dirs[3] |= st.dpad[3] || st.stick[0] > 0.55;
         }
-        repeater.update(dirs, Instant::now(), |p| emit(p));
+        let now = Instant::now();
+        repeater.update(dirs, now, |p| emit(p));
+        for st in states.values_mut() {
+            st.ps.update(now, |p| emit(p));
+        }
     }
 }
 
@@ -479,6 +558,83 @@ mod tests {
         assert_eq!(step(&mut r, [false, true, false, true], t0, 380), [Pad::Down]);
         // Right's initial pause ends at 580, and Down (repeating every 85 ms since 380) is due too.
         assert_eq!(step(&mut r, [false, true, false, true], t0, 580), [Pad::Down, Pad::Right]);
+    }
+
+    fn ms(t0: Instant, at: u64) -> Instant {
+        t0 + Duration::from_millis(at)
+    }
+
+    /// Let go of the PS button at `at` ms and collect what it sends.
+    fn release(b: &mut PsButton, t0: Instant, at: u64) -> Vec<Pad> {
+        let mut out = Vec::new();
+        b.release(ms(t0, at), |p| out.push(p));
+        out
+    }
+
+    /// Update the PS button at `at` ms and collect what it sends.
+    fn tick(b: &mut PsButton, t0: Instant, at: u64) -> Vec<Pad> {
+        let mut out = Vec::new();
+        b.update(ms(t0, at), |p| out.push(p));
+        out
+    }
+
+    #[test]
+    fn a_short_ps_press_is_sent_when_let_go() {
+        let (mut b, t0) = (PsButton::default(), Instant::now());
+        b.press(t0);
+        assert!(tick(&mut b, t0, 500).is_empty(), "nothing while held");
+        assert_eq!(release(&mut b, t0, 1999), [Pad::Ps]);
+        assert!(tick(&mut b, t0, 3000).is_empty(), "no hold after letting go");
+    }
+
+    #[test]
+    fn holding_ps_for_2_seconds_sends_the_hold_once() {
+        let (mut b, t0) = (PsButton::default(), Instant::now());
+        b.press(t0);
+        assert!(tick(&mut b, t0, 1999).is_empty());
+        assert_eq!(tick(&mut b, t0, 2000), [Pad::PsHold], "exactly at 2 s");
+        assert!(tick(&mut b, t0, 2500).is_empty(), "only once");
+        assert!(release(&mut b, t0, 3000).is_empty(), "letting go sends no short press");
+    }
+
+    #[test]
+    fn a_late_release_still_counts_as_a_hold() {
+        // The release arrives before an update ran past the deadline.
+        let (mut b, t0) = (PsButton::default(), Instant::now());
+        b.press(t0);
+        assert_eq!(release(&mut b, t0, 2100), [Pad::PsHold]);
+    }
+
+    #[test]
+    fn repeated_presses_and_stray_releases_are_harmless() {
+        let (mut b, t0) = (PsButton::default(), Instant::now());
+        assert!(release(&mut b, t0, 0).is_empty(), "release without a press");
+        b.press(t0);
+        b.press(ms(t0, 1500));
+        assert_eq!(tick(&mut b, t0, 2000), [Pad::PsHold], "a second press keeps the first deadline");
+        release(&mut b, t0, 2100);
+        b.press(ms(t0, 3000));
+        assert_eq!(release(&mut b, t0, 3100), [Pad::Ps], "a new press starts over");
+    }
+
+    #[test]
+    fn next_due_says_when_the_hold_is_due() {
+        let (mut b, t0) = (PsButton::default(), Instant::now());
+        assert_eq!(b.next_due(t0), None);
+        b.press(t0);
+        assert_eq!(b.next_due(ms(t0, 500)), Some(Duration::from_millis(1500)));
+        assert_eq!(b.next_due(ms(t0, 2500)), Some(Duration::ZERO), "overdue means now");
+        tick(&mut b, t0, 2500);
+        assert_eq!(b.next_due(ms(t0, 2600)), None, "nothing pending after the hold fired");
+    }
+
+    #[test]
+    fn each_controller_has_its_own_ps_button() {
+        let (mut a, mut b, t0) = (PsButton::default(), PsButton::default(), Instant::now());
+        a.press(t0);
+        b.press(ms(t0, 1000));
+        assert_eq!(release(&mut b, t0, 1500), [Pad::Ps]);
+        assert_eq!(tick(&mut a, t0, 2000), [Pad::PsHold]);
     }
 
     #[test]

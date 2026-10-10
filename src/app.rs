@@ -1376,6 +1376,11 @@ impl App {
             self.sessions.toggle_focus();
             return;
         }
+        if p == Pad::PsHold {
+            // Opens the Power menu once it exists (Phase 3 of docs/plans/ps5-launcher-os.md).
+            crate::log!("PS button held");
+            return;
+        }
         if !crate::display::window_has_focus(&self.ui()) {
             return;
         }
@@ -1397,7 +1402,7 @@ impl App {
             Pad::R1 => Act::TabNext,
             Pad::L2 => Act::PageUp,
             Pad::R2 => Act::PageDown,
-            Pad::Ps => return,
+            Pad::Ps | Pad::PsHold => return,
         };
         if self.search_editing || self.edit_index >= 0 {
             // Controller input ends text editing.
