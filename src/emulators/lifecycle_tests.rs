@@ -626,6 +626,94 @@ fn a_recovery_that_finds_another_folder_keeps_both() {
     assert_tidy(r.path());
 }
 
+// ------------------------------------------------------------------ links out of the folder
+
+/// Every file under `dir`, with its content: to show that nothing was written there.
+fn contents(dir: &Path) -> Vec<(String, String)> {
+    let mut out = Vec::new();
+    for name in names(dir) {
+        let path = dir.join(&name);
+        if path.is_dir() {
+            out.extend(contents(&path).into_iter().map(|(p, c)| (format!("{name}/{p}"), c)));
+        } else {
+            out.push((name, fs::read_to_string(&path).unwrap_or_default()));
+        }
+    }
+    out
+}
+
+#[test]
+fn a_linked_folder_of_the_launchers_is_never_followed() {
+    let refused = |name: &str| Problem::new(name, "is a symbolic link; the launcher does not follow links in its folders");
+
+    let r = root();
+    let outside = root();
+    run(r.path(), &[kyty_v1()]);
+    fs::remove_dir(r.path().join("emulators/.staging")).unwrap();
+    std::os::unix::fs::symlink(outside.path(), r.path().join("emulators/.staging")).unwrap();
+    assert_eq!(run(r.path(), &[kyty_v2()]), [refused("emulators/.staging")]);
+    assert_eq!(read(r.path(), "emulators/kyty/emulator.yaml"), "kyty v1\n");
+    assert_eq!(contents(outside.path()), []);
+
+    let r = root();
+    let outside = root();
+    run(r.path(), &[kyty_v1()]);
+    fs::write(r.path().join("emulators/kyty/emulator.yaml"), "edited\n").unwrap();
+    std::os::unix::fs::symlink(outside.path(), r.path().join("proposals")).unwrap();
+    assert_eq!(run(r.path(), &[kyty_v2()]), [refused("proposals")]);
+    assert_eq!(contents(outside.path()), []);
+
+    let r = root();
+    let outside = root();
+    run(r.path(), &[kyty_v1()]);
+    fs::rename(r.path().join("emulators"), outside.path().join("emulators")).unwrap();
+    std::os::unix::fs::symlink(outside.path().join("emulators"), r.path().join("emulators")).unwrap();
+    let before = contents(outside.path());
+    assert_eq!(run(r.path(), &[kyty_v2()]), [refused("emulators")]);
+    assert_eq!(contents(outside.path()), before);
+    assert!(!r.path().join("addons-journal.yaml").exists(), "nothing was started");
+}
+
+#[test]
+fn a_link_in_place_of_the_launchers_own_files_is_never_followed() {
+    let r = root();
+    let outside = root();
+    run(r.path(), &[kyty_v1()]);
+    fs::write(outside.path().join("secret"), "secret\n").unwrap();
+    std::os::unix::fs::symlink(outside.path().join("secret"), r.path().join(".addons-state.yaml.tmp")).unwrap();
+    std::os::unix::fs::symlink(outside.path().join("secret"), r.path().join(".addons-journal.yaml.tmp")).unwrap();
+    assert_eq!(run(r.path(), &[kyty_v2()]), []);
+    assert_eq!(read(r.path(), "emulators/kyty/emulator.yaml"), "kyty v2\n");
+    assert_eq!(contents(outside.path()), [("secret".to_string(), "secret\n".to_string())]);
+
+    // The lock file: never made or opened through a link.
+    fs::remove_file(r.path().join("addons.lock")).unwrap();
+    std::os::unix::fs::symlink(outside.path().join("made.lock"), r.path().join("addons.lock")).unwrap();
+    let problems = run(r.path(), &[kyty_v2()]);
+    assert_eq!(problems.len(), 1);
+    assert!(problems[0].message.starts_with("the lock file cannot be used"), "{}", problems[0].message);
+    assert!(!outside.path().join("made.lock").exists());
+    fs::remove_file(r.path().join("addons.lock")).unwrap();
+
+    // The state file: a link is not read as the state.
+    fs::rename(r.path().join("addons-state.yaml"), outside.path().join("state.yaml")).unwrap();
+    std::os::unix::fs::symlink(outside.path().join("state.yaml"), r.path().join("addons-state.yaml")).unwrap();
+    let problems = run(r.path(), &[kyty_v1()]);
+    assert_eq!(problems.len(), 1);
+    assert!(problems[0].message.contains("addons-state.yaml is a symbolic link"), "{}", problems[0].message);
+    assert_eq!(read(r.path(), "emulators/kyty/emulator.yaml"), "kyty v2\n", "left as it is");
+}
+
+#[test]
+fn a_fifo_in_an_addon_does_not_stall_the_digest() {
+    let r = root();
+    fs::write(r.path().join("a"), "1").unwrap();
+    let fifo = std::ffi::CString::new(r.path().join("pipe").as_os_str().as_encoded_bytes()).unwrap();
+    // SAFETY: a valid C string; the result is checked.
+    assert_eq!(unsafe { libc::mkfifo(fifo.as_ptr(), 0o644) }, 0);
+    assert!(digest_folder(r.path()).unwrap_err().to_string().contains("pipe"));
+}
+
 #[test]
 fn a_damaged_journal_leaves_every_folder_as_it_is() {
     for journal in ["step: offer\nid: kyty\nrevision: \"ééééééééééééééééé\"\n", "step: copy\nid: ../kyty\nrevision: aaaa\n", "step: [\n"] {

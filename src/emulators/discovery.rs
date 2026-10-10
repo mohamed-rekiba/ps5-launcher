@@ -2,12 +2,10 @@
 
 use super::document::{self, Issue, Version};
 use super::manifest::Emulator;
+use super::safefs::{Dir, Kind, Refused, MAX_FILE};
 use super::yaml;
 use std::collections::BTreeMap;
-use std::fs;
-use std::io::Read;
-use std::os::unix::ffi::OsStrExt;
-use std::os::unix::fs::OpenOptionsExt;
+use std::ffi::OsStr;
 use std::path::{Path, PathBuf};
 
 /// One addon that passed every check.
@@ -42,40 +40,50 @@ pub const DOCUMENT: &str = "emulator.yaml";
 /// are not folders are skipped. A folder that is a symbolic link, or whose document or resources
 /// are links or lie outside it, is rejected, and so is every addon whose id is not its folder's
 /// name or is also another addon's id. One rejected addon never stops the others.
+///
+/// Every folder and file below the root is opened through its parent's handle without following
+/// a link (safefs.rs), so the scan never reads outside the addon folders.
 pub fn scan(root: &Path, launcher: Version) -> Scan {
-    let dir = root.join("emulators");
-    let mut entries: Vec<(std::ffi::OsString, fs::FileType)> = match fs::read_dir(&dir) {
-        Ok(read) => read.flatten().filter_map(|e| Some((e.file_name(), e.file_type().ok()?))).collect(),
-        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Scan::default(),
-        Err(e) => return Scan { addons: Vec::new(), rejected: vec![Rejected { folder: String::new(), issues: vec![Issue::new("", format!("the folder cannot be read: {e}"))] }] },
+    let refused = |message: String| Scan { addons: Vec::new(), rejected: vec![Rejected { folder: String::new(), issues: vec![Issue::new("", message)] }] };
+    let dir = match Dir::open(root).and_then(|r| r.dir(OsStr::new("emulators"))) {
+        Ok(dir) => dir,
+        Err(Refused::Missing) => return Scan::default(),
+        Err(Refused::Link) => return refused("emulators is a symbolic link; the launcher does not follow it".into()),
+        Err(e) => return refused(format!("the folder {e}")),
     };
-    entries.sort_by(|a, b| a.0.as_bytes().cmp(b.0.as_bytes()));
+    let entries = match dir.entries() {
+        Ok(entries) => entries,
+        Err(e) => return refused(format!("the folder cannot be read: {e}")),
+    };
 
-    // Each folder: its name, and its document or why it has none.
-    let mut read: Vec<(String, Result<Emulator, Vec<Issue>>)> = Vec::new();
+    // Each folder: its name, its handle, and its document or why it has none.
+    let mut read: Vec<(String, Option<Dir>, Result<Emulator, Vec<Issue>>)> = Vec::new();
     for (name, kind) in entries {
-        let name = name.to_string_lossy().into_owned();
-        if name.starts_with('.') {
+        let shown = name.to_string_lossy().into_owned();
+        if shown.starts_with('.') {
             continue;
         }
-        if kind.is_symlink() {
-            read.push((name, Err(vec![Issue::new("", "the folder is a symbolic link; an addon must be a real folder")])));
-        } else if kind.is_dir() {
-            let folder = dir.join(&name);
-            let result = read_document(&folder).and_then(|text| document::parse(&text, launcher));
-            read.push((name, result));
+        match kind {
+            Kind::Link => read.push((shown, None, Err(vec![Issue::new("", "the folder is a symbolic link; an addon must be a real folder")]))),
+            Kind::Dir => match dir.dir(&name) {
+                Ok(folder) => {
+                    let result = read_document(&folder).and_then(|text| document::parse(&text, launcher));
+                    read.push((shown, Some(folder), result));
+                }
+                Err(e) => read.push((shown, None, Err(vec![Issue::new("", format!("the folder {e}"))]))),
+            },
+            Kind::File | Kind::Other => {}
         }
     }
 
     let mut owners: BTreeMap<String, Vec<String>> = BTreeMap::new();
-    for (name, result) in &read {
+    for (name, _, result) in &read {
         if let Ok(e) = result {
             owners.entry(e.id.to_string()).or_default().push(name.clone());
         }
     }
     let mut scan = Scan::default();
-    for (name, result) in read {
-        let folder = dir.join(&name);
+    for (name, handle, result) in read {
         let emulator = result.and_then(|e| {
             let mut issues = Vec::new();
             if e.id.as_str() != name {
@@ -86,8 +94,8 @@ pub fn scan(root: &Path, launcher: Version) -> Scan {
                 issues.push(Issue::new("id", format!("\"{}\" is also the id in the folder {}", e.id, others.join(", "))));
             }
             for (field, path) in [("icon", &e.icon), ("controls", &e.controls)] {
-                if let Some(path) = path {
-                    if let Err(message) = resource(&folder, path.as_str()) {
+                if let (Some(path), Some(folder)) = (path, &handle) {
+                    if let Err(message) = resource(folder, path.as_str()) {
                         issues.push(Issue::new(field, message));
                     }
                 }
@@ -95,56 +103,41 @@ pub fn scan(root: &Path, launcher: Version) -> Scan {
             if issues.is_empty() { Ok(e) } else { Err(issues) }
         });
         match emulator {
-            Ok(emulator) => scan.addons.push(Addon { folder, emulator }),
+            Ok(emulator) => scan.addons.push(Addon { folder: root.join("emulators").join(&name), emulator }),
             Err(issues) => scan.rejected.push(Rejected { folder: name, issues }),
         }
     }
     scan
 }
 
-/// The text of a folder's document, read without following a link.
-fn read_document(folder: &Path) -> Result<String, Vec<Issue>> {
+/// The text of a folder's document.
+fn read_document(folder: &Dir) -> Result<String, Vec<Issue>> {
     let fail = |message: String| vec![Issue::new("", message)];
-    let path = folder.join(DOCUMENT);
-    let meta = match fs::symlink_metadata(&path) {
-        Ok(m) => m,
-        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Err(fail(format!("there is no {DOCUMENT}"))),
-        Err(e) => return Err(fail(format!("{DOCUMENT} cannot be read: {e}"))),
-    };
-    if meta.file_type().is_symlink() {
-        return Err(fail(format!("{DOCUMENT} is a symbolic link; an addon's files must be in its folder")));
-    }
-    if !meta.is_file() {
-        return Err(fail(format!("{DOCUMENT} is not a file")));
-    }
-    let limit = yaml::MAX_BYTES as u64;
-    let too_big = |len: u64| fail(format!("{DOCUMENT} is {} KiB; the limit is {} KiB", len.div_ceil(1024), limit / 1024));
-    if meta.len() > limit {
-        return Err(too_big(meta.len()));
-    }
-    let mut bytes = Vec::new();
-    let opened = fs::OpenOptions::new().read(true).custom_flags(libc::O_NOFOLLOW).open(&path);
-    opened.and_then(|f| f.take(limit + 1).read_to_end(&mut bytes)).map_err(|e| fail(format!("{DOCUMENT} cannot be read: {e}")))?;
-    if bytes.len() as u64 > limit {
-        return Err(too_big(bytes.len() as u64));
-    }
+    let bytes = folder.read(OsStr::new(DOCUMENT), yaml::MAX_BYTES as u64).map_err(|e| match e {
+        Refused::Missing => fail(format!("there is no {DOCUMENT}")),
+        Refused::Link => fail(format!("{DOCUMENT} is a symbolic link; an addon's files must be in its folder")),
+        e => fail(format!("{DOCUMENT} {e}")),
+    })?;
     String::from_utf8(bytes).map_err(|_| fail(format!("{DOCUMENT} is not UTF-8 text")))
 }
 
-/// Check that a resource is a regular file inside the folder, reached through no link.
-/// `relative` is a checked `RelPath`: no leading "/", no "." or ".." parts.
-fn resource(folder: &Path, relative: &str) -> Result<(), String> {
-    let mut at = folder.to_path_buf();
+/// Check that a resource is a regular file inside the folder, reached through no link, and
+/// within the size limit for media. `relative` is a checked `RelPath`: no leading "/", no "."
+/// or ".." parts.
+fn resource(folder: &Dir, relative: &str) -> Result<(), String> {
     let parts: Vec<&str> = relative.split('/').collect();
+    let mut at: Option<Dir> = None;
     for (i, part) in parts.iter().enumerate() {
-        at.push(part);
+        let here = at.as_ref().unwrap_or(folder);
         let so_far = parts[..=i].join("/");
-        let meta = fs::symlink_metadata(&at).map_err(|_| format!("{relative} is not in the addon's folder"))?;
-        if meta.file_type().is_symlink() {
-            return Err(format!("{so_far} is a symbolic link; an addon's files must be in its folder"));
-        }
-        if i + 1 == parts.len() && !meta.is_file() {
-            return Err(format!("{relative} is not a file"));
+        let last = i + 1 == parts.len();
+        let result = if last { here.file(OsStr::new(part), MAX_FILE).map(|_| None) } else { here.dir(OsStr::new(part)).map(Some) };
+        match result {
+            Ok(next) => at = next,
+            Err(Refused::Link) => return Err(format!("{so_far} is a symbolic link; an addon's files must be in its folder")),
+            Err(Refused::NotFile) => return Err(format!("{relative} is not a file")),
+            Err(e @ Refused::TooBig { .. }) => return Err(format!("{relative} {e}")),
+            Err(_) => return Err(format!("{relative} is not in the addon's folder")),
         }
     }
     Ok(())
@@ -270,6 +263,49 @@ mod tests {
                 ("doc-link".to_string(), "emulator.yaml is a symbolic link; an addon's files must be in its folder".to_string()),
                 ("linked".to_string(), "the folder is a symbolic link; an addon must be a real folder".to_string()),
             ]
+        );
+    }
+
+    fn mkfifo(path: &Path) {
+        let c = std::ffi::CString::new(path.as_os_str().as_encoded_bytes()).unwrap();
+        // SAFETY: a valid C string; the result is checked.
+        assert_eq!(unsafe { libc::mkfifo(c.as_ptr(), 0o644) }, 0);
+    }
+
+    #[test]
+    fn a_linked_emulators_folder_is_not_followed() {
+        let r = root();
+        let elsewhere = root();
+        add(elsewhere.path(), "ps4-lab", "ps4-lab");
+        std::os::unix::fs::symlink(elsewhere.path().join("emulators"), r.path().join("emulators")).unwrap();
+        let s = scan(r.path(), now());
+        assert!(s.addons.is_empty());
+        assert_eq!(rejected(&s), [(String::new(), "emulators is a symbolic link; the launcher does not follow it".to_string())]);
+    }
+
+    #[test]
+    fn a_linked_data_folder_is_followed() {
+        // The root is the user's data folder; it may live elsewhere.
+        let real_root = root();
+        let links = root();
+        add(real_root.path(), "ps4-lab", "ps4-lab");
+        std::os::unix::fs::symlink(real_root.path(), links.path().join("data")).unwrap();
+        assert_eq!(found(&scan(&links.path().join("data"), now())), ["ps4-lab"]);
+    }
+
+    #[test]
+    fn a_fifo_is_not_a_file_and_does_not_stall_the_scan() {
+        let r = root();
+        let doc = r.path().join("emulators/a-doc");
+        fs::create_dir_all(&doc).unwrap();
+        mkfifo(&doc.join("emulator.yaml"));
+        let icon = add(r.path(), "b-icon", "b-icon");
+        mkfifo(&icon.join("icon.svg"));
+        fs::write(icon.join("controls.yaml"), "{}").unwrap();
+        with_resources(&icon, "icon.svg", "controls.yaml");
+        assert_eq!(
+            rejected(&scan(r.path(), now())),
+            [("a-doc".to_string(), "emulator.yaml is not a file".to_string()), ("b-icon".to_string(), "icon: icon.svg is not a file".to_string())]
         );
     }
 

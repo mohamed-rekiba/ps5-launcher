@@ -31,6 +31,7 @@
 
 use super::bundle::{DefaultSource, ShippedAddon};
 use super::manifest::{EmulatorId, RelPath};
+use super::safefs::{self, Dir, Kind, Refused};
 use super::{yaml, Problem};
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
@@ -50,17 +51,6 @@ const STATE_VERSION: u32 = 1;
 
 // ------------------------------------------------------------------ digest
 
-/// The digest of a folder: see `digest_files`. Links and special files are refused.
-pub fn digest_folder(path: &Path) -> io::Result<String> {
-    let mut found = Vec::new();
-    collect(path, &[], &mut found)?;
-    found.sort();
-    let mut h = Sha256::new();
-    for (rel, file) in found {
-        add(&mut h, &rel, &fs::read(file)?);
-    }
-    Ok(format!("{:x}", h.finalize()))
-}
 
 /// SHA-256, in lower-case hex, over every file sorted by its relative path ("/" between parts,
 /// compared as bytes). For each file: the path's length as 8 bytes big-endian, the path, the
@@ -82,24 +72,49 @@ fn add(h: &mut Sha256, path: &[u8], content: &[u8]) {
     h.update(content);
 }
 
-fn collect(dir: &Path, prefix: &[u8], found: &mut Vec<(Vec<u8>, PathBuf)>) -> io::Result<()> {
-    for entry in fs::read_dir(dir)? {
-        let entry = entry?;
-        let name = entry.file_name();
+/// The digest of a folder: see `digest_files`. Links and special files are refused; nothing
+/// below `path` is reached through a link.
+pub fn digest_folder(path: &Path) -> io::Result<String> {
+    digest_dir(&Dir::open(path).map_err(|e| safefs::named(path.as_os_str(), e))?)
+}
+
+/// The digest of the folder `parts` below the root, reached through no link.
+fn digest_below(root: &Path, parts: &[&str]) -> io::Result<String> {
+    digest_dir(&Dir::open_below(root, parts)?)
+}
+
+/// `digest_below` for a path under the root.
+fn digest_at(root: &Path, path: &Path) -> io::Result<String> {
+    let rel = path.strip_prefix(root).map_err(io::Error::other)?;
+    let parts: Vec<&str> = rel.iter().map(|p| p.to_str().unwrap_or("")).collect();
+    digest_below(root, &parts)
+}
+
+fn digest_dir(dir: &Dir) -> io::Result<String> {
+    let mut found = Vec::new();
+    collect(dir, &[], &mut found)?;
+    found.sort();
+    let mut h = Sha256::new();
+    for (rel, content) in found {
+        add(&mut h, &rel, &content);
+    }
+    Ok(format!("{:x}", h.finalize()))
+}
+
+fn collect(dir: &Dir, prefix: &[u8], found: &mut Vec<(Vec<u8>, Vec<u8>)>) -> io::Result<()> {
+    for (name, kind) in dir.entries()? {
         let rel = if prefix.is_empty() { name.as_bytes().to_vec() } else { [prefix, b"/", name.as_bytes()].concat() };
-        let kind = entry.file_type()?;
-        if kind.is_symlink() {
-            return Err(io::Error::other(format!("{} is a symbolic link", String::from_utf8_lossy(&rel))));
-        } else if kind.is_dir() {
-            collect(&entry.path(), &rel, found)?;
-        } else if kind.is_file() {
-            found.push((rel, entry.path()));
-        } else {
-            return Err(io::Error::other(format!("{} is not a file or a folder", String::from_utf8_lossy(&rel))));
+        let shown = String::from_utf8_lossy(&rel).into_owned();
+        match kind {
+            Kind::Dir => collect(&dir.dir(&name).map_err(|e| safefs::named(&shown, e))?, &rel, found)?,
+            Kind::File => found.push((rel, dir.read(&name, u64::MAX).map_err(|e| safefs::named(&shown, e))?)),
+            Kind::Link => return Err(safefs::named(&shown, Refused::Link)),
+            Kind::Other => return Err(io::Error::other(format!("{shown} is not a file or a folder"))),
         }
     }
     Ok(())
 }
+
 
 // ------------------------------------------------------------------ file operations
 
@@ -225,17 +240,24 @@ struct StateFile {
 /// The records in `<root>/addons-state.yaml`: None when the file is missing, Err when it cannot
 /// be read.
 pub fn records(root: &Path) -> Result<Option<BTreeMap<String, Record>>, String> {
-    let text = match fs::read_to_string(root.join(STATE)) {
-        Ok(t) => t,
-        Err(e) if e.kind() == io::ErrorKind::NotFound => return Ok(None),
-        Err(e) => return Err(e.to_string()),
-    };
+    let Some(text) = read_own(root, STATE)? else { return Ok(None) };
     yaml::load(&text).map_err(|e| e.to_string())?;
     let state: StateFile = yaml::typed(&text).map_err(|e| e.to_string())?;
     if state.state_version != STATE_VERSION {
         return Err(format!("state_version {} is not {STATE_VERSION}", state.state_version));
     }
     Ok(Some(state.emulators))
+}
+
+/// One of the launcher's own text files in the root, read without following a link and within
+/// the YAML size limit: None when it is missing.
+fn read_own(root: &Path, name: &str) -> Result<Option<String>, String> {
+    let read = Dir::open(root).and_then(|dir| dir.read(name.as_ref(), yaml::MAX_BYTES as u64));
+    match read {
+        Ok(bytes) => String::from_utf8(bytes).map(Some).map_err(|_| format!("{name} is not UTF-8 text")),
+        Err(Refused::Missing) => Ok(None),
+        Err(e) => Err(format!("{name} {e}")),
+    }
 }
 
 // ------------------------------------------------------------------ the journal
@@ -273,7 +295,7 @@ pub fn reconcile(root: &Path, source: &dyn DefaultSource, files: &dyn FileOps) -
         run.recover()?;
         match records(root) {
             Ok(Some(state)) => run.state = state,
-            Ok(None) if !root.join("emulators").exists() => run.save()?,
+            Ok(None) if !present(&root.join("emulators")) => run.save()?,
             Ok(None) => return run.stop(Problem::new(STATE, "the file is missing, so the launcher left the addon folders as they are. Restore missing defaults to record them again")),
             Err(e) => return run.stop(Problem::new(STATE, format!("the file cannot be read, so the launcher left the addon folders as they are. Restore missing defaults to record them again ({e})"))),
         }
@@ -344,7 +366,11 @@ fn locked(root: &Path, files: &dyn FileOps, action: impl FnOnce(&mut Run) -> Res
         Err(e) => return vec![Problem::new("addons", format!("the lock file cannot be used: {e}"))],
     };
     let mut run = Run { root, files, state: BTreeMap::new(), problems: Vec::new() };
-    let _ = run.tidy().and_then(|()| action(&mut run));
+    let _ = (|| {
+        run.tidy()?;
+        run.no_links()?;
+        action(&mut run)
+    })();
     run.problems
 }
 
@@ -396,13 +422,44 @@ impl Run<'_> {
         Ok(())
     }
 
-    /// The folder under the root, made where it is missing.
+    /// Refuse to start when one of the launcher's folders is a link: every change goes below
+    /// them, and a link would send it out of the data folder.
+    fn no_links(&mut self) -> Result<(), Stopped> {
+        for name in ["emulators", "emulators/.staging", "proposals", "proposals/emulators", "kept", "kept/emulators"] {
+            if fs::symlink_metadata(self.root.join(name)).is_ok_and(|m| m.file_type().is_symlink()) {
+                return self.stop(Problem::new(name, "is a symbolic link; the launcher does not follow links in its folders"));
+            }
+        }
+        Ok(())
+    }
+
+    /// Check that no folder between the root and `path` is a link, before a change there.
+    /// What is missing is fine: the change itself then fails.
+    fn real_parents(&mut self, path: &Path) -> Result<(), Stopped> {
+        let rel = path.strip_prefix(self.root).unwrap_or(path);
+        let mut at = self.root.to_path_buf();
+        let parts: Vec<_> = rel.iter().collect();
+        for part in parts.iter().take(parts.len().saturating_sub(1)) {
+            at.push(part);
+            match fs::symlink_metadata(&at) {
+                Ok(m) if m.file_type().is_symlink() => return self.stop(Problem::new(shown(self.root, &at), "is a symbolic link; the launcher does not follow links in its folders")),
+                Ok(m) if !m.is_dir() => return self.stop(Problem::new(shown(self.root, &at), "is not a folder")),
+                _ => {}
+            }
+        }
+        Ok(())
+    }
+
+    /// The folder under the root, made where it is missing; never through a link.
     fn ensure(&mut self, parts: &[&str]) -> Result<PathBuf, Stopped> {
         let mut at = self.root.to_path_buf();
         for part in parts {
             at.push(part);
-            if !present(&at) {
-                self.mkdir(&at)?;
+            match fs::symlink_metadata(&at) {
+                Ok(m) if m.file_type().is_symlink() => return self.stop(Problem::new(shown(self.root, &at), "is a symbolic link; the launcher does not follow links in its folders")).map(|()| at),
+                Ok(m) if !m.is_dir() => return self.stop(Problem::new(shown(self.root, &at), "is not a folder")).map(|()| at),
+                Ok(_) => {}
+                Err(_) => self.mkdir(&at)?,
             }
         }
         Ok(at)
@@ -410,6 +467,7 @@ impl Run<'_> {
 
     /// Make one folder and flush its name in the parent.
     fn mkdir(&mut self, path: &Path) -> Result<(), Stopped> {
+        self.real_parents(path)?;
         let subject = shown(self.root, path);
         let result = self.files.create_dir(path).and_then(|()| self.files.sync_dir(parent(path)));
         self.check(&subject, "the folder cannot be made", result)
@@ -417,6 +475,8 @@ impl Run<'_> {
 
     /// Rename, then flush both folders' entries.
     fn rename(&mut self, from: &Path, to: &Path, subject: &str, what: &str) -> Result<(), Stopped> {
+        self.real_parents(from)?;
+        self.real_parents(to)?;
         let mut result = self.files.rename(from, to).and_then(|()| self.files.sync_dir(parent(to)));
         if parent(from) != parent(to) {
             result = result.and_then(|()| self.files.sync_dir(parent(from)));
@@ -426,6 +486,7 @@ impl Run<'_> {
 
     /// Remove a file or a folder (a link itself, not what it points to), and flush the parent.
     fn remove(&mut self, path: &Path) -> Result<(), Stopped> {
+        self.real_parents(path)?;
         let result = match fs::symlink_metadata(path) {
             Ok(m) if m.is_dir() => self.files.remove_dir_all(path).and_then(|()| self.files.sync_dir(parent(path))),
             Ok(_) => self.files.remove_file(path).and_then(|()| self.files.sync_dir(parent(path))),
@@ -495,7 +556,7 @@ impl Run<'_> {
             for folder in made.iter().chain([&staging]) {
                 self.files.sync_dir(folder)?;
             }
-            if digest_folder(&dir)? != revision {
+            if digest_below(self.root, &["emulators", ".staging", name])? != revision {
                 return Err(io::Error::other("the copy does not match the default"));
             }
             Ok(())
@@ -527,7 +588,7 @@ impl Run<'_> {
         let target = self.target(&addon.id);
         self.rename(&target, &old, &subject, "the old copy cannot be moved aside")?;
         if let Some(expected) = unchanged {
-            if digest_folder(&old).ok().as_deref() != Some(expected) {
+            if digest_below(self.root, &["emulators", ".staging", &format!("{}.old", addon.id)]).ok().as_deref() != Some(expected) {
                 self.rename(&old, &target, &subject, "the changed copy cannot be put back")?;
                 self.remove(&staged)?;
                 self.end()?;
@@ -567,7 +628,7 @@ impl Run<'_> {
             if !present(&target) {
                 return self.copy(addon, &revision);
             }
-            if digest_folder(&target).ok().as_deref() == Some(revision.as_str()) {
+            if digest_below(self.root, &["emulators", id]).ok().as_deref() == Some(revision.as_str()) {
                 self.state.insert(id.to_string(), Record::clean(&revision));
                 return self.save();
             }
@@ -586,7 +647,7 @@ impl Run<'_> {
         if record.revision == revision {
             return Ok(());
         }
-        match digest_folder(&target) {
+        match digest_below(self.root, &["emulators", id]) {
             Ok(d) if d == revision => {
                 self.state.insert(id.to_string(), Record::clean(&revision));
                 self.save()
@@ -617,10 +678,9 @@ impl Run<'_> {
     /// when its copy is complete and in place; otherwise it is undone. With no state file, it
     /// is only undone: a record is never made up from nothing.
     fn recover(&mut self) -> Result<(), Stopped> {
-        let path = self.root.join(JOURNAL);
-        let text = match fs::read_to_string(&path) {
-            Ok(t) => t,
-            Err(e) if e.kind() == io::ErrorKind::NotFound => return Ok(()),
+        let text = match read_own(self.root, JOURNAL) {
+            Ok(Some(t)) => t,
+            Ok(None) => return Ok(()),
             Err(e) => return self.stop(Problem::new(JOURNAL, format!("the file cannot be read, so the launcher left the addon folders as they are ({e})"))),
         };
         let journal: Journal = match yaml::load(&text).and_then(|_| yaml::typed(&text)) {
@@ -636,7 +696,8 @@ impl Run<'_> {
             Ok(state) => state,
             Err(e) => return self.stop(Problem::new(STATE, format!("the file cannot be read, so the launcher left the addon folders as they are ({e})"))),
         };
-        let complete = |path: &Path| digest_folder(path).ok().as_deref() == Some(journal.revision.as_str());
+        let root = self.root;
+        let complete = |path: &Path| digest_at(root, path).ok().as_deref() == Some(journal.revision.as_str());
         let target = self.target(&id);
         let subject = format!("emulators/{id}");
         match journal.step {

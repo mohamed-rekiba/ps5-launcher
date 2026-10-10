@@ -9,6 +9,7 @@ pub mod document;
 pub mod lifecycle;
 pub mod manifest;
 pub mod registry;
+pub mod safefs;
 pub mod schema;
 pub mod startup;
 mod yaml;
