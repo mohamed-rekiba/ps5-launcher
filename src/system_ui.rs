@@ -422,7 +422,7 @@ impl App {
             SId::OsStatus => self.os_status_chosen(),
             SId::OsDownload => self.os_update(),
             SId::OsRollback => self.os_rollback(),
-            SId::NvInstall => self.nv_switch(Image::Nvidia),
+            SId::NvInstall => self.nv_install(),
             SId::NvLater => self.nv_later(),
             SId::NvRetry => self.nv_queue_key(),
             SId::NvRestart => self.nv_restart(),
@@ -1202,6 +1202,33 @@ impl App {
         );
     }
 
+    /// Install driver: with Secure Boot on and the key not enrolled, the key comes first (the
+    /// password, then a restart); otherwise the download. The helper's switch checks the key
+    /// again by itself.
+    fn nv_install(&mut self) {
+        if self.sys.display.busy.is_some() {
+            return;
+        }
+        audio::play(Sound::Select);
+        self.sys.gen.display.next();
+        self.sys.display.busy = Some("Checking Secure Boot…");
+        self.sys_show();
+        bg(
+            || system::call(&nvidia::key_state_call()).and_then(|out| nvidia::parse_key_state(&out)),
+            |app, res| {
+                app.sys.display.busy = None;
+                match res {
+                    Ok(nvidia::KeyState::Enrolled | nvidia::KeyState::SecureBootOff) => app.nv_switch(Image::Nvidia),
+                    Ok(nvidia::KeyState::Pending | nvidia::KeyState::Missing) => app.nv_queue_key(),
+                    Err(e) => {
+                        app.sys_error("Couldn't check Secure Boot", &e);
+                        app.sys_show();
+                    }
+                }
+            },
+        );
+    }
+
     /// Install driver (to the NVIDIA image), or the way back (to main).
     fn nv_switch(&mut self, to: Image) {
         if self.sys.display.busy.is_some() {
@@ -1299,7 +1326,7 @@ impl App {
                 header(rows, Cat::Time, "CHOOSE A REGION");
                 for (i, (region, zones)) in t.regions.iter().enumerate() {
                     let mut r = row(4, region);
-                    r.value = format!("{} zones", zones.len()).into();
+                    r.value = format!("{} zone{}", zones.len(), if zones.len() == 1 { "" } else { "s" }).into();
                     if clock.zone.starts_with(&format!("{region}/")) || (region == "Other" && zones.contains(&clock.zone)) {
                         (r.value, r.value_kind) = ("In use".into(), 1);
                     }

@@ -257,7 +257,10 @@ pub fn card_text(offer: Offer, name: &str, downloading: bool) -> Option<(String,
             &format!("{name} found"),
             &["Not sure this card is supported. The launcher does not know it, so it does not offer the NVIDIA driver.", "The card runs on the open-source driver."],
         ),
-        Offer::KeyWaiting => text("Enroll the driver's key first", &["Secure Boot is on, so the PC must learn the driver's key before the download. The steps and the password are below."]),
+        Offer::KeyWaiting => text(
+            "Restart and enroll the key",
+            &["Secure Boot is on, so the PC must learn the driver's key before the download. You need the password and a USB keyboard."],
+        ),
         Offer::KeyMissed => text(
             "The key was not enrolled",
             &["Nothing was changed. Try again: the launcher queues the key with a new password, then you restart and enroll it on the blue screen."],
