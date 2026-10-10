@@ -1,8 +1,8 @@
 name: PS5 Launcher OS (Fedora)
 
 # The Fedora bootc OS image (packaging/os/) and its installer ISO. It replaces the Bazzite image
-# of os.yml, which keeps running unchanged until the migration (Phase 8 of the OS plan). Never
-# push to the Bazzite repository ps5-launcher-os or its tags. packaging/os/README.md describes the
+# (os/ and os.yml, both removed). Never push to the Bazzite repository ps5-launcher-os or its
+# tags: installed Bazzite PCs still follow them. packaging/os/README.md describes the
 # images, the gates and the owner's setup.
 #
 # Images: ghcr.io/<owner>/ps5-launcher-fedora

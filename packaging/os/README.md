@@ -2,8 +2,7 @@
 
 A whole operating system that starts straight into PS5 Launcher. It is Fedora bootc: the OS is
 one container image, updated as a whole, with the previous version kept for rollback. It
-replaces the Bazzite image in [os/](../../os/README.md), which keeps being built by
-`.github/workflows/os.yml` until the migration.
+replaces the Bazzite image; its files (`os/`) and its workflow (`os.yml`) are removed.
 
 **Not ready for a public release:** image signing is built but has not run end to end yet: it
 needs the owner's signing key ([signing/README.md](signing/README.md)) and one green run of the

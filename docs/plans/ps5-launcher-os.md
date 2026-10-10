@@ -196,8 +196,8 @@ can ask for single characters by position, and the screen explains that. This re
 
 ## Phase 1: The OS image (`packaging/os/`)
 
-Replaces `os/` and `.github/workflows/os.yml` (the old workflow keeps running for Bazzite users
-until the migration in Phase 8 ends).
+Replaces `os/` and `.github/workflows/os.yml`. Both are removed: the owner stopped the Bazzite
+image before the migration (Phase 8), and the Fedora image is not released yet.
 
 ### Files
 

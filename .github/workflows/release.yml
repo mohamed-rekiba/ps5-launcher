@@ -58,5 +58,5 @@ jobs:
           GH_REPO: ${{ github.repository }}
         run: gh release edit "${{ needs.release-please.outputs.tag }}" --draft=false
 
-  # The OS image is not built here for now: the Bazzite image (os.yml) is replaced by
-  # os-fedora.yml, which joins this workflow (with `secrets: inherit`) once its keys exist.
+  # The OS image is not built here for now: os-fedora.yml joins this workflow (with
+  # `secrets: inherit`) once its keys exist.

@@ -131,39 +131,10 @@ a desktop, run `ps5-launcher-session` from a text console. In this session the *
 offers Sleep, Restart, Power off and Log out instead of Close launcher. To log in to it by itself, see
 [packaging/linux](packaging/linux/README.md).
 
-**A whole operating system.** **PS5 Launcher OS** makes a PC start straight into the launcher. It's
-[Bazzite](https://bazzite.gg), a gaming Linux, with the launcher built in. The launcher, its
-emulators and the system keep themselves up to date.
-
-You need a USB stick (2 GB or more), an internet connection (cable or Wi-Fi), and a PC that can run
-the games: a 4-core CPU from 2013 or later (Intel Haswell or AMD Excavator and newer), 8 GB RAM
-(16 GB for PS5 games), a graphics card with Vulkan 1.3 (AMD, NVIDIA or Intel) and a 64 GB disk.
-**Installing erases the disk you pick.**
-
-1. Download [ps5-launcher-os-x86_64.iso](https://github.com/MohamedAliRashad/ps5-launcher/releases/latest/download/ps5-launcher-os-x86_64.iso)
-   and write it to the USB stick with [balenaEtcher](https://etcher.balena.io) or
-   [Fedora Media Writer](https://fedoraproject.org/workstation/download).
-2. Start the PC from the USB stick (press F12, F11, F8 or Esc while it starts) and choose
-   **Install PS5 Launcher OS**.
-3. In the installer, choose your language, then on the summary screen:
-   - **Network & Host Name:** connect to Wi-Fi if you have no cable.
-   - **Installation Destination:** pick the disk and press **Done**. Leave **Encrypt my data**
-     off, or the PC asks for a passphrase every time it starts.
-   - **Time & Date:** pick your city (the launcher shows the time).
-   - **User Creation:** your name and a password.
-
-   Then **Begin Installation**. It downloads the system (about 7 GB), so it takes a while. The
-   installer says "Fedora": Bazzite is built on Fedora and uses its installer.
-4. Press **Reboot System**, remove the USB stick and stay at the PC. If Secure Boot is on, a blue
-   **Perform MOK management** screen appears once and waits about 5 minutes. Use the arrow keys
-   and Enter: **Enroll MOK**, **Continue**, then **Yes** (it starts on No), type `universalblue`,
-   Enter, then **Reboot**. Missed it, and now the PC stops with "bad shim signature"? Start from
-   the USB stick again, choose **Troubleshooting → Enroll the Secure Boot key again**, and the
-   blue screen comes back.
-
-The PC now starts straight into PS5 Launcher, and it picks the NVIDIA version of the system by
-itself when it finds an NVIDIA graphics card. To get to the desktop, quit the launcher
-(**Settings → Quit**); it opens again at the next start or from the app menu.
+**A whole operating system.** **PS5 Launcher OS** makes a PC start straight into the launcher.
+It is being rebuilt on Fedora (one system image, updated as a whole, with the previous version
+kept for rollback). There is no installer to download yet: the first one comes with a release.
+To build and test it yourself, see [packaging/os](packaging/os/README.md).
 
 ## Getting started
 
