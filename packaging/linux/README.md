@@ -25,6 +25,10 @@ gamescope first (`gamescope` in Fedora, Arch and recent Debian and Ubuntu). Sett
 **Restart** and **Power off** in this session, since there is no desktop to go back to. Output goes to
 `~/.cache/ps5-launcher-session.log`.
 
+If the launcher crashes, the session starts it again. After the third crash within a minute it
+stops trying and ends the session, so the login screen comes back. `packaging/linux/test-session.sh`
+tests these rules.
+
 To log in to it by itself, set the display manager's automatic login to the `ps5-launcher` session:
 
 ```ini

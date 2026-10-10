@@ -6,24 +6,90 @@
 # It starts gamescope, which shows the launcher full screen, and the launcher opens the games in
 # the same gamescope. Everything runs on X11 (through gamescope's XWayland): the launcher
 # switches between itself and a game with xdotool, and lists displays with xrandr.
+#
+# Inside gamescope, this script runs again with --inner and keeps the launcher running. gamescope
+# stays up while the launcher restarts. The launcher's exit code says what to do:
+#   0       end the session (Log out; Switch to desktop, once the next session is set)
+#   75      restart the launcher now (Restart launcher in About); not a crash
+#   other   a crash, or a signal: restart it. The third crash within 60 seconds stops the
+#           restarts.
 set -u
 
 log="${XDG_CACHE_HOME:-$HOME/.cache}/ps5-launcher-session.log"
 mkdir -p "$(dirname "$log")"
 exec >>"$log" 2>&1
-echo "$(date -Is) session starting"
-
-# A copy in ~/.local/bin (from install.sh) wins: the launcher can update that one by itself.
-bin="$HOME/.local/bin/ps5-launcher"
-[ -x "$bin" ] || bin=/usr/bin/ps5-launcher
 
 # Tells the launcher nothing is behind it: its menu then offers Restart and Power off, not Quit.
 export PS5_LAUNCHER_SESSION=1
 
+# In PS5 Launcher OS the launcher comes with the system image, so an old copy in the home folder
+# must not win. Elsewhere a copy in ~/.local/bin (from install.sh) wins: the launcher can update
+# that one by itself. PS5_LAUNCHER_BIN overrides both (tests, a development build).
+os_marker=/usr/lib/ps5-launcher/os-release
+if [ -n "${PS5_LAUNCHER_BIN:-}" ]; then
+    bin=$PS5_LAUNCHER_BIN
+elif [ -e "$os_marker" ]; then
+    bin=/usr/bin/ps5-launcher
+else
+    bin="$HOME/.local/bin/ps5-launcher"
+    [ -x "$bin" ] || bin=/usr/bin/ps5-launcher
+fi
+
+restart_code=75
+crash_limit=3
+crash_window=60
+
+# After too many crashes. In the OS, start the desktop instead (SDDM would otherwise log in to
+# this session again and again); if that is not possible, stay up without the launcher, so the
+# PC does not loop. On another PC, end the session: its login screen comes back.
+give_up() {
+    echo "$(date -Is) the launcher crashed $crash_limit times within $crash_window s: not restarting it"
+    if [ -e "$os_marker" ]; then
+        if [ -e /usr/share/wayland-sessions/plasma.desktop ] &&
+            pkexec /usr/libexec/ps5-launcher/helper set-next-session plasma; then
+            echo "starting the desktop instead"
+            exit 1
+        fi
+        echo "no desktop to start: waiting without the launcher"
+        exec sleep infinity
+    fi
+    exit 1
+}
+
+if [ "${1:-}" = --inner ]; then
+    crashes="" # times of the recent crashes, in seconds
+    while :; do
+        echo "$(date -Is) starting $bin"
+        "$bin"
+        code=$?
+        case $code in
+        0)
+            echo "$(date -Is) the launcher ended the session"
+            exit 0
+            ;;
+        "$restart_code")
+            echo "$(date -Is) restarting the launcher"
+            continue
+            ;;
+        esac
+        now=$(date +%s)
+        recent=""
+        for t in $crashes; do
+            [ $((now - t)) -lt "$crash_window" ] && recent="$recent $t"
+        done
+        crashes="$recent $now"
+        count=$(echo "$crashes" | wc -w)
+        echo "$(date -Is) the launcher crashed (exit $code), $count time(s) within $crash_window s"
+        [ "$count" -ge "$crash_limit" ] && give_up
+    done
+fi
+
+echo "$(date -Is) session starting"
+
 if ! command -v gamescope >/dev/null 2>&1; then
     if [ -n "${DISPLAY:-}${WAYLAND_DISPLAY:-}" ]; then
         echo "gamescope is not installed: running the launcher in the current desktop"
-        exec "$bin"
+        exec "$0" --inner
     fi
     echo "gamescope is not installed, and there is no desktop to run in: install gamescope"
     exit 1
@@ -31,4 +97,4 @@ fi
 
 # The launcher and the games open X11 windows, even when a Wayland socket is around.
 exec gamescope -f -- env -u WAYLAND_DISPLAY \
-    SDL_VIDEO_DRIVER=x11 SDL_VIDEODRIVER=x11 QT_QPA_PLATFORM=xcb GDK_BACKEND=x11 "$bin"
+    SDL_VIDEO_DRIVER=x11 SDL_VIDEODRIVER=x11 QT_QPA_PLATFORM=xcb GDK_BACKEND=x11 "$0" --inner

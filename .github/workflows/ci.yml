@@ -43,6 +43,8 @@ jobs:
       - run: cargo build --profile ci --locked 2>&1 | tee build.log
       - run: cargo test --profile ci --locked 2>&1 | tee test.log
       - run: node --test scripts/package-licenses.test.mjs
+      - name: Test the session's restart rules
+        run: packaging/linux/test-session.sh
       - name: Smoke test the binary
         run: scripts/smoke-test.sh target/ci/ps5-launcher
       - if: failure()

@@ -1,7 +1,7 @@
 //! What the PC can do, and how the launcher asks it: the mode the launcher runs in, the power
 //! actions it offers, and the system commands behind them. The UI reads this module; it never
 //! checks the mode itself. See docs/plans/ps5-launcher-os.md, Phase 2.
-#![cfg_attr(not(test), allow(dead_code))] // the Power menu and Quick Menu use it from Phase 3 on
+#![allow(dead_code)] // nothing calls it until the Power menu and Quick Menu (Phase 3)
 
 /// Where the launcher runs.
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
@@ -47,6 +47,10 @@ fn marker_image(marker: &str) -> Option<&str> {
         None => Some(value),
     }
 }
+
+/// Exit code that tells ps5-launcher-session to start the launcher again at once (Restart
+/// launcher). It does not count as a crash. Exit 0 ends the session.
+pub const EXIT_RESTART_LAUNCHER: i32 = 75;
 
 /// Answer of logind's CanSuspend, CanReboot and CanPowerOff.
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
