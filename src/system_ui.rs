@@ -1148,9 +1148,13 @@ impl App {
     /// compare the screen's card with the image.
     pub fn nvidia_start(&mut self) {
         let Some(image) = system::os_image() else { return };
-        let mut flow = self.cfg.lock().unwrap().nvidia.clone();
+        let before = self.cfg.lock().unwrap().nvidia.clone();
+        let mut flow = before.clone();
         let resumed = nvidia::resume(&mut flow, image, &Self::boot());
-        self.save_cfg(|c| c.nvidia = flow.clone());
+        // Most starts change nothing: then the config is not written.
+        if flow != before {
+            self.save_cfg(|c| c.nvidia = flow);
+        }
         match resumed {
             nvidia::Resume::Done(Image::Nvidia) => self.toast("NVIDIA driver installed", "Games run at full speed. To go back: Settings → Display.", 1),
             nvidia::Resume::Done(Image::Main) => self.toast("Open-source driver in use", "The PC runs the main system again.", 1),
