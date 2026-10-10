@@ -312,7 +312,15 @@ Releases are automated with [Release Please](https://github.com/googleapis/relea
      image signing is enabled, it then waits for the `os-fedora-release` approval (after the
      hardware tests), promotes the images, and attaches the installer ISO to the release.
 
-To run Package or OS by hand, pick the release tag under **Use workflow from**.
+To run them by hand (Actions → the workflow → **Run workflow**), pick under **Use workflow from**:
+
+| Pick | Package | OS |
+|---|---|---|
+| A `v*` tag | Builds that tag and attaches the files to its release, only while it is a draft | Builds and tests the images with that release |
+| A branch, such as `main` | Builds the branch and keeps the files as the run's artifacts (`ps5-launcher-linux-x86_64`, `ps5-launcher-macos-universal`, 14 days). No release is touched | Builds and tests the images with the latest release. The test ISO is the run's `candidate-iso` artifact (14 days). No release is touched unless you turn on `attach_iso` |
+
+Download artifacts from the run's page (Summary → Artifacts), or with
+`gh run download <run id> -n <artifact name>`.
 
 One-time setup:
 

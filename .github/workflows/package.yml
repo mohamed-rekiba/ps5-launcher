@@ -4,8 +4,12 @@ name: Package
 # publishes the release. It starts when a v* tag is pushed (Release Please pushes one with
 # RELEASE_PLEASE_TOKEN; see release.yml). os.yml starts on the same tag and waits for this
 # workflow to publish.
-# By hand (workflow_dispatch), choose the release tag under "Use workflow from": it builds that
-# tag again. It never changes a release that is already published.
+# By hand (workflow_dispatch), "Use workflow from" decides where the files go:
+#   a v* tag   builds that tag again and attaches the files to its release (never to a release
+#              that is already published)
+#   a branch   (main, for example) builds that branch and keeps the files as this run's
+#              artifacts, for 14 days; no release is touched
+
 on:
   push:
     tags: ["v*"]
@@ -20,15 +24,17 @@ concurrency:
 
 env:
   CARGO_TERM_COLOR: always
-  # The tag this run is for: the pushed tag, or by hand the tag under "Use workflow from".
+  # The tag this run is for: the pushed tag, or by hand the tag under "Use workflow from". From a
+  # branch it is the branch name, and only the artifact steps use it.
   TAG: ${{ github.ref_name }}
   # The built app checks this repository for updates (a fork follows its own releases).
   PS5_LAUNCHER_REPO: ${{ github.repository }}
 
 jobs:
   # The draft release the files go to: Release Please's, or a new draft for a tag pushed by hand.
-  # A published release is never changed.
+  # A published release is never changed. A run from a branch has no release.
   release:
+    if: github.ref_type == 'tag'
     runs-on: ubuntu-24.04
     timeout-minutes: 10
     steps:
@@ -37,7 +43,7 @@ jobs:
           GH_TOKEN: ${{ github.token }}
           GH_REPO: ${{ github.repository }}
         run: |
-          if [ "$GITHUB_REF_TYPE" != tag ] || ! [[ $TAG =~ ^v[0-9]+\.[0-9]+\.[0-9]+([-+.][0-9A-Za-z.-]+)?$ ]]; then
+          if ! [[ $TAG =~ ^v[0-9]+\.[0-9]+\.[0-9]+([-+.][0-9A-Za-z.-]+)?$ ]]; then
             echo "::error::Not a release tag: $TAG"
             exit 1
           fi
@@ -66,6 +72,8 @@ jobs:
 
   linux-x86_64:
     needs: release
+    # On a tag after the release job; from a branch, where that job is skipped, straight away.
+    if: ${{ !cancelled() && (needs.release.result == 'success' || needs.release.result == 'skipped') }}
     # Ubuntu 22.04 (glibc 2.35) so the binary runs on most distros from the last few years.
     runs-on: ubuntu-22.04
     timeout-minutes: 60
@@ -95,20 +103,40 @@ jobs:
           (cd dist && sha256sum "$NAME.tar.gz" > "$NAME.tar.gz.sha256")
           ls -la dist
       - id: version
-        run: echo "version=${TAG#v}" >> "$GITHUB_OUTPUT"
+        # The tag's version; from a branch, the version in Cargo.toml.
+        run: |
+          if [ "$GITHUB_REF_TYPE" = tag ]; then
+            echo "version=${TAG#v}" >> "$GITHUB_OUTPUT"
+          else
+            echo "version=$(sed -n 's/^version = "\(.*\)"/\1/p' Cargo.toml | head -1)" >> "$GITHUB_OUTPUT"
+          fi
       - uses: ./.github/actions/linux-packages
         with:
           binary: target/release/ps5-launcher
           version: ${{ steps.version.outputs.version }}
       - name: Attach to the release
+        if: github.ref_type == 'tag'
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
           gh release upload "$TAG" "dist/$NAME.tar.gz" "dist/$NAME.tar.gz.sha256" dist/packages/* --clobber
+      - name: Keep as artifacts (a run from a branch)
+        if: github.ref_type != 'tag'
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: ps5-launcher-linux-x86_64
+          path: |
+            dist/${{ env.NAME }}.tar.gz
+            dist/${{ env.NAME }}.tar.gz.sha256
+            dist/packages/*
+          if-no-files-found: error
+          retention-days: 14
 
   # One universal app bundle (Apple Silicon + Intel).
   macos-universal:
     needs: release
+    # On a tag after the release job; from a branch, where that job is skipped, straight away.
+    if: ${{ !cancelled() && (needs.release.result == 'success' || needs.release.result == 'skipped') }}
     runs-on: macos-14
     timeout-minutes: 60
     steps:
@@ -135,13 +163,25 @@ jobs:
             dist
           ls -la dist
       - name: Attach to the release
+        if: github.ref_type == 'tag'
         env:
           GH_TOKEN: ${{ github.token }}
         run: gh release upload "$TAG" dist/ps5-launcher-macos-universal.zip dist/ps5-launcher-macos-universal.zip.sha256 --clobber
+      - name: Keep as artifacts (a run from a branch)
+        if: github.ref_type != 'tag'
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: ps5-launcher-macos-universal
+          path: |
+            dist/ps5-launcher-macos-universal.zip
+            dist/ps5-launcher-macos-universal.zip.sha256
+          if-no-files-found: error
+          retention-days: 14
 
-  # Publishes the release once every file is attached.
+  # Publishes the release once every file is attached. Only on a tag.
   publish:
     needs: [linux-x86_64, macos-universal]
+    if: github.ref_type == 'tag'
     runs-on: ubuntu-24.04
     timeout-minutes: 10
     steps:
