@@ -282,7 +282,7 @@ pub struct App {
     pub crash_logs: HashMap<String, std::path::PathBuf>,
     /// The emulator (addon id) and build of each game's last session in this run, by game ID,
     /// as the launch recorded them: the game's rating names them.
-    pub played_on: HashMap<String, (String, String)>,
+    pub played_on: HashMap<String, (String, crate::sessions::BuildCell)>,
     /// Library: show one console's games (None: every console).
     pub platform_filter: Option<crate::platform::Platform>,
     /// The Library catalog has games for more than one console (shows badges and a console chip).
@@ -2941,22 +2941,12 @@ struct EmulatorProbe {
     platform: crate::platform::Platform,
     cfg: crate::config::Config,
     /// What the game's last session in this run recorded at launch.
-    played: Option<(String, String)>,
+    played: Option<(String, crate::sessions::BuildCell)>,
 }
 
 impl EmulatorProbe {
-    /// The emulator's addon id and its build: as the last session recorded them, else the
-    /// emulator that runs the game now (KytyPS5's build for PS5 games, shadPS4's release for PS4
-    /// games).
+    /// The emulator's addon id and its build (`sessions::rating_identity`).
     fn identify(self) -> (String, String) {
-        match self.played {
-            Some((emulator, build)) if !build.is_empty() => (emulator, build),
-            // Launched, but its build was not known yet when it ended, or it was started outside the launcher.
-            Some((emulator, _)) => (emulator, crate::sessions::current_identity(self.platform, &self.cfg).1.resolve()),
-            None => {
-                let (emulator, build) = crate::sessions::current_identity(self.platform, &self.cfg);
-                (emulator.to_string(), build.resolve())
-            }
-        }
+        crate::sessions::rating_identity(self.played, self.platform, &self.cfg)
     }
 }

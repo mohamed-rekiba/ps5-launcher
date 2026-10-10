@@ -204,6 +204,64 @@ pub(crate) fn launch_identity(platform: Platform, cfg: &Config, kyty_installed: 
     (platform.emulator_id(), build)
 }
 
+/// One session's build, shared by the session, its ended record and the thread that reads a
+/// banner: the probe fills this cell, so the build reaches the session however early the game
+/// ends, and no lookup by PID can pick another session.
+#[derive(Clone, Debug, Default)]
+pub struct BuildCell(Arc<std::sync::OnceLock<String>>);
+
+impl BuildCell {
+    pub fn known(name: String) -> BuildCell {
+        let cell = BuildCell::default();
+        let _ = cell.0.set(name);
+        cell
+    }
+
+    /// The build, once known.
+    #[cfg_attr(not(test), allow(dead_code, reason = "the tests look at a cell before its probe ends; the app only waits"))]
+    pub fn get(&self) -> Option<&str> {
+        self.0.get().map(String::as_str)
+    }
+
+    /// The build; waits for the probe (at most its 3 s). Off the UI thread.
+    pub fn wait(&self) -> String {
+        self.0.wait().clone()
+    }
+}
+
+/// A launch's build cell: filled now when the name is known, else by `probe` on its own thread,
+/// with the executable of the launch.
+pub fn start_build(build: Build, probe: impl FnOnce(&Path) -> String + Send + 'static) -> BuildCell {
+    match build {
+        Build::Known(name) => BuildCell::known(name),
+        Build::Probe(path) => {
+            let cell = BuildCell::default();
+            let fill = cell.clone();
+            let started = std::thread::Builder::new().name("build-probe".into()).spawn(move || {
+                let _ = fill.0.set(probe(&path));
+            });
+            if let Err(e) = started {
+                crate::log!("could not read the emulator's build: {e}");
+                let _ = cell.0.set(String::new());
+            }
+            cell
+        }
+    }
+}
+
+/// The emulator and build a rating names: the game's last session in this run, as its launch
+/// recorded them (waiting for a banner still being read), else the emulator that runs the game
+/// now. Off the UI thread.
+pub fn rating_identity(played: Option<(String, BuildCell)>, platform: Platform, cfg: &Config) -> (String, String) {
+    match played {
+        Some((emulator, build)) => (emulator, build.wait()),
+        None => {
+            let (emulator, build) = current_identity(platform, cfg);
+            (emulator.to_string(), build.resolve())
+        }
+    }
+}
+
 /// `launch_identity` with the managed builds' state files.
 pub(crate) fn current_identity(platform: Platform, cfg: &Config) -> (&'static str, Build) {
     launch_identity(platform, cfg, &crate::kyty::load_state().installed, &crate::kyty::root(), &crate::shad::load_state().installed)
@@ -314,9 +372,9 @@ pub struct Session {
     pub stopping: bool,
     /// The emulator's addon id; "" for a detected game the launcher does not know.
     pub emulator: String,
-    /// The build it runs, captured at launch; "" until known (a custom KytyPS5 is asked off the
-    /// UI thread), and for games started outside the launcher.
-    pub build: String,
+    /// The build it runs, captured at launch (a custom KytyPS5's banner is read off the UI
+    /// thread into it); "" for games started outside the launcher.
+    pub build: BuildCell,
 }
 
 #[derive(Clone, Debug)]
@@ -329,7 +387,7 @@ pub struct Ended {
     pub log: PathBuf,
     /// The session's emulator and build (see `Session`).
     pub emulator: String,
-    pub build: String,
+    pub build: BuildCell,
 }
 
 struct Inner {
@@ -421,19 +479,8 @@ impl Sessions {
         let pid = child.id();
         inner.children.insert(pid, child);
         let (emulator, build) = current_identity(game.platform, &cfg);
-        let build = match build {
-            Build::Known(name) => name,
-            probe => {
-                let inner = self.inner.clone();
-                std::thread::spawn(move || {
-                    let name = probe.resolve();
-                    if let Some(s) = inner.lock().unwrap().live.iter_mut().find(|s| s.pid == pid) {
-                        s.build = name;
-                    }
-                });
-                String::new()
-            }
-        };
+        // Read from the executable this launch runs, whatever Settings says later.
+        let build = start_build(build, |path| Build::Probe(path.to_path_buf()).resolve());
         inner.live.push(Session {
             pid,
             game_id: game.id.clone(),
@@ -516,7 +563,7 @@ impl Sessions {
                     None => (String::new(), String::new(), Path::new(path).file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_else(|| "Unknown game".into()), String::new()),
                 };
                 crate::log!("detected running game: {name} (pid {pid})");
-                inner.live.push(Session { pid: *pid, game_id, title_id, name, path: path.clone(), since: *started, own: false, log: PathBuf::new(), stopping: false, emulator, build: String::new() });
+                inner.live.push(Session { pid: *pid, game_id, title_id, name, path: path.clone(), since: *started, own: false, log: PathBuf::new(), stopping: false, emulator, build: BuildCell::known(String::new()) });
                 changed = true;
             }
             // Finished sessions.
@@ -879,6 +926,40 @@ mod identity_tests {
         assert_eq!(identity(Platform::Ps5, &cfg, "", ""), ("kyty", Build::Probe(PathBuf::from(format!("{ROOT}/current/kyty_emulator")))), "no tag: ask the binary");
         cfg.emulator = "/home/u/KytyPS5/_Build/kyty_emulator".into();
         assert_eq!(identity(Platform::Ps5, &cfg, "KytyPS5-2026-09-29-59a1760", ""), ("kyty", Build::Probe(PathBuf::from("/home/u/KytyPS5/_Build/kyty_emulator"))), "the user's own build: ask it");
+    }
+
+    #[test]
+    fn an_early_exit_still_gets_the_build_it_launched_with() {
+        use super::{rating_identity, start_build};
+        let mut cfg = Config::default();
+        cfg.emulator = "/a/kyty_emulator".into();
+        let (emulator, build) = identity(Platform::Ps5, &cfg, "", "");
+        let (go, wait) = std::sync::mpsc::channel::<()>();
+        let cell = start_build(build, move |path| {
+            wait.recv().unwrap();
+            format!("banner of {}", path.display())
+        });
+        // The game exits at once: its ended session keeps the build, unknown for now.
+        let ended = cell.clone();
+        assert_eq!(ended.get(), None);
+        // Then the user picks another KytyPS5 in Settings.
+        cfg.emulator = "/b/kyty_emulator".into();
+        let rating = std::thread::spawn(move || rating_identity(Some((emulator.to_string(), ended)), Platform::Ps5, &cfg));
+        // Then the banner probe finishes.
+        go.send(()).unwrap();
+        assert_eq!(rating.join().unwrap(), ("kyty".to_string(), "banner of /a/kyty_emulator".to_string()), "the launch-time build, not the one set now");
+        assert_eq!(cell.get(), Some("banner of /a/kyty_emulator"));
+    }
+
+    #[test]
+    fn a_rating_names_the_session_build_or_without_a_session_the_current_one() {
+        use super::{rating_identity, BuildCell};
+        let mut cfg = Config::default();
+        cfg.shad_emulator = "/opt/shad/AppRun".into();
+        assert_eq!(rating_identity(None, Platform::Ps4, &cfg), ("shadps4".to_string(), "custom build".to_string()), "no session in this run");
+        assert_eq!(rating_identity(Some(("shadps4".into(), BuildCell::known("0.9.0".into()))), Platform::Ps4, &cfg), ("shadps4".to_string(), "0.9.0".to_string()));
+        assert_eq!(rating_identity(Some(("shadps4".into(), BuildCell::known(String::new()))), Platform::Ps4, &cfg), ("shadps4".to_string(), String::new()),
+            "a game started outside the launcher has no known build; the one set now is not guessed");
     }
 
     #[test]
