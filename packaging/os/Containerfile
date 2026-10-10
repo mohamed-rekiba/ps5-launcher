@@ -9,7 +9,8 @@
 # The image signing key's public half comes in as signing/cosign.pub; the containers policy
 # (signing/*.in) requires it for IMAGE_REF's repository.
 #   LAUNCHER_VERSION  the version of the launcher rpm in launcher/
-ARG BASE_IMAGE=quay.io/fedora/fedora-bootc:44
+ARG IMAGE_VERSION=44
+ARG BASE_IMAGE=quay.io/fedora/fedora-bootc:${IMAGE_VERSION}
 FROM ${BASE_IMAGE}
 ARG BASE_IMAGE
 ARG IMAGE_REF
