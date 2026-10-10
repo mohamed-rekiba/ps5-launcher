@@ -12,10 +12,9 @@ on:
         description: Build the installer ISO and attach it to the latest release
         type: boolean
         default: true
-  # Called by release.yml once a launcher release is published, so the image seeds the new version.
+  # No schedule and no call from release.yml any more: the Fedora image (os-fedora.yml) replaces
+  # this one. It fails on this fork, and only a manual run remains until os/ is removed.
   workflow_call:
-  schedule:
-    - cron: "30 5 * * *"
 
 permissions:
   contents: write

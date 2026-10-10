@@ -15,7 +15,6 @@ on:
 permissions:
   contents: write
   pull-requests: write
-  packages: write   # for os.yml, which pushes the OS images
 
 concurrency:
   group: release
@@ -59,7 +58,5 @@ jobs:
           GH_REPO: ${{ github.repository }}
         run: gh release edit "${{ needs.release-please.outputs.tag }}" --draft=false
 
-  # The OS image and ISO take the Linux tarball of the release that was just published.
-  os:
-    needs: publish
-    uses: ./.github/workflows/os.yml
+  # The OS image is not built here for now: the Bazzite image (os.yml) is replaced by
+  # os-fedora.yml, which joins this workflow (with `secrets: inherit`) once its keys exist.

@@ -59,8 +59,8 @@ name: PS5 Launcher OS (Fedora)
 # TODO: delete old testing-* tags (and their .sig tags) from the registry.
 
 on:
-  schedule:
-    - cron: "45 4 * * *"
+  # TODO: bring back the nightly schedule (cron "45 4 * * *") once the signing environment and
+  # SECUREBOOT_KEY exist and one manual run is green. Without them every scheduled run fails.
   workflow_dispatch:
     inputs:
       launcher_tag:
