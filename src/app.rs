@@ -478,6 +478,14 @@ pub fn run(ui: AppWindow, monitors: Vec<Monitor>, target_monitor: Option<Monitor
 
     wire_callbacks(&ui);
     crate::gamepad::spawn(|p| post(move |app| app.on_pad(p)));
+    // The OS's boot health check asks the launcher over this socket; the power key is the OS's.
+    // Both end when they drop, after the event loop: the socket file goes, and logind gets the key.
+    #[cfg(target_os = "linux")]
+    let health = (crate::system::Mode::current() != crate::system::Mode::Desktop).then(crate::health::start_for_launcher).flatten();
+    #[cfg(target_os = "linux")]
+    let power_key = (crate::system::Mode::current() == crate::system::Mode::Os)
+        .then(|| crate::power_key::spawn(|| post(|app| app.on_power_key())))
+        .flatten();
 
     // Clock + session timers: one cheap tick per second (only changed text is pushed).
     let tick = slint::Timer::default();
@@ -495,6 +503,8 @@ pub fn run(ui: AppWindow, monitors: Vec<Monitor>, target_monitor: Option<Monitor
     ui.show().expect("could not open window");
     crate::display::place_window(&ui, target_monitor.as_ref(), windowed);
     slint::run_event_loop().expect("event loop failed");
+    #[cfg(target_os = "linux")]
+    drop((power_key, health));
     drop(tick);
     with_app(|app| {
         app.installer.shutdown();

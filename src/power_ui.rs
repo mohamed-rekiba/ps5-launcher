@@ -163,6 +163,16 @@ impl App {
         self.check_staged();
     }
 
+    /// The PC's power key (PS5 Launcher OS, see `power_key`): the Power menu, as a held PS button
+    /// opens it. During a game the launcher comes forward first.
+    #[cfg(target_os = "linux")]
+    pub fn on_power_key(&mut self) {
+        if !self.live.is_empty() {
+            crate::sessions::show_launcher();
+        }
+        self.open_power_menu();
+    }
+
     /// Before a menu opens over the screen: stop editing text there.
     pub fn end_editing(&mut self) {
         if self.search_editing {
