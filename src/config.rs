@@ -9,7 +9,7 @@
 
 use crate::emulators::manifest::Console;
 use crate::emulators::registry::Preferences;
-use crate::preferences::{choose, join_args, BuildSource, EmulatorPrefs, SettingValue};
+use crate::preferences::{choose, join_args, BuildSource, EmulatorPrefs, Emulators, SettingValue};
 use crate::util::{atomic_write, config_dir, expand_home};
 use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
@@ -27,7 +27,7 @@ pub struct Config {
     /// 0 (or missing): a file from before the per-emulator preferences.
     pub config_version: u32,
     /// Each emulator's preferences, by emulator id; the ones of a missing addon too.
-    pub emulators: BTreeMap<String, EmulatorPrefs>,
+    pub emulators: Emulators,
     /// The user's emulator for each console's games, by console key ("ps5", "ps4").
     pub console_emulators: BTreeMap<String, String>,
     /// The emulator chosen for single games, by title id.
@@ -93,6 +93,9 @@ pub(crate) struct Read {
     /// The old KytyPS5 fields as last read or saved: a save stores only the ones that changed,
     /// so a stored value the launcher cannot use stays as it is.
     synced: KytyFields,
+    /// Why this run must not save over the file (it cannot be read, or a newer launcher wrote
+    /// it); None to save normally.
+    keep_file: Option<String>,
 }
 
 /// The old fields that are KytyPS5 settings.
@@ -123,7 +126,7 @@ impl Default for Config {
     fn default() -> Self {
         Config {
             config_version: 0,
-            emulators: BTreeMap::new(),
+            emulators: Emulators::default(),
             console_emulators: BTreeMap::new(),
             game_emulators: BTreeMap::new(),
             emulator: String::new(),
@@ -187,10 +190,25 @@ impl Config {
 
     /// The settings in a config.json's bytes, migrated to this version; the defaults when they
     /// are not a config. `kyty_root` is the managed KytyPS5's folder (`kyty::root`).
+    ///
+    /// A file that cannot be read, or one from a newer launcher, is read as well as it can be,
+    /// and this run never saves over it.
     pub fn from_json_with(bytes: &[u8], kyty_root: &Path) -> Config {
-        let mut cfg: Config = serde_json::from_slice(bytes).unwrap_or_default();
+        let (mut cfg, mut keep_file) = match serde_json::from_slice::<Config>(bytes) {
+            Ok(cfg) => (cfg, None),
+            // No file yet.
+            Err(_) if bytes.is_empty() => (Config::default(), None),
+            Err(e) => (Config::default(), Some(format!("it cannot be read ({e})"))),
+        };
+        if cfg.config_version > CONFIG_VERSION {
+            keep_file = Some(format!("it is from a newer launcher (version {})", cfg.config_version));
+        }
         cfg.one_update_switch();
         cfg.migrate(kyty_root);
+        if let (Some(why), Some(read)) = (keep_file, cfg.read.as_mut()) {
+            crate::log!("config.json: {why}; this run uses what it can and does not save over it");
+            read.keep_file = Some(why);
+        }
         cfg
     }
 
@@ -218,25 +236,30 @@ impl Config {
         let flat = self.kyty_fields();
         let kyty_source = kyty_source(&self.emulator, kyty_root);
         let shad_source = shad_source(&self.shad_emulator);
-        let kyty = self.emulators.entry(KYTY.into()).or_default();
-        kyty.source.get_or_insert(kyty_source);
-        for (key, value) in flat.values() {
-            kyty.settings.entry(key.into()).or_insert(value);
+        // An entry that cannot be read stays as it is, and the old fields stay in effect.
+        if let Some(kyty) = self.emulators.readable_mut(KYTY) {
+            kyty.source.get_or_insert(kyty_source);
+            for (key, value) in flat.values() {
+                kyty.settings.entry(key.into()).or_insert(value);
+            }
+            if !kyty.settings.contains_key("extra_args") {
+                kyty.settings.insert("extra_args".into(), SettingValue::Argv(crate::sessions::shell_split(&flat.extra_args)));
+                kyty.texts.insert("extra_args".into(), flat.extra_args.clone());
+            }
         }
-        if !kyty.settings.contains_key("extra_args") {
-            kyty.settings.insert("extra_args".into(), SettingValue::Argv(crate::sessions::shell_split(&flat.extra_args)));
-            kyty.texts.insert("extra_args".into(), flat.extra_args.clone());
+        if let Some(shad) = self.emulators.readable_mut(SHAD) {
+            shad.source.get_or_insert(shad_source);
         }
-        self.emulators.entry(SHAD.into()).or_default().source.get_or_insert(shad_source);
         self.apply_to_old_fields(kyty_root);
-        self.read = Some(Read { version: self.config_version, kyty_root: kyty_root.to_path_buf(), synced: self.kyty_fields() });
-        self.config_version = CONFIG_VERSION;
+        self.read = Some(Read { version: self.config_version, kyty_root: kyty_root.to_path_buf(), synced: self.kyty_fields(), keep_file: None });
+        // A newer version keeps its number: it is never saved over.
+        self.config_version = self.config_version.max(CONFIG_VERSION);
     }
 
     /// Set the old fields from the per-emulator form, for the launch path and Settings. A value
     /// of the wrong type leaves the old field as it is.
     fn apply_to_old_fields(&mut self, kyty_root: &Path) {
-        let kyty = &self.emulators[KYTY];
+        let Some(kyty) = self.emulators.get(KYTY) else { return self.apply_shad_to_old_field() };
         match &kyty.source {
             Some(BuildSource::Custom { executable }) => self.emulator = executable.clone(),
             Some(BuildSource::Managed) if kyty_source(&self.emulator, kyty_root) != BuildSource::Managed => self.emulator.clear(),
@@ -255,7 +278,11 @@ impl Config {
                 _ => join_args(args),
             };
         }
-        match &self.emulators[SHAD].source {
+        self.apply_shad_to_old_field();
+    }
+
+    fn apply_shad_to_old_field(&mut self) {
+        match self.emulators.get(SHAD).and_then(|s| s.source.as_ref()) {
             Some(BuildSource::Custom { executable }) => self.shad_emulator = executable.clone(),
             Some(BuildSource::Managed) => self.shad_emulator.clear(),
             None => {}
@@ -282,7 +309,7 @@ impl Config {
         let now = self.kyty_fields();
         let read = self.read.as_mut().expect("migrate sets it");
         let before = std::mem::replace(&mut read.synced, now.clone());
-        let kyty = self.emulators.entry(KYTY.into()).or_default();
+        let Some(kyty) = self.emulators.readable_mut(KYTY) else { return };
         for ((key, value), (_, old)) in now.values().into_iter().zip(before.values()) {
             if value != old {
                 kyty.settings.insert(key.into(), value);
@@ -304,13 +331,17 @@ impl Config {
     pub fn set_kyty_executable(&mut self, text: &str) {
         let root = self.read.as_ref().map_or_else(crate::kyty::root, |r| r.kyty_root.clone());
         self.emulator = text.to_string();
-        self.emulators.entry(KYTY.into()).or_default().source = Some(kyty_source(text, &root));
+        if let Some(kyty) = self.emulators.readable_mut(KYTY) {
+            kyty.source = Some(kyty_source(text, &root));
+        }
     }
 
     /// The user picks shadPS4's executable ("": the managed build).
     pub fn set_shad_executable(&mut self, text: &str) {
         self.shad_emulator = text.to_string();
-        self.emulators.entry(SHAD.into()).or_default().source = Some(shad_source(text));
+        if let Some(shad) = self.emulators.readable_mut(SHAD) {
+            shad.source = Some(shad_source(text));
+        }
     }
 
     /// Settings has one "Update automatically" switch for the launcher, shadPS4 and KytyPS5.
@@ -339,7 +370,9 @@ impl Config {
 
     /// Turn an emulator on or off; its other preferences stay.
     pub fn set_enabled(&mut self, id: &str, on: bool) {
-        self.emulators.entry(id.into()).or_default().enabled = on;
+        if let Some(prefs) = self.emulators.readable_mut(id) {
+            prefs.enabled = on;
+        }
     }
 
     /// The user's emulator for a console's games; None: the launcher's default.
@@ -361,6 +394,10 @@ impl Config {
     /// Save to `path`. The first save over a file from before version 1 keeps that file as
     /// `<path>.legacy`, once.
     pub fn save_at(&mut self, path: &Path) {
+        if let Some(why) = self.read.as_ref().and_then(|r| r.keep_file.as_ref()) {
+            crate::log!("config not saved: config.json {why}");
+            return;
+        }
         let json = self.to_json();
         if json.is_empty() {
             return;
@@ -846,6 +883,51 @@ mod tests {
         c.save_at(&path);
         assert_eq!(std::fs::read(&backup).unwrap(), old);
         assert_eq!(Config::from_json_with(&std::fs::read(&path).unwrap(), Path::new(KYTY_ROOT)).config_version, 1);
+    }
+
+    #[test]
+    fn an_unreadable_emulator_entry_is_kept_and_the_rest_of_the_config_loads() {
+        let kyty = serde_json::json!({"source": {"future": {"x": 1}}, "settings": {"width": 2560}});
+        let shad = serde_json::json!({"enabled": "maybe"});
+        let text = serde_json::json!({"game_dirs": ["/g"], "width": 1280, "shad_emulator": "/s/AppRun",
+            "emulators": {"kyty": kyty, "shadps4": shad, "ghost": {"enabled": false, "future_field": [1]}}}).to_string();
+        let mut c = read(&text);
+        assert_eq!(c.game_dirs, ["/g"], "the other settings load");
+        assert_eq!((c.width, c.shad_emulator.as_str()), (1280, "/s/AppRun"), "the old fields stay in effect");
+        c.set_kyty_executable("/k/kyty_emulator");
+        c.width = 1600;
+        let json: serde_json::Value = serde_json::from_slice(&c.to_json()).unwrap();
+        assert_eq!(json["emulators"]["kyty"], kyty, "written back unchanged");
+        assert_eq!(json["emulators"]["shadps4"], shad);
+        assert_eq!(json["emulators"]["ghost"]["future_field"], serde_json::json!([1]), "an unknown field is kept");
+        assert_eq!((json["emulator"].as_str(), json["width"].as_u64()), (Some("/k/kyty_emulator"), Some(1600)), "edits still go to the old fields");
+        assert_eq!(again(&mut c).width, 1600);
+    }
+
+    #[test]
+    fn a_config_that_cannot_be_read_is_not_saved_over() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("config.json");
+        let text = br#"{"config_version": 1, "game_dirs": "not a list", "rawg_key": "k"}"#;
+        std::fs::write(&path, text).unwrap();
+        let mut c = Config::from_json_with(text, Path::new(KYTY_ROOT));
+        c.width = 640;
+        c.save_at(&path);
+        assert_eq!(std::fs::read(&path).unwrap(), text, "the user can still fix it by hand");
+        assert!(!dir.path().join("config.json.legacy").exists());
+    }
+
+    #[test]
+    fn a_config_from_a_newer_launcher_is_read_but_not_saved_over() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("config.json");
+        let text = br#"{"config_version": 2, "width": 1280, "game_dirs": ["/g"], "emulators": {"kyty": {"settings": {"height": 720}}}}"#;
+        std::fs::write(&path, text).unwrap();
+        let mut c = Config::from_json_with(text, Path::new(KYTY_ROOT));
+        assert_eq!((c.config_version, c.width, c.height), (2, 1280, 720), "read as well as it can be");
+        assert_eq!(c.game_dirs, ["/g"]);
+        c.save_at(&path);
+        assert_eq!(std::fs::read(&path).unwrap(), text);
     }
 
     #[test]

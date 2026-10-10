@@ -25,11 +25,78 @@ pub struct EmulatorPrefs {
     /// by setting key: the same arguments as in `settings`, as they were written.
     #[serde(skip_serializing_if = "BTreeMap::is_empty")]
     pub texts: BTreeMap<String, String>,
+    /// Fields this launcher does not know (from a newer one), kept as they are.
+    #[serde(flatten)]
+    pub extra: BTreeMap<String, serde_json::Value>,
 }
 
 impl Default for EmulatorPrefs {
     fn default() -> Self {
-        EmulatorPrefs { enabled: true, source: None, settings: BTreeMap::new(), texts: BTreeMap::new() }
+        EmulatorPrefs { enabled: true, source: None, settings: BTreeMap::new(), texts: BTreeMap::new(), extra: BTreeMap::new() }
+    }
+}
+
+/// Every emulator's preferences, by emulator id. It reads as a map of the readable ones; an
+/// entry this launcher cannot read (a build kind from a newer launcher, a hand edit) is kept
+/// as raw JSON and written back unchanged, so one entry never costs the rest of the config.
+#[derive(Clone, Debug, Default, PartialEq)]
+pub struct Emulators {
+    readable: BTreeMap<String, EmulatorPrefs>,
+    unreadable: BTreeMap<String, serde_json::Value>,
+}
+
+impl Emulators {
+    /// Whether the entry for `id` could not be read.
+    pub fn is_unreadable(&self, id: &str) -> bool {
+        self.unreadable.contains_key(id)
+    }
+
+    /// The entry for `id` to change, made when missing; None when it could not be read.
+    pub fn readable_mut(&mut self, id: &str) -> Option<&mut EmulatorPrefs> {
+        (!self.is_unreadable(id)).then(|| self.readable.entry(id.to_string()).or_default())
+    }
+}
+
+impl std::ops::Deref for Emulators {
+    type Target = BTreeMap<String, EmulatorPrefs>;
+    fn deref(&self) -> &Self::Target {
+        &self.readable
+    }
+}
+
+impl Serialize for Emulators {
+    fn serialize<S: serde::Serializer>(&self, s: S) -> Result<S::Ok, S::Error> {
+        use serde::ser::{Error, SerializeMap};
+        let mut all: BTreeMap<&String, serde_json::Value> = BTreeMap::new();
+        for (id, prefs) in &self.readable {
+            all.insert(id, serde_json::to_value(prefs).map_err(S::Error::custom)?);
+        }
+        for (id, raw) in &self.unreadable {
+            all.insert(id, raw.clone());
+        }
+        let mut map = s.serialize_map(Some(all.len()))?;
+        for (id, value) in all {
+            map.serialize_entry(id, &value)?;
+        }
+        map.end()
+    }
+}
+
+impl<'de> Deserialize<'de> for Emulators {
+    fn deserialize<D: serde::Deserializer<'de>>(d: D) -> Result<Self, D::Error> {
+        let mut out = Emulators::default();
+        for (id, raw) in BTreeMap::<String, serde_json::Value>::deserialize(d)? {
+            match serde_json::from_value::<EmulatorPrefs>(raw.clone()) {
+                Ok(prefs) => {
+                    out.readable.insert(id, prefs);
+                }
+                Err(e) => {
+                    crate::log!("config.json: the preferences of emulator \"{id}\" cannot be read ({e}); they are kept as they are");
+                    out.unreadable.insert(id, raw);
+                }
+            }
+        }
+        Ok(out)
     }
 }
 
