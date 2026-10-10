@@ -66,6 +66,19 @@ pub fn label_icon(row: Row) -> (&'static str, &'static str) {
 }
 
 /// A divider sits after Close game (and Cancel power off), and before Log out / Switch to desktop.
+/// After the rows change (logind's answer added Sleep, say): the index of the row that was
+/// selected, so focus stays on the same action. When it is gone, the nearest index.
+pub fn keep_selection(old: &[Row], new: &[Row], idx: usize) -> usize {
+    let same = old.get(idx).and_then(|row| new.iter().position(|r| r == row));
+    same.unwrap_or(idx).min(new.len().saturating_sub(1))
+}
+
+/// "Switch to desktop" needs a desktop session and PS5 Launcher OS's root helper, which sets the
+/// next login. On another Linux PC there is no helper, so the row would only fail.
+pub fn can_switch_to_desktop(desktop_session: bool, helper: bool) -> bool {
+    desktop_session && helper
+}
+
 pub fn divider(prev: Option<Row>, row: Row) -> bool {
     let leaving = |r: Row| matches!(r, Row::Action(PowerAction::LogOut | PowerAction::SwitchToDesktop));
     match prev {
@@ -94,7 +107,10 @@ impl App {
 
     fn power_caps(&self) -> PowerCaps {
         // Phase 6 (system pages) fills in update_staged from `bootc status`.
-        PowerCaps { can_sleep: self.power.can_sleep, has_desktop: std::path::Path::new(DESKTOP_SESSION).exists(), update_staged: false }
+        PowerCaps { can_sleep: self.power.can_sleep, has_desktop: can_switch_to_desktop(
+                std::path::Path::new(DESKTOP_SESSION).exists(),
+                std::path::Path::new(HELPER).exists(),
+            ), update_staged: false }
     }
 
     /// PS button held, or the top bar's power button: open the Power menu from anywhere.
@@ -138,10 +154,12 @@ impl App {
             });
             post(move |app| {
                 if app.power.can_sleep != can {
+                    let before = app.power.rows.clone();
                     app.power.can_sleep = can;
                     if app.overlay == Overlay::Power {
                         app.push_power_rows();
-                        app.set_focus(Z_POWER, app.idx.min(app.power.rows.len() as i32 - 1).max(0));
+                        let idx = keep_selection(&before, &app.power.rows, app.idx.max(0) as usize);
+                        app.set_focus(Z_POWER, idx as i32);
                     } else if app.overlay == Overlay::Quick {
                         app.push_quick();
                     }
@@ -385,6 +403,24 @@ mod tests {
 
     fn seps(rows: &[Row]) -> Vec<bool> {
         rows.iter().enumerate().map(|(i, r)| divider(i.checked_sub(1).map(|p| rows[p]), *r)).collect()
+    }
+
+    #[test]
+    fn focus_stays_on_the_same_action_when_rows_change() {
+        let before = [Row::Action(Restart { update: false }), Row::Action(PowerOff), Row::Action(LogOut)];
+        let after = [Row::Action(Sleep), Row::Action(Restart { update: false }), Row::Action(PowerOff), Row::Action(LogOut)];
+        assert_eq!(keep_selection(&before, &after, 1), 2, "Power off moved down one row");
+        assert_eq!(keep_selection(&after, &before, 0), 0, "Sleep is gone: the nearest row");
+        assert_eq!(keep_selection(&after, &before, 3), 2, "Log out moved up one row");
+        assert_eq!(keep_selection(&[], &before, 0), 0);
+        assert_eq!(keep_selection(&after, &[], 2), 0);
+    }
+
+    #[test]
+    fn switching_to_the_desktop_needs_the_helper_too() {
+        assert!(can_switch_to_desktop(true, true));
+        assert!(!can_switch_to_desktop(true, false), "a normal Linux PC: no helper");
+        assert!(!can_switch_to_desktop(false, true));
     }
 
     #[test]
