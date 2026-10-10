@@ -101,7 +101,26 @@ mod tests {
 
     #[test]
     fn the_app_keeps_its_addons_in_its_data_folder() {
-        assert_eq!(root(), crate::util::data_dir());
-        assert!(root().ends_with(crate::util::APP_NAME));
+        // The environment is set in a child test process: changing it here would race the
+        // other tests, which read the same variables.
+        let root_with = |xdg: Option<&str>, home: &str| {
+            let mut child = std::process::Command::new(std::env::current_exe().unwrap());
+            child.args(["--exact", "emulators::startup::tests::print_root", "--ignored", "--nocapture", "--test-threads=1"]).env("HOME", home);
+            match xdg {
+                Some(x) => child.env("XDG_DATA_HOME", x),
+                None => child.env_remove("XDG_DATA_HOME"),
+            };
+            let out = String::from_utf8(child.output().unwrap().stdout).unwrap();
+            // The harness prints the test's name on the same line, before the output.
+            out.lines().find_map(|l| l.split_once("root=").map(|(_, r)| r.to_string())).unwrap_or_else(|| panic!("{out}"))
+        };
+        assert_eq!(root_with(Some("/data/xdg"), "/home/someone"), "/data/xdg/ps5-launcher");
+        assert_eq!(root_with(None, "/home/someone"), "/home/someone/.local/share/ps5-launcher");
+    }
+
+    #[test]
+    #[ignore = "run by the_app_keeps_its_addons_in_its_data_folder, in a child process with its own environment"]
+    fn print_root() {
+        println!("root={}", root().display());
     }
 }
