@@ -1,4 +1,4 @@
-import { S, Theme, Icons, Zone, DownloadData, BootStep, ChipData, ActionData, TileData, HeroData, CardData, CardRow, GenreChip, Fact, FactRow, Shot, HubData, SettingData, ToastData, MenuItem, RunningData, PowerRow, QuickCard, SettingsCat, SettingsHit, OskKey, OskField } from "theme.slint";
+import { S, Theme, Icons, Zone, DownloadData, BootStep, ChipData, ActionData, TileData, HeroData, CardData, CardRow, GenreChip, Fact, FactRow, Shot, HubData, SettingData, ToastData, MenuItem, RunningData, PowerRow, QuickCard, SettingsCat, SettingsHit, NvCard, OskKey, OskField } from "theme.slint";
 import { FocusRing, Chip, Btn, Kicker, Badge, Switch, KeyCap, BackButton, Shimmer, Cover } from "widgets.slint";
 import { DownloadsSheet, DownloadConsent } from "downloads.slint";
 import { LibraryFilter, LibrarySortPicker } from "library.slint";
@@ -266,6 +266,10 @@ export component AppWindow inherits Window {
     in property <string> settings-mode;
     // The Updates page (OS): the digits of the Secure Boot key's password, with its steps.
     in property <[string]> settings-key;
+    // The key's last step: what happens back in the launcher (Updates or Display).
+    in property <string> settings-key-last;
+    // The Display page: the NVIDIA driver's card.
+    in property <NvCard> settings-nv;
 
     in property <image> viewer-image;
     in property <string> viewer-count;
@@ -1206,7 +1210,7 @@ export component AppWindow inherits Window {
             rows: root.settings; edit-index: root.edit-index; edit-text <=> root.edit-text;
             scroll-y <=> root.settings-y; query <=> root.settings-query; find-editing: root.settings-find-editing;
             hits: root.settings-hits; about: root.settings-about; version: root.app-version; mode: root.settings-mode;
-            key: root.settings-key;
+            key: root.settings-key; key-last: root.settings-key-last; nv: root.settings-nv;
             pad: root.pad-hints; osk: root.osk-open; caret: root.edit-caret;
             click(zone, i) => { root.click(zone, i); }
             edit-done(text, accepted) => { root.edit-done(text, accepted); }

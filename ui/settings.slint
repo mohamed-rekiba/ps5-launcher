@@ -4,7 +4,7 @@
 // moves into the page. One focus style, the app's own: the focused rail entry or search hit turns
 // white; the focused row gets the white ring it has always had.
 
-import { S, Theme, Icons, Zone, SettingData, SettingsCat, SettingsHit } from "theme.slint";
+import { S, Theme, Icons, Zone, SettingData, SettingsCat, SettingsHit, NvCard } from "theme.slint";
 import { Switch, KeyCap } from "widgets.slint";
 import { AboutSlint } from "std-widgets.slint";
 
@@ -148,6 +148,8 @@ component SettingRows inherits VerticalLayout {
 component KeySteps inherits VerticalLayout {
     in property <[string]> digits;
     in property <length> text-w;
+    // The last step: what to do back in the launcher.
+    in property <string> last;
     padding-bottom: (28px * S.k);
     Rectangle {
         border-radius: (14px * S.k);
@@ -187,11 +189,68 @@ component KeySteps inherits VerticalLayout {
                 "A blue screen says \"Perform MOK management\". Press any key within 10 seconds. If you miss it, restart again.",
                 "Choose \"Enroll MOK\", then \"Continue\", then \"Yes\".",
                 "Type the password above and press Enter. If the screen asks for single digits, the numbers under the digits tell you which one.",
-                "Choose \"Reboot\". Back here, choose Download update again.",
+                root.last,
             ]: HorizontalLayout {
                 spacing: (12px * S.k);
                 Text { text: (i + 1) + "."; width: (24px * S.k); font-size: (17px * S.k); font-weight: 600; color: Theme.text; }
                 Text { text: step; width: root.text-w - (36px * S.k); wrap: word-wrap; font-size: (17px * S.k); color: Theme.text; }
+            }
+        }
+    }
+}
+
+// The NVIDIA driver on the Display page (the prototype's stepper): the numbered steps, then a
+// card with a title and its text. Its buttons are the rows under it.
+component NvidiaCard inherits VerticalLayout {
+    in property <NvCard> card;
+    in property <length> text-w;
+    padding-bottom: (28px * S.k);
+    spacing: (22px * S.k);
+    if root.card.step >= 0: HorizontalLayout {
+        spacing: (8px * S.k);
+        for s[i] in ["1  Install", "2  Secure Boot key", "3  Download", "4  Restart"]: VerticalLayout {
+            spacing: (8px * S.k);
+            horizontal-stretch: 1;
+            Rectangle {
+                height: (6px * S.k);
+                border-radius: (3px * S.k);
+                background: i < root.card.step ? Theme.ok : i == root.card.step ? Theme.accent : #ffffff1f;
+            }
+            Text {
+                text: s;
+                font-size: (16px * S.k);
+                font-weight: i == root.card.step ? 600 : 400;
+                color: i == root.card.step ? Theme.text : Theme.text3;
+            }
+        }
+    }
+    Rectangle {
+        border-radius: (14px * S.k);
+        background: #121a31;
+        border-width: 1px;
+        border-color: root.card.kind == 1 ? Theme.warn : Theme.line;
+        VerticalLayout {
+            padding: (28px * S.k);
+            spacing: (12px * S.k);
+            HorizontalLayout {
+                spacing: (14px * S.k);
+                alignment: start;
+                Image {
+                    source: root.card.kind == 0 ? Icons.chip : root.card.kind == 2 ? Icons.check : Icons.info;
+                    colorize: root.card.kind == 0 ? #76b900 : root.card.kind == 1 ? Theme.warn : root.card.kind == 2 ? Theme.ok : Theme.text2;
+                    width: (34px * S.k);
+                    height: (34px * S.k);
+                    y: (3px * S.k);
+                }
+                Text { text: root.card.title; font-size: (28px * S.k); font-weight: 600; color: Theme.text; vertical-alignment: center; }
+            }
+            for line[i] in root.card.lines: Text {
+                text: line;
+                width: root.text-w;
+                wrap: word-wrap;
+                font-size: i == 0 ? (20px * S.k) : (16px * S.k);
+                font-weight: i == 0 && root.card.kind == 1 ? 600 : 400;
+                color: i == 0 ? (root.card.kind == 1 ? Theme.warn : Theme.text) : Theme.text3;
             }
         }
     }
@@ -215,6 +274,9 @@ export component SettingsPage inherits Rectangle {
     in property <bool> about;
     // The Updates page (OS): the Secure Boot key's password, a digit each, over its steps.
     in property <[string]> key;
+    in property <string> key-last;
+    // The Display page: the NVIDIA driver's card over the rows.
+    in property <NvCard> nv;
     in property <string> version;
     in property <string> mode;
     in property <bool> pad;
@@ -275,7 +337,8 @@ export component SettingsPage inherits Rectangle {
                     width: page.width;
                     height: self.preferred-height;
                     padding-bottom: (24px * S.k);
-                    if root.key.length > 0: KeySteps { digits: root.key; text-w: page.width - (56px * S.k); }
+                    if root.nv.show: NvidiaCard { card: root.nv; text-w: page.width - (56px * S.k); }
+                    if root.key.length > 0: KeySteps { digits: root.key; text-w: page.width - (56px * S.k); last: root.key-last; }
                     SettingRows {
                         rows: root.rows;
                         selected: root.zone == Zone.settings ? root.idx : -1;

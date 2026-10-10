@@ -67,6 +67,24 @@ pub enum SId {
     OsStatus,
     OsDownload,
     OsRollback,
+    // Display: the screen's GPU, the NVIDIA driver's steps, and the output for the next session.
+    Gpu,
+    NvInstall,
+    NvLater,
+    /// The key was not enrolled, or its password is gone: queue it again.
+    NvRetry,
+    NvRestart,
+    /// "Use the open-source driver" (on the NVIDIA image).
+    NvOpenSource,
+    OutResolution,
+    OutRefresh,
+    // Time: the zone, the NTP switch, and the zone picker (a region, then its zones; the indices
+    // are into `SystemUi`'s lists).
+    TimeZone,
+    Ntp,
+    TzBack,
+    TzRegion(usize),
+    TzZone(usize),
     // About (Session and OS mode)
     RestartLauncher,
 }
@@ -87,10 +105,15 @@ pub enum Cat {
     /// Session and OS mode, each when its tool works: nmcli, wpctl, lsblk.
     Network,
     Sound,
+    /// The screen's GPU and driver, the NVIDIA driver, and the screen output: when a connected
+    /// screen shows in sysfs.
+    Display,
     Storage,
     /// OS mode: the system image's updates (bootc and the root helper). The launcher's own
     /// update stays under Updates.
     OsUpdates,
+    /// The time zone and automatic time: when timedatectl answers.
+    Time,
     /// Session and OS mode: version, mode, Restart launcher.
     About,
 }
@@ -109,6 +132,8 @@ impl Cat {
             Cat::Network => "Network",
             Cat::Sound => "Sound",
             Cat::Storage => "Storage",
+            Cat::Display => "Display",
+            Cat::Time => "Time",
             // Under the SYSTEM heading, so not mixed up with the launcher's Updates.
             Cat::OsUpdates => "Updates",
             Cat::About => "About",
@@ -128,13 +153,15 @@ impl Cat {
             Cat::Network => "wifi",
             Cat::Sound => "sound",
             Cat::Storage => "disk",
+            Cat::Display => "desktop",
+            Cat::Time => "cal",
             Cat::About => "info",
         }
     }
 
     /// In the System group, below the divider.
     pub fn system(self) -> bool {
-        matches!(self, Cat::System | Cat::Network | Cat::Sound | Cat::Storage | Cat::OsUpdates | Cat::About)
+        matches!(self, Cat::System | Cat::Network | Cat::Sound | Cat::Display | Cat::Storage | Cat::OsUpdates | Cat::Time | Cat::About)
     }
 }
 
@@ -143,9 +170,13 @@ impl Cat {
 pub struct Tools {
     pub network: bool,
     pub sound: bool,
+    /// A connected screen in sysfs.
+    pub display: bool,
     pub storage: bool,
     /// bootc and the root helper (PS5 Launcher OS only).
     pub os_updates: bool,
+    /// timedatectl.
+    pub time: bool,
 }
 
 /// The rail's categories in `mode`, with the System pages whose tools work.
@@ -156,9 +187,16 @@ pub fn categories(mode: Mode, tools: Tools) -> Vec<Cat> {
         cats.push(Cat::System);
         return cats;
     }
-    // Controllers, Display, Time and File sharing join in their own steps of Phase 6
+    // Controllers and File sharing join in their own steps of Phase 6
     // (docs/plans/ps5-launcher-os.md).
-    let pages = [(Cat::Network, tools.network), (Cat::Sound, tools.sound), (Cat::Storage, tools.storage), (Cat::OsUpdates, tools.os_updates && mode == Mode::Os)];
+    let pages = [
+        (Cat::Network, tools.network),
+        (Cat::Sound, tools.sound),
+        (Cat::Display, tools.display),
+        (Cat::Storage, tools.storage),
+        (Cat::OsUpdates, tools.os_updates && mode == Mode::Os),
+        (Cat::Time, tools.time),
+    ];
     cats.extend(pages.into_iter().filter(|(_, found)| *found).map(|(cat, _)| cat));
     cats.push(Cat::About);
     cats
@@ -181,6 +219,8 @@ pub fn category(id: SId) -> Option<Cat> {
         Volume | Mute | Output(_) => Cat::Sound,
         Drive(_) | Partition(..) => Cat::Storage,
         OsStatus | OsDownload | OsRollback => Cat::OsUpdates,
+        Gpu | NvInstall | NvLater | NvRetry | NvRestart | NvOpenSource | OutResolution | OutRefresh => Cat::Display,
+        TimeZone | Ntp | TzBack | TzRegion(_) | TzZone(_) => Cat::Time,
         RestartLauncher => Cat::About,
     })
 }
@@ -236,11 +276,12 @@ pub fn system_settings_command(desktop: Option<&str>, macos: bool, exists: &dyn 
 }
 
 /// A dot on a category when something waits there: a launcher update on Updates, an emulator
-/// update on Emulators.
-pub fn waiting(cat: Cat, app_update: bool, emulator_update: bool) -> bool {
+/// update on Emulators, a step of the NVIDIA driver on Display.
+pub fn waiting(cat: Cat, app_update: bool, emulator_update: bool, display: bool) -> bool {
     match cat {
         Cat::Updates => app_update,
         Cat::Emulators => emulator_update,
+        Cat::Display => display,
         _ => false,
     }
 }
@@ -268,6 +309,8 @@ const PAGE_TOP: f32 = 170.0;
 const PAGE_BOTTOM: f32 = 110.0;
 /// The Secure Boot key's steps on the Updates page, with the space under them.
 const KEY_CARD: f32 = 510.0;
+/// The NVIDIA driver's card on the Display page (the stepper, a title and its text).
+const NV_CARD: f32 = 300.0;
 
 /// The rail and the page: which category is open, every row of every category (for search), and
 /// the search field.
@@ -586,10 +629,11 @@ impl App {
         let nav = &self.settings_nav;
         let app_update = self.upd.installed.is_some() || self.app_update_available();
         let emulator_update = self.kyty_update_available();
+        let display = self.display_dot();
         let cats: Vec<crate::SettingsCat> = nav.cats.iter().enumerate().map(|(i, c)| crate::SettingsCat {
             label: c.label().into(),
             icon: c.icon().into(),
-            dot: waiting(*c, app_update, emulator_update),
+            dot: waiting(*c, app_update, emulator_update, display),
             system: c.system(),
             sep: c.system() && i > 0 && !nav.cats[i - 1].system(),
         }).collect();
@@ -603,7 +647,21 @@ impl App {
         ui.set_settings_cat(nav.cat as i32);
         ui.set_settings_hits(model(hits));
         ui.set_settings_about(matches!(cat, Cat::System | Cat::About));
-        ui.set_settings_key(model(if cat == Cat::OsUpdates { self.os_key_digits() } else { Vec::new() }));
+        let key = match cat {
+            Cat::OsUpdates => self.os_key_digits(),
+            Cat::Display => self.nv_key_digits(),
+            _ => Vec::new(),
+        };
+        ui.set_settings_key(model(key));
+        ui.set_settings_key_last(
+            if cat == Cat::Display {
+                "Choose \"Reboot\". Back here, the launcher checks the key by itself; then download the driver."
+            } else {
+                "Choose \"Reboot\". Back here, choose Download update again."
+            }
+            .into(),
+        );
+        ui.set_settings_nv(if cat == Cat::Display { self.nv_card() } else { crate::NvCard::default() });
         ui.set_settings_mode(mode_label(Mode::current()).into());
         ui.set_settings(model(self.settings_rows.clone()));
         ui.set_edit_index(self.edit_index);
@@ -620,6 +678,10 @@ impl App {
         // The key's steps on the Updates page come before the rows.
         let cat = self.settings_nav.cats.get(self.settings_nav.cat).copied();
         let mut y = if cat == Some(Cat::OsUpdates) && self.sys.os.key.is_some() { KEY_CARD } else { 0.0 };
+        if cat == Some(Cat::Display) {
+            let ui = self.ui();
+            y += if ui.get_settings_nv().show { NV_CARD } else { 0.0 } + if self.nv_key_digits().is_empty() { 0.0 } else { KEY_CARD };
+        }
         let mut target = y;
         for (i, r) in self.settings_rows.iter().enumerate() {
             if i as i32 == self.idx && self.zone == Z_SETTINGS {
@@ -682,7 +744,7 @@ impl App {
                 self.save_cfg(|c| c.monitor = next.clone());
                 self.move_to_monitor(&next);
             }
-            SId::WifiOn | SId::Mute | SId::Volume => return self.sys_change(id, dir),
+            SId::WifiOn | SId::Mute | SId::Volume | SId::OutResolution | SId::OutRefresh | SId::Ntp => return self.sys_change(id, dir),
             SId::SeedCompleted => {
                 let on = dir > 0;
                 if let Err(error) = self.downloads.set_seed_after_download(on) {
@@ -739,13 +801,16 @@ impl App {
                 ui.set_edit_text(text.into());
                 ui.set_edit_index(i as i32);
             }
-            SId::Fullscreen | SId::Amd | SId::ReturnOnExit | SId::Sounds | SId::AutoUpdate | SId::SeedCompleted | SId::WifiOn | SId::Mute => {
+            SId::Fullscreen | SId::Amd | SId::ReturnOnExit | SId::Sounds | SId::AutoUpdate | SId::SeedCompleted | SId::WifiOn | SId::Mute | SId::Ntp => {
                 let on = self.settings_rows[i].on;
                 self.settings_change(i, if on { -1 } else { 1 });
             }
-            SId::Resolution | SId::Present | SId::VideoOut | SId::Display => self.settings_change(i, 1),
-            SId::Volume | SId::Wired | SId::Drive(_) => {}
+            SId::Resolution | SId::Present | SId::VideoOut | SId::Display | SId::OutResolution | SId::OutRefresh => self.settings_change(i, 1),
+            SId::Volume | SId::Wired | SId::Drive(_) | SId::Gpu => {}
             SId::Network(_) | SId::WifiScan | SId::SavedNetwork(_) | SId::Output(_) | SId::Partition(..) | SId::OsStatus | SId::OsDownload | SId::OsRollback => self.sys_activate(id),
+            SId::NvInstall | SId::NvLater | SId::NvRetry | SId::NvRestart | SId::NvOpenSource | SId::TimeZone | SId::TzBack | SId::TzRegion(_) | SId::TzZone(_) => {
+                self.sys_activate(id)
+            }
             SId::RawgRemove => {
                 self.save_cfg(|c| c.rawg_key.clear());
                 self.rawg_status.clear();
@@ -1146,16 +1211,19 @@ mod tests {
 
     #[test]
     fn system_pages_show_in_session_and_os_mode_when_their_tool_works() {
-        let all = Tools { network: true, sound: true, storage: true, os_updates: true };
+        let all = Tools { network: true, sound: true, display: true, storage: true, os_updates: true, time: true };
         let system = |mode| categories(mode, all).into_iter().filter(|c| c.system()).collect::<Vec<_>>();
         assert_eq!(system(Mode::Desktop), [Cat::System], "the desktop owns these");
-        assert_eq!(system(Mode::Session), [Cat::Network, Cat::Sound, Cat::Storage, Cat::About], "OS updates need the OS");
-        assert_eq!(system(Mode::Os), [Cat::Network, Cat::Sound, Cat::Storage, Cat::OsUpdates, Cat::About]);
+        assert_eq!(system(Mode::Session), [Cat::Network, Cat::Sound, Cat::Display, Cat::Storage, Cat::Time, Cat::About], "OS updates need the OS");
+        assert_eq!(system(Mode::Os), [Cat::Network, Cat::Sound, Cat::Display, Cat::Storage, Cat::OsUpdates, Cat::Time, Cat::About]);
         let sound_only = Tools { sound: true, ..Tools::default() };
         let cats = categories(Mode::Os, sound_only);
         assert_eq!(cats[cats.len() - 2..], [Cat::Sound, Cat::About]);
-        assert!([Cat::Network, Cat::Sound, Cat::Storage, Cat::OsUpdates].iter().all(|c| c.system()));
+        assert!([Cat::Network, Cat::Sound, Cat::Display, Cat::Storage, Cat::OsUpdates, Cat::Time].iter().all(|c| c.system()));
         assert_eq!(Cat::OsUpdates.label(), "Updates");
+        assert_eq!((Cat::Display.label(), Cat::Time.label()), ("Display", "Time"));
+        let time_only = Tools { time: true, ..Tools::default() };
+        assert_eq!(categories(Mode::Session, time_only).iter().filter(|c| c.system()).copied().collect::<Vec<_>>(), [Cat::Time, Cat::About]);
     }
 
     #[test]
@@ -1175,6 +1243,8 @@ mod tests {
             (Cat::Sound, &[Volume, Mute, Output(2)]),
             (Cat::Storage, &[Drive(0), Partition(0, 3)]),
             (Cat::OsUpdates, &[OsStatus, OsDownload, OsRollback]),
+            (Cat::Display, &[Gpu, NvInstall, NvLater, NvRetry, NvRestart, NvOpenSource, OutResolution, OutRefresh]),
+            (Cat::Time, &[TimeZone, Ntp, TzBack, TzRegion(3), TzZone(40)]),
             (Cat::About, &[RestartLauncher]),
         ] {
             for id in ids {
@@ -1242,11 +1312,13 @@ mod tests {
 
     #[test]
     fn dots_show_where_an_update_waits() {
-        assert!(waiting(Cat::Updates, true, false));
-        assert!(!waiting(Cat::Updates, false, true));
-        assert!(waiting(Cat::Emulators, false, true));
-        assert!(!waiting(Cat::Emulators, true, false));
-        assert!(!waiting(Cat::Games, true, true));
+        assert!(waiting(Cat::Updates, true, false, false));
+        assert!(!waiting(Cat::Updates, false, true, true));
+        assert!(waiting(Cat::Emulators, false, true, false));
+        assert!(!waiting(Cat::Emulators, true, false, true));
+        assert!(!waiting(Cat::Games, true, true, true));
+        assert!(waiting(Cat::Display, false, false, true), "the NVIDIA driver waits");
+        assert!(!waiting(Cat::Display, true, true, false));
     }
 
     #[test]

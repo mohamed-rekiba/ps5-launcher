@@ -15,6 +15,10 @@
 #   helper switch main|nvidia        change to the main or the NVIDIA image (next restart)
 #   helper queue-key                 queue the next NVIDIA image's Secure Boot key; prints the
 #                                    password the blue MOK screen asks for, or key-enrolled
+#   helper key-state                 is that key enrolled? Prints enrolled, pending, missing or
+#                                    secure-boot-off, and changes nothing
+#   helper set-timezone <zone>       set the time zone to one that timedatectl lists
+#   helper set-ntp on|off            set the time automatically, or not
 #   helper health-ack                delete the boot health check's notice (the launcher showed it)
 #
 # update, switch and rollback hold $lock_file while they run, and so does the boot health check
@@ -44,7 +48,7 @@ next_session="$sddm_dir/90-ps5-launcher-os-next-session.conf"
 cert_label=io.github.ps5-launcher.secureboot-cert-sha256
 
 usage() {
-    echo "usage: helper set-next-session plasma | clear-next-session | status | update-check | update | rollback | switch main|nvidia | queue-key | health-ack" >&2
+    echo "usage: helper set-next-session plasma | clear-next-session | status | update-check | update | rollback | switch main|nvidia | queue-key | key-state | set-timezone <zone> | set-ntp on|off | health-ack" >&2
     exit 2
 }
 
@@ -93,6 +97,23 @@ resolve() {
     fi
     actual=$(sha256sum < "$cert")
     [ "${actual%% *}" = "$sha" ] || fail "$cert does not match its name"
+}
+
+# The NVIDIA image's reference: the running one on the NVIDIA image, its sibling on main.
+nvidia_ref() {
+    ref=$(marker IMAGE_REF)
+    [ "$(marker IMAGE)" = nvidia ] || ref="${ref%:*}:nvidia"
+    echo "$ref"
+}
+
+# Whether $1 is a time zone timedatectl lists. First the name itself: one to three parts of
+# letters, digits, "_", "+" and "-", split by "/", none starting with "-". No dot, so no "..",
+# and no line break.
+valid_zone() {
+    case "$1" in
+    "" | *[!A-Za-z0-9_+/-]* | /* | */ | *//* | -* | */-* | */*/*/*) return 1 ;;
+    esac
+    timeout -k 10 "$short" timedatectl list-timezones | grep -qxF -- "$1"
 }
 
 # The digest staged last on the NVIDIA image (update-check compares the channel with it).
@@ -188,9 +209,7 @@ case "$task $#" in
     esac
     ;;
 "queue-key 0")
-    ref=$(marker IMAGE_REF)
-    [ "$(marker IMAGE)" = nvidia ] || ref="${ref%:*}:nvidia"
-    resolve "$ref"
+    resolve "$(nvidia_ref)"
     case "$(timeout -k 10 "$short" mokutil --test-key "$cert" 2>&1 || true)" in
     *"is already enrolled"* | *"already in the built-in trusted keyring"*)
         echo key-enrolled
@@ -208,6 +227,30 @@ case "$task $#" in
     printf '%s\n%s\n' "$password" "$password" | timeout -k 10 "$short" mokutil --import "$cert" >/dev/null ||
         fail "mokutil could not queue the key"
     echo "$password"
+    ;;
+"key-state 0")
+    # Read-only: the launcher asks after a restart whether the blue screen enrolled the key.
+    if ! secure_boot; then
+        echo secure-boot-off
+        exit 0
+    fi
+    resolve "$(nvidia_ref)"
+    case "$(timeout -k 10 "$short" mokutil --test-key "$cert" 2>&1 || true)" in
+    *"is already enrolled"* | *"already in the built-in trusted keyring"*) echo enrolled ;;
+    *"already in the enrollment request"*) echo pending ;;
+    *) echo missing ;;
+    esac
+    ;;
+"set-timezone 1")
+    valid_zone "$1" || fail "not a time zone: $1"
+    exec timeout -k 10 "$short" timedatectl set-timezone "$1"
+    ;;
+"set-ntp 1")
+    case "$1" in
+    on) exec timeout -k 10 "$short" timedatectl set-ntp true ;;
+    off) exec timeout -k 10 "$short" timedatectl set-ntp false ;;
+    *) usage ;;
+    esac
     ;;
 "health-ack 0") rm -f "$health_dir/notice.json" ;;
 *) usage ;;

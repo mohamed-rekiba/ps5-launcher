@@ -40,6 +40,19 @@ impl Mode {
 /// Written into PS5 Launcher OS images (packaging/os/): `IMAGE=main` or `IMAGE=nvidia`.
 const OS_MARKER: &str = "/usr/lib/ps5-launcher/os-release";
 
+/// PS5 Launcher OS's image (main or NVIDIA) from the marker's contents.
+fn image_of(marker: &str) -> Option<crate::nvidia::Image> {
+    marker_image(marker).and_then(crate::nvidia::Image::parse)
+}
+
+/// The image this PC runs, in PS5 Launcher OS; None in the other modes.
+pub fn os_image() -> Option<crate::nvidia::Image> {
+    if Mode::current() != Mode::Os {
+        return None;
+    }
+    image_of(&std::fs::read_to_string(OS_MARKER).ok()?)
+}
+
 /// The value of the marker's `IMAGE=` line, without surrounding spaces or double quotes.
 fn marker_image(marker: &str) -> Option<&str> {
     let value = marker.lines().find_map(|line| line.trim().strip_prefix("IMAGE="))?;
@@ -562,6 +575,15 @@ mod tests {
         assert_eq!(Mode::detect(Some("1"), Some("IMAGE=main\n")), Mode::Os);
         assert_eq!(Mode::detect(Some("1"), Some("IMAGE=nvidia")), Mode::Os);
         assert_eq!(Mode::detect(Some("1"), Some("# PS5 Launcher OS\n IMAGE=\"nvidia\" \n")), Mode::Os);
+    }
+
+    #[test]
+    fn the_image_from_the_marker() {
+        use crate::nvidia::Image;
+        assert_eq!(image_of("IMAGE=main\n"), Some(Image::Main));
+        assert_eq!(image_of("# PS5 Launcher OS\n IMAGE=\"nvidia\" \n"), Some(Image::Nvidia));
+        assert_eq!(image_of("IMAGE=bazzite"), None);
+        assert_eq!(image_of(""), None);
     }
 
     #[test]

@@ -3,6 +3,7 @@
 //! docs/plans/ps5-launcher-os.md). Parsing, the command lines and the root helper's answers live
 //! here; `system::call` runs them.
 
+use crate::nvidia::Image;
 use crate::system::{Call, Ran};
 
 /// PS5 Launcher OS's root helper (packaging/os/files/usr/libexec/ps5-launcher/helper).
@@ -73,18 +74,29 @@ pub enum Task {
     Update,
     Rollback,
     QueueKey,
+    /// Whether the NVIDIA image's key is enrolled (read-only).
+    KeyState,
+    /// Change to the main or the NVIDIA image (next restart).
+    Switch(Image),
 }
 
 /// A helper task's call. Its time is the helper's own deadline for the task, plus a margin.
 pub fn helper_call(task: Task) -> Call {
-    let (name, secs) = match task {
-        Task::UpdateCheck => ("update-check", 120 + HELPER_MARGIN),
+    // The helper's steps run one after the other, each under its own deadline: the shared lock
+    // and mokutil 30 s, skopeo 120 s, a download 2 hours.
+    let (args, secs): (&[&str], u32) = match task {
+        Task::UpdateCheck => (&["update-check"], 120 + HELPER_MARGIN),
         // Downloads the new system image: it may take a long time on a slow line.
-        Task::Update => ("update", 2 * 60 * 60 + LONG_HELPER_MARGIN),
-        Task::Rollback => ("rollback", 120 + HELPER_MARGIN),
-        Task::QueueKey => ("queue-key", 60 + HELPER_MARGIN),
+        Task::Update => (&["update"], 2 * 60 * 60 + LONG_HELPER_MARGIN),
+        Task::Rollback => (&["rollback"], 120 + HELPER_MARGIN),
+        Task::QueueKey => (&["queue-key"], 120 + 3 * 30 + HELPER_MARGIN),
+        Task::KeyState => (&["key-state"], 120 + 2 * 30 + HELPER_MARGIN),
+        Task::Switch(Image::Main) => (&["switch", "main"], 30 + 2 * 60 * 60 + LONG_HELPER_MARGIN),
+        Task::Switch(Image::Nvidia) => (&["switch", "nvidia"], 30 + 120 + 2 * 30 + 2 * 60 * 60 + LONG_HELPER_MARGIN),
     };
-    Call::new("pkexec", &[HELPER, name], secs)
+    let mut all = vec![HELPER];
+    all.extend_from_slice(args);
+    Call::new("pkexec", &all, secs)
 }
 
 /// What `helper update` (or `switch`) answered.
@@ -140,7 +152,14 @@ pub enum UpdateEnd {
 /// `helper update`, and when the key is required, `helper queue-key`. When queue-key finds the
 /// key enrolled already, the update runs once more. `run` runs a call (`system::call_status`).
 pub fn update_flow(run: &dyn Fn(&Call) -> Result<Ran, String>) -> UpdateEnd {
-    let update = helper_call(Task::Update);
+    stage_flow(run, Task::Update, false)
+}
+
+/// `task` (update, or switch nvidia), then the key as `update_flow` does. `requeue`: a key that
+/// waits for the blue screen (exit 4) is queued again too, for a new password; without it, the
+/// flow stops at KeyPending.
+pub fn stage_flow(run: &dyn Fn(&Call) -> Result<Ran, String>, task: Task, requeue: bool) -> UpdateEnd {
+    let update = helper_call(task);
     for _ in 0..2 {
         let ran = match run(&update) {
             Ok(ran) => ran,
@@ -148,7 +167,8 @@ pub fn update_flow(run: &dyn Fn(&Call) -> Result<Ran, String>) -> UpdateEnd {
         };
         match staging(&update, &ran) {
             Staging::Done => return UpdateEnd::Staged,
-            Staging::KeyPending => return UpdateEnd::KeyPending,
+            Staging::KeyPending if !requeue => return UpdateEnd::KeyPending,
+            Staging::KeyPending => {}
             Staging::Failed(e) => return UpdateEnd::Failed(e),
             Staging::KeyRequired => {}
         }
@@ -190,6 +210,7 @@ pub fn status_text(status: &Status, found: Option<&str>, checking: bool) -> Stri
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::nvidia::Image;
 
     fn ran(code: i32, stdout: &str) -> Ran {
         Ran { code: Some(code), stdout: stdout.into(), stderr: String::new() }
@@ -266,7 +287,11 @@ mod tests {
         assert_eq!(helper_call(Task::Update).args, [HELPER, "update"]);
         assert_eq!(helper_call(Task::Rollback).args, [HELPER, "rollback"]);
         assert_eq!(helper_call(Task::QueueKey).args, [HELPER, "queue-key"]);
+        assert_eq!(helper_call(Task::KeyState).args, [HELPER, "key-state"]);
+        assert_eq!(helper_call(Task::Switch(Image::Nvidia)).args, [HELPER, "switch", "nvidia"]);
+        assert_eq!(helper_call(Task::Switch(Image::Main)).args, [HELPER, "switch", "main"]);
         assert_eq!(helper_call(Task::Update).program, "pkexec");
+        assert!(helper_call(Task::Switch(Image::Nvidia)).secs >= 3600, "a switch downloads an image");
         assert!(helper_call(Task::Update).secs >= 3600, "a download takes time");
     }
 
@@ -274,7 +299,20 @@ mod tests {
     fn the_helper_stops_itself_before_the_launcher_gives_up() {
         // The user cannot stop the helper once it is root, so the helper's own deadline must
         // fire first. These are the helper's deadlines.
-        let helper = [(Task::UpdateCheck, 120), (Task::Update, 2 * 60 * 60), (Task::Rollback, 120), (Task::QueueKey, 60)];
+        let helper = [
+            (Task::UpdateCheck, 120),
+            (Task::Update, 2 * 60 * 60),
+            (Task::Rollback, 120),
+            // The longest chain of the helper's steps: skopeo (120 s), then mokutil --test-key,
+            // --revoke-import and --import (30 s each).
+            (Task::QueueKey, 120 + 3 * 30),
+            // skopeo, then mokutil --sb-state and --test-key.
+            (Task::KeyState, 120 + 2 * 30),
+            // The lock (30 s), then bootc switch.
+            (Task::Switch(Image::Main), 30 + 2 * 60 * 60),
+            // The lock, skopeo, mokutil twice, then bootc switch.
+            (Task::Switch(Image::Nvidia), 30 + 120 + 2 * 30 + 2 * 60 * 60),
+        ];
         for (task, secs) in helper {
             assert!(helper_call(task).secs > secs, "{task:?}");
             assert_eq!(helper_call(task).deadline(), std::time::Duration::from_secs(helper_call(task).secs.into()), "{task:?}");

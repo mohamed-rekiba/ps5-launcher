@@ -289,7 +289,7 @@ impl App {
     }
 
     /// Confirm `action` the way `system::guard` says: a countdown, or a dialog of what is lost.
-    fn guard_power(&mut self, action: PowerAction) {
+    pub(crate) fn guard_power(&mut self, action: PowerAction) {
         audio::play(Sound::Select);
         match system::guard(action, &self.power_work()) {
             Guard::Countdown(secs) => self.start_countdown(action, secs),

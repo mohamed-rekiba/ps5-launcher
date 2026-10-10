@@ -1,15 +1,17 @@
-//! The System pages of Settings in Session and OS mode: Network, Sound, Storage and Updates
-//! (docs/plans/ps5-launcher-os.md, Phase 6), and the Quick Menu's volume. The backends (network,
-//! sound, storage, osupdate) build the command lines and read the answers; this file runs them
-//! off the UI thread and shows the result. A page shows only when its tool answered.
+//! The System pages of Settings in Session and OS mode: Network, Sound, Display, Storage, Updates
+//! and Time (docs/plans/ps5-launcher-os.md, Phase 6), and the Quick Menu's volume. The backends
+//! (network, sound, gpu, nvidia, screen, storage, osupdate, timezone) build the command lines and
+//! read the answers; this file runs them off the UI thread and shows the result. A page shows
+//! only when its tool answered.
 
 use crate::app::*;
 use crate::audio::{self, Sound};
 use crate::network::{self, Join};
+use crate::nvidia::{self, Image, Offer, SwitchEnd};
 use crate::osupdate::{self, Task, UpdateEnd};
 use crate::settings::{categories, row, Cat, SId, Tools};
-use crate::system::{self, Call, Mode};
-use crate::{sound, storage, util, SettingData};
+use crate::system::{self, Call, Mode, PowerAction};
+use crate::{gpu, screen, sound, storage, timezone, util, SettingData};
 use std::collections::HashMap;
 use std::path::Path;
 use std::time::{Duration, Instant};
@@ -23,6 +25,8 @@ pub struct SystemUi {
     /// Free bytes of each mounted partition, by its device path.
     pub free: HashMap<String, u64>,
     pub os: Os,
+    pub display: Disp,
+    pub time: Time,
     /// When each page was last read on opening.
     opened: Vec<(Cat, Instant)>,
     gen: Gens,
@@ -64,6 +68,8 @@ pub struct Gens {
     sound: Gen,
     storage: Gen,
     os: Gen,
+    display: Gen,
+    time: Gen,
 }
 
 /// Whether something done at `last` is due again at `now`.
@@ -102,6 +108,46 @@ pub struct Os {
     pub key: Option<String>,
     /// When the Updates page last checked on opening.
     pub checked: Option<Instant>,
+}
+
+/// The Display page: the screen, its GPU and the NVIDIA driver's flow.
+#[derive(Default)]
+pub struct Disp {
+    pub state: Option<DisplayState>,
+    /// The helper works on the NVIDIA driver: "Downloading…", "Switching…", "Queuing the key…".
+    pub busy: Option<&'static str>,
+    /// The password of the key queued in this run, for the blue MOK screen. It is not kept: after
+    /// a launcher restart the page offers a new one.
+    pub key: Option<String>,
+}
+
+/// What the Display page reads.
+#[derive(Clone)]
+pub struct DisplayState {
+    pub screen: gpu::Screen,
+    /// The card's name from lspci, if it answered.
+    pub name: Option<String>,
+    pub nvidia_version: Option<String>,
+    /// PS5 Launcher OS's image; None in a session on another Linux PC.
+    pub image: Option<Image>,
+}
+
+/// The Time page.
+#[derive(Default)]
+pub struct Time {
+    pub clock: Option<timezone::Clock>,
+    /// The zones by region, for the picker.
+    pub regions: Vec<(String, Vec<String>)>,
+    pub picker: Option<Picker>,
+    /// A change runs.
+    pub setting: bool,
+}
+
+/// The time zone picker: the regions, or the zones of one.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub enum Picker {
+    Regions,
+    Region(usize),
 }
 
 /// What the Network page reads: devices, the Wi-Fi switch, networks and saved networks.
@@ -146,6 +192,21 @@ fn load_storage() -> Result<(Vec<storage::Drive>, HashMap<String, u64>), String>
     Ok((drives, free))
 }
 
+/// The screen and its GPU. The name comes from lspci when it is there.
+fn load_display() -> Result<DisplayState, String> {
+    let screen = gpu::read_screen(Path::new(gpu::DRM_DIR)).ok_or("no connected screen in sysfs")?;
+    let name = screen.card.slot.as_deref().and_then(|slot| system::call(&gpu::lspci_call(slot)).ok()).and_then(|out| gpu::parse_lspci(&out));
+    let nvidia_version = gpu::nvidia_version(Path::new(gpu::NVIDIA_MODULE));
+    Ok(DisplayState { screen, name, nvidia_version, image: system::os_image() })
+}
+
+/// The clock, and the zones by region.
+fn load_time() -> Result<(timezone::Clock, Vec<(String, Vec<String>)>), String> {
+    let clock = timezone::parse_show(&system::call(&timezone::show_call())?)?;
+    let zones = timezone::parse_list(&system::call(&timezone::list_call())?);
+    Ok((clock, timezone::regions(&zones)))
+}
+
 /// `bootc status`. An OS update needs bootc and the root helper.
 pub fn load_os() -> Result<osupdate::Status, String> {
     if !Path::new(osupdate::HELPER).exists() {
@@ -184,12 +245,22 @@ impl App {
         }
         let os = mode == Mode::Os;
         let g = &mut self.sys.gen;
-        let tickets = (g.net.next(), g.sound.next(), g.storage.next(), g.os.next());
+        let tickets = (g.net.next(), g.sound.next(), g.storage.next(), g.os.next(), g.display.next(), g.time.next());
         bg(
-            move || (load_net(false), load_sound(), load_storage(), if os { load_os() } else { Err("not the OS".into()) }),
-            move |app, (net, sound, storage, os)| {
-                let (net_t, sound_t, storage_t, os_t) = tickets;
-                for (page, e) in [("network", net.as_ref().err()), ("sound", sound.as_ref().err()), ("storage", storage.as_ref().err())] {
+            move || {
+                let os_status = if os { load_os() } else { Err("not the OS".into()) };
+                (load_net(false), load_sound(), load_storage(), os_status, load_display(), load_time())
+            },
+            move |app, (net, sound, storage, os, display, time)| {
+                let (net_t, sound_t, storage_t, os_t, display_t, time_t) = tickets;
+                let pages = [
+                    ("network", net.as_ref().err()),
+                    ("sound", sound.as_ref().err()),
+                    ("storage", storage.as_ref().err()),
+                    ("display", display.as_ref().err()),
+                    ("time", time.as_ref().err()),
+                ];
+                for (page, e) in pages {
                     if let Some(e) = e {
                         crate::log!("System page {page} hidden: {e}");
                     }
@@ -200,6 +271,8 @@ impl App {
                     sound: sound.as_ref().is_ok_and(|o| !o.is_empty()),
                     storage: storage.is_ok(),
                     os_updates: os.is_ok(),
+                    display: display.is_ok(),
+                    time: time.is_ok(),
                 };
                 // A page read or a change since the probe started is newer: keep it.
                 let g = &app.sys.gen;
@@ -216,6 +289,12 @@ impl App {
                 }
                 if current.3 {
                     app.sys.os.status = os.ok();
+                }
+                if let (true, Ok(display)) = (app.sys.gen.display.current(display_t), display) {
+                    app.sys.display.state = Some(display);
+                }
+                if let (true, Ok((clock, regions))) = (app.sys.gen.time.current(time_t), time) {
+                    (app.sys.time.clock, app.sys.time.regions) = (Some(clock), regions);
                 }
                 app.sys_show();
             },
@@ -242,6 +321,8 @@ impl App {
             Cat::Network => self.net_load(true),
             Cat::Sound => self.sound_load(true),
             Cat::Storage => self.storage_load(),
+            Cat::Display => self.display_load(),
+            Cat::Time => self.time_load(),
             Cat::OsUpdates => {
                 // No check while the helper works: the next opening checks instead.
                 let check = due(self.sys.os.checked, now, RECHECK) && self.sys.os.busy.is_none();
@@ -312,11 +393,17 @@ impl App {
         if cats.contains(&Cat::Sound) {
             self.sound_rows(&mut rows);
         }
+        if cats.contains(&Cat::Display) {
+            self.display_rows(&mut rows);
+        }
         if cats.contains(&Cat::Storage) {
             self.storage_rows(&mut rows);
         }
         if cats.contains(&Cat::OsUpdates) {
             self.os_rows(&mut rows);
+        }
+        if cats.contains(&Cat::Time) {
+            self.time_rows(&mut rows);
         }
         rows
     }
@@ -335,6 +422,15 @@ impl App {
             SId::OsStatus => self.os_status_chosen(),
             SId::OsDownload => self.os_update(),
             SId::OsRollback => self.os_rollback(),
+            SId::NvInstall => self.nv_switch(Image::Nvidia),
+            SId::NvLater => self.nv_later(),
+            SId::NvRetry => self.nv_queue_key(),
+            SId::NvRestart => self.nv_restart(),
+            SId::NvOpenSource => self.nv_switch(Image::Main),
+            SId::TimeZone => self.tz_open(),
+            SId::TzBack => self.tz_pick(Picker::Regions),
+            SId::TzRegion(i) => self.tz_pick(Picker::Region(i)),
+            SId::TzZone(j) => self.tz_set(j),
             _ => {}
         }
     }
@@ -345,6 +441,9 @@ impl App {
             SId::WifiOn => self.net_radio(dir > 0),
             SId::Mute => self.sound_mute(dir > 0),
             SId::Volume => self.sound_step(dir),
+            SId::OutResolution => self.out_step(dir, false),
+            SId::OutRefresh => self.out_step(dir, true),
+            SId::Ntp => self.time_ntp(dir > 0),
             _ => {}
         }
     }
@@ -870,6 +969,453 @@ impl App {
     /// The digits of the key's password, when the Updates page shows its steps.
     pub fn os_key_digits(&self) -> Vec<slint::SharedString> {
         self.sys.os.key.as_deref().unwrap_or_default().chars().map(|c| c.to_string().into()).collect()
+    }
+
+    // ------------------------------------------------------------------ Display
+
+    /// The NVIDIA driver's offer for the screen's card.
+    fn nv_offer(&self) -> Offer {
+        let Some(d) = &self.sys.display.state else { return Offer::Nothing };
+        nvidia::offer(d.image, Some(&d.screen.card), &self.cfg.lock().unwrap().nvidia)
+    }
+
+    /// The Display page has a step of the NVIDIA driver waiting.
+    pub fn display_dot(&self) -> bool {
+        nvidia::dot(self.nv_offer())
+    }
+
+    /// The card's name: lspci's, or the vendor and IDs.
+    fn gpu_name(d: &DisplayState) -> String {
+        d.name.clone().unwrap_or_else(|| gpu::fallback_name(&d.screen.card))
+    }
+
+    /// `helper switch nvidia` runs.
+    fn nv_downloading(&self) -> bool {
+        self.sys.display.busy == Some("Downloading…")
+    }
+
+    /// The NVIDIA driver's card over the Display page's rows.
+    pub fn nv_card(&self) -> crate::NvCard {
+        let Some(d) = &self.sys.display.state else { return crate::NvCard::default() };
+        let offer = self.nv_offer();
+        let downloading = self.nv_downloading();
+        let Some((title, lines)) = nvidia::card_text(offer, &Self::gpu_name(d), downloading) else { return crate::NvCard::default() };
+        let kind = match offer {
+            Offer::Install if !downloading => 0,
+            Offer::OldCard | Offer::UnknownCard | Offer::KeyMissed => 1,
+            Offer::KeyEnrolled | Offer::Restart(_) if !downloading => 2,
+            _ => 3,
+        };
+        crate::NvCard {
+            show: true,
+            step: nvidia::stepper(offer, downloading).map_or(-1, |s| s as i32),
+            kind,
+            title: title.into(),
+            lines: model(lines.into_iter().map(Into::into).collect()),
+        }
+    }
+
+    /// The digits of the key's password while the Display page waits for the restart.
+    pub fn nv_key_digits(&self) -> Vec<slint::SharedString> {
+        if self.nv_offer() != Offer::KeyWaiting {
+            return Vec::new();
+        }
+        self.sys.display.key.as_deref().unwrap_or_default().chars().map(|c| c.to_string().into()).collect()
+    }
+
+    fn display_rows(&self, rows: &mut Vec<(Cat, SId, SettingData)>) {
+        let Some(d) = &self.sys.display.state else { return };
+        let busy = self.sys.display.busy;
+        let mut r = row(4, &Self::gpu_name(d));
+        r.value = d.screen.connector.clone().into();
+        r.hint = format!("Drives the screen · {}", gpu::driver_text(&d.screen.card, d.nvidia_version.as_deref())).into();
+        rows.push((Cat::Display, SId::Gpu, r));
+        let action = |id: SId, label: &str, hint: &str| {
+            let mut r = row(4, label);
+            r.hint = hint.into();
+            if let Some(b) = busy {
+                r.value = b.into();
+            }
+            (Cat::Display, id, r)
+        };
+        let download = format!("About {} MB", nvidia::DOWNLOAD_MB);
+        match self.nv_offer() {
+            Offer::Install => {
+                let mut install = action(SId::NvInstall, "Install driver", "");
+                if busy.is_none() {
+                    (install.2.value, install.2.value_kind) = (download.into(), 3);
+                }
+                rows.push(install);
+                if busy.is_none() {
+                    rows.push(action(SId::NvLater, "Later", "The offer stays here, on System → Display"));
+                }
+            }
+            Offer::Later => {
+                let mut r = action(SId::NvInstall, "NVIDIA driver", "The card runs on the open-source driver now. Install the NVIDIA driver to play at full speed.");
+                if busy.is_none() {
+                    (r.2.value, r.2.value_kind) = ("Install".into(), 3);
+                }
+                rows.push(r);
+            }
+            Offer::KeyWaiting if self.sys.display.key.is_some() => {
+                rows.push(action(SId::NvRestart, "Restart now", "Keep the USB keyboard plugged in: the blue screen comes before the launcher"));
+            }
+            Offer::KeyWaiting => {
+                rows.push(action(SId::NvRetry, "Show a new password", "The password shows only once. A new one replaces the old one."));
+                rows.push(action(SId::NvRestart, "Restart now", "Only if you have the password: the blue screen asks for it"));
+            }
+            Offer::KeyMissed => rows.push(action(SId::NvRetry, "Try again", "Queues the key with a new password")),
+            Offer::KeyEnrolled => {
+                let mut r = action(SId::NvInstall, "Download the driver", "You can keep playing while it downloads");
+                if busy.is_none() {
+                    (r.2.value, r.2.value_kind) = (download.into(), 3);
+                }
+                rows.push(r);
+            }
+            Offer::Restart(_) => rows.push(action(SId::NvRestart, "Restart now", "")),
+            Offer::UseOpenSource => rows.push(action(SId::NvOpenSource, "Use the open-source driver", "Switches the system back at the next restart. Games run slower on it.")),
+            Offer::SwitchBack => rows.push(action(SId::NvOpenSource, "Switch to the open-source driver", "Starts the main system at the next restart")),
+            Offer::Nothing | Offer::OldCard | Offer::UnknownCard => {}
+        }
+
+        header(rows, Cat::Display, "SCREEN OUTPUT");
+        let chosen = self.cfg.lock().unwrap().session_output;
+        let apply = "Applies at the next session start: restart the PC. Restart launcher is not enough, because the screen stays on.";
+        let mut r = row(3, "Resolution");
+        r.value = chosen.map_or("Automatic".to_string(), |o| format!("{} × {}", o.width, o.height)).into();
+        r.hint = apply.into();
+        rows.push((Cat::Display, SId::OutResolution, r));
+        if let Some(out) = chosen {
+            let mut r = row(3, "Refresh rate");
+            r.value = out.refresh.map_or("Automatic".to_string(), |hz| format!("{hz} Hz")).into();
+            if screen::edid_rates(&d.screen.edid, out.width, out.height).is_empty() {
+                r.hint = "The screen lists no rates for this size: Automatic lets the PC pick".into();
+            }
+            rows.push((Cat::Display, SId::OutRefresh, r));
+        }
+    }
+
+    /// Read the Display page again. An answer older than a change or a newer read is dropped.
+    fn display_load(&mut self) {
+        let ticket = self.sys.gen.display.next();
+        bg(load_display, move |app, res| {
+            if !app.sys.gen.display.current(ticket) {
+                return;
+            }
+            match res {
+                Ok(state) => app.sys.display.state = Some(state),
+                Err(e) => app.sys_error("Couldn't read the screen", &e),
+            }
+            app.sys_show();
+        });
+    }
+
+    /// Left/Right on Resolution (`rate` false) or Refresh rate: the next choice, saved for the
+    /// next session start.
+    fn out_step(&mut self, dir: i32, rate: bool) {
+        let Some(d) = &self.sys.display.state else { return };
+        let current = self.cfg.lock().unwrap().session_output;
+        let choices: Vec<Option<screen::Output>> = if rate {
+            let Some(out) = current else { return };
+            let rates = screen::edid_rates(&d.screen.edid, out.width, out.height);
+            std::iter::once(None).chain(rates.into_iter().map(Some)).map(|refresh| Some(screen::Output { refresh, ..out })).collect()
+        } else {
+            let modes = screen::parse_modes(&d.screen.modes);
+            std::iter::once(None).chain(modes.into_iter().map(|(width, height)| Some(screen::Output { width, height, refresh: None }))).collect()
+        };
+        let pos = choices.iter().position(|c| match (c, current) {
+            (Some(c), Some(cur)) if !rate => (c.width, c.height) == (cur.width, cur.height),
+            (c, cur) => *c == cur,
+        });
+        let next = choices[(pos.unwrap_or(0) as i32 + dir).rem_euclid(choices.len() as i32) as usize];
+        if next == current {
+            return;
+        }
+        if let Err(e) = screen::save(&screen::session_conf_path(), next.as_ref()) {
+            return self.sys_error("Couldn't save the screen output", &e.to_string());
+        }
+        audio::play(Sound::Move);
+        self.save_cfg(move |c| c.session_output = next);
+        self.sys_show();
+    }
+
+    /// The PC's boot ID, for the flow's restarts.
+    fn boot() -> String {
+        gpu::boot_id(Path::new(gpu::BOOT_ID))
+    }
+
+    /// At each start in PS5 Launcher OS: resume the NVIDIA driver's flow after a restart, and
+    /// compare the screen's card with the image.
+    pub fn nvidia_start(&mut self) {
+        let Some(image) = system::os_image() else { return };
+        let mut flow = self.cfg.lock().unwrap().nvidia.clone();
+        let resumed = nvidia::resume(&mut flow, image, &Self::boot());
+        self.save_cfg(|c| c.nvidia = flow.clone());
+        match resumed {
+            nvidia::Resume::Done(Image::Nvidia) => self.toast("NVIDIA driver installed", "Games run at full speed. To go back: Settings → Display.", 1),
+            nvidia::Resume::Done(Image::Main) => self.toast("Open-source driver in use", "The PC runs the main system again.", 1),
+            nvidia::Resume::NotSwitched(_) => {
+                self.toast("The driver did not change", "The PC started the previous system. Settings → Display shows what you can do.", 2)
+            }
+            nvidia::Resume::CheckKey => return self.nv_check_key(),
+            nvidia::Resume::Nothing => {}
+        }
+        // A changed graphics card: tell the player once at the start; the page has the action.
+        let ticket = self.sys.gen.display.next();
+        bg(load_display, move |app, res| {
+            let Ok(state) = res else { return };
+            if app.sys.gen.display.current(ticket) {
+                app.sys.display.state = Some(state);
+            }
+            match app.nv_offer() {
+                Offer::Install => app.toast("NVIDIA card found", "Install the NVIDIA driver in Settings → Display to play at full speed.", 0),
+                Offer::SwitchBack => app.toast("No NVIDIA card drives the screen", "Switch to the open-source driver in Settings → Display.", 0),
+                _ => {}
+            }
+        });
+    }
+
+    /// After the restart: is the key enrolled now? Read-only.
+    fn nv_check_key(&mut self) {
+        self.sys.display.busy = Some("Checking the key…");
+        bg(
+            || system::call(&nvidia::key_state_call()).and_then(|out| nvidia::parse_key_state(&out)),
+            |app, res| {
+                app.sys.display.busy = None;
+                match res {
+                    Ok(state) => {
+                        let mut flow = app.cfg.lock().unwrap().nvidia.clone();
+                        nvidia::key_checked(&mut flow, state);
+                        app.save_cfg(|c| c.nvidia = flow);
+                        match state {
+                            nvidia::KeyState::Enrolled | nvidia::KeyState::SecureBootOff => {
+                                app.toast("Key enrolled", "Download the NVIDIA driver in Settings → Display.", 1)
+                            }
+                            _ => app.toast("The key was not enrolled", "Nothing was changed. Try again in Settings → Display.", 2),
+                        }
+                    }
+                    // The step stays: the next start asks again.
+                    Err(e) => app.sys_error("Couldn't check the driver's key", &e),
+                }
+                app.display_load();
+            },
+        );
+    }
+
+    /// Install driver (to the NVIDIA image), or the way back (to main).
+    fn nv_switch(&mut self, to: Image) {
+        if self.sys.display.busy.is_some() {
+            return;
+        }
+        audio::play(Sound::Select);
+        self.sys.gen.display.next();
+        self.sys.display.busy = Some(if to == Image::Nvidia { "Downloading…" } else { "Switching…" });
+        self.sys_show();
+        bg(move || nvidia::switch_flow(&system::call_status, to), move |app, end| {
+            app.sys.display.busy = None;
+            let mut flow = app.cfg.lock().unwrap().nvidia.clone();
+            nvidia::switched(&mut flow, to, &end, &Self::boot());
+            app.save_cfg(|c| c.nvidia = flow);
+            match end {
+                SwitchEnd::Staged => {
+                    app.sys.display.key = None;
+                    app.toast("Ready: restart to finish", "Choose Restart now on Settings → Display.", 1);
+                    // The Power menu's Restart follows the staged system.
+                    app.check_staged();
+                }
+                SwitchEnd::Password(password) => {
+                    app.sys.display.key = Some(password);
+                    app.toast("Enroll the driver's key", "The steps and the password are on Settings → Display.", 0);
+                    app.ui().set_settings_y(0.0);
+                }
+                SwitchEnd::Failed(e) => {
+                    let what = if to == Image::Nvidia { "Couldn't install the NVIDIA driver" } else { "Couldn't switch to the open-source driver" };
+                    app.sys_error(what, &e);
+                }
+            }
+            app.display_load();
+        });
+    }
+
+    /// The offer folds to one row; the dot stays.
+    fn nv_later(&mut self) {
+        audio::play(Sound::Back);
+        self.save_cfg(|c| c.nvidia.later = true);
+        self.sys_show();
+    }
+
+    /// Queue the key again: a new password (the old one was lost, or not enrolled).
+    fn nv_queue_key(&mut self) {
+        if self.sys.display.busy.is_some() {
+            return;
+        }
+        audio::play(Sound::Select);
+        self.sys.gen.display.next();
+        self.sys.display.busy = Some("Queuing the key…");
+        self.sys_show();
+        let call = osupdate::helper_call(Task::QueueKey);
+        bg(
+            move || system::call(&call).and_then(|out| osupdate::parse_key(&out)),
+            |app, res| {
+                app.sys.display.busy = None;
+                let boot = Self::boot();
+                match res {
+                    Ok(osupdate::Key::Password(p)) => {
+                        app.sys.display.key = Some(p);
+                        app.save_cfg(|c| c.nvidia.step = nvidia::Step::KeyQueued { boot });
+                        app.ui().set_settings_y(0.0);
+                    }
+                    Ok(osupdate::Key::Enrolled) => app.save_cfg(|c| c.nvidia.step = nvidia::Step::KeyEnrolled),
+                    Err(e) => app.sys_error("Couldn't queue the driver's key", &e),
+                }
+                app.display_load();
+            },
+        );
+    }
+
+    /// Restart now: the Power menu's restart, with its countdown and what a restart would lose.
+    fn nv_restart(&mut self) {
+        let staged = self.sys.os.status.as_ref().is_some_and(|s| s.staged.is_some()) || matches!(self.cfg.lock().unwrap().nvidia.step, nvidia::Step::Staged { .. });
+        self.guard_power(PowerAction::Restart { update: staged });
+    }
+
+    // ------------------------------------------------------------------ Time
+
+    fn time_rows(&self, rows: &mut Vec<(Cat, SId, SettingData)>) {
+        let t = &self.sys.time;
+        let Some(clock) = &t.clock else { return };
+        let mut r = row(4, "Time zone");
+        r.value = if t.setting { "Setting…".into() } else { clock.zone.clone().into() };
+        r.hint = if t.picker.is_some() { "Choose a region, then a city".into() } else { "Choose to change it".into() };
+        rows.push((Cat::Time, SId::TimeZone, r));
+        if clock.can_ntp {
+            let mut r = row(2, "Set the time automatically");
+            r.on = clock.ntp;
+            r.hint = "Uses time servers on the internet".into();
+            rows.push((Cat::Time, SId::Ntp, r));
+        }
+        match t.picker {
+            Some(Picker::Regions) => {
+                header(rows, Cat::Time, "CHOOSE A REGION");
+                for (i, (region, zones)) in t.regions.iter().enumerate() {
+                    let mut r = row(4, region);
+                    r.value = format!("{} zones", zones.len()).into();
+                    if clock.zone.starts_with(&format!("{region}/")) || (region == "Other" && zones.contains(&clock.zone)) {
+                        (r.value, r.value_kind) = ("In use".into(), 1);
+                    }
+                    rows.push((Cat::Time, SId::TzRegion(i), r));
+                }
+            }
+            Some(Picker::Region(i)) => {
+                let Some((region, zones)) = t.regions.get(i) else { return };
+                header(rows, Cat::Time, &region.to_uppercase());
+                rows.push((Cat::Time, SId::TzBack, row(4, "‹ All regions")));
+                for (j, zone) in zones.iter().enumerate() {
+                    let mut r = row(4, &timezone::city(zone));
+                    if *zone == clock.zone {
+                        (r.value, r.value_kind) = ("In use".into(), 1);
+                    }
+                    rows.push((Cat::Time, SId::TzZone(j), r));
+                }
+            }
+            None => {}
+        }
+    }
+
+    /// Read the Time page again. A read while the picker is open keeps it.
+    fn time_load(&mut self) {
+        let ticket = self.sys.gen.time.next();
+        bg(load_time, move |app, res| {
+            if !app.sys.gen.time.current(ticket) {
+                return;
+            }
+            match res {
+                Ok((clock, regions)) => (app.sys.time.clock, app.sys.time.regions) = (Some(clock), regions),
+                Err(e) => app.sys_error("Couldn't read the time zone", &e),
+            }
+            app.sys_show();
+        });
+    }
+
+    /// Focus on the row `id` of the open page, once the rows changed.
+    fn sys_focus(&mut self, id: SId) {
+        self.build_settings();
+        if let Some(at) = self.settings_ids.iter().position(|x| *x == id) {
+            self.set_focus(Z_SETTINGS, at as i32);
+        }
+        self.push_settings();
+        self.scroll_settings();
+    }
+
+    /// Time zone: open the regions, or close the picker.
+    fn tz_open(&mut self) {
+        if self.sys.time.setting || self.sys.time.regions.is_empty() {
+            return;
+        }
+        audio::play(Sound::Select);
+        if self.sys.time.picker.take().is_some() {
+            return self.sys_focus(SId::TimeZone);
+        }
+        let zone = self.sys.time.clock.as_ref().map(|c| c.zone.clone()).unwrap_or_default();
+        let current = self.sys.time.regions.iter().position(|(_, zones)| zones.contains(&zone)).unwrap_or(0);
+        self.sys.time.picker = Some(Picker::Regions);
+        self.sys_focus(SId::TzRegion(current));
+    }
+
+    /// Open a region's zones, or go back to the regions.
+    fn tz_pick(&mut self, picker: Picker) {
+        audio::play(Sound::Select);
+        let from = self.sys.time.picker;
+        self.sys.time.picker = Some(picker);
+        let zone = self.sys.time.clock.as_ref().map(|c| c.zone.clone()).unwrap_or_default();
+        let focus = match (picker, from) {
+            (Picker::Region(i), _) => {
+                let zones = self.sys.time.regions.get(i).map(|(_, z)| z.as_slice()).unwrap_or_default();
+                SId::TzZone(zones.iter().position(|z| *z == zone).unwrap_or(0))
+            }
+            (Picker::Regions, Some(Picker::Region(i))) => SId::TzRegion(i),
+            (Picker::Regions, _) => SId::TzRegion(0),
+        };
+        self.sys_focus(focus);
+    }
+
+    /// A zone was chosen: set it, then read the clock again.
+    fn tz_set(&mut self, j: usize) {
+        let Some(Picker::Region(i)) = self.sys.time.picker else { return };
+        let Some(zone) = self.sys.time.regions.get(i).and_then(|(_, z)| z.get(j)).cloned() else { return };
+        if self.sys.time.setting || !timezone::valid_zone(&zone) {
+            return;
+        }
+        audio::play(Sound::Select);
+        self.sys.gen.time.next();
+        self.sys.time.picker = None;
+        self.sys.time.setting = true;
+        self.sys_focus(SId::TimeZone);
+        let call = timezone::set_zone_call(Mode::current() == Mode::Os, &zone);
+        self.sys_run(call, "Couldn't set the time zone", move |app, ok| {
+            app.sys.time.setting = false;
+            if ok {
+                app.toast(&format!("Time zone: {}", timezone::city(&zone)), &zone, 1);
+            }
+            app.time_load();
+        });
+    }
+
+    fn time_ntp(&mut self, on: bool) {
+        let Some(clock) = self.sys.time.clock.as_mut() else { return };
+        if clock.ntp == on || self.sys.time.setting {
+            return;
+        }
+        clock.ntp = on;
+        audio::play(Sound::Move);
+        self.sys.gen.time.next();
+        self.sys.time.setting = true;
+        self.sys_show();
+        let call = timezone::set_ntp_call(Mode::current() == Mode::Os, on);
+        self.sys_run(call, "Couldn't change automatic time", |app, _| {
+            app.sys.time.setting = false;
+            app.time_load();
+        });
     }
 }
 

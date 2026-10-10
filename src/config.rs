@@ -39,6 +39,12 @@ pub struct Config {
     pub app_auto_update: bool,
     /// Catalog game ids whose artwork comes from RAWG (chosen per game in the Options menu).
     pub rawg_art: Vec<i64>,
+    /// System → Display (PS5 Launcher OS): where the NVIDIA driver's install is. It is kept
+    /// across restarts, which the install needs.
+    pub nvidia: crate::nvidia::Flow,
+    /// System → Display: the screen output for the next session start; None is Automatic. The
+    /// session wrapper reads it from session.conf (`screen::save`).
+    pub session_output: Option<crate::screen::Output>,
 }
 
 impl Default for Config {
@@ -66,6 +72,8 @@ impl Default for Config {
             shad_auto_update: true,
             app_auto_update: true,
             rawg_art: Vec::new(),
+            nvidia: crate::nvidia::Flow::default(),
+            session_output: None,
         }
     }
 }
@@ -193,6 +201,19 @@ mod tests {
         assert!(!opted_out.seed_after_download);
         let restored: Config = serde_json::from_slice(&serde_json::to_vec(&opted_out).unwrap()).unwrap();
         assert!(!restored.seed_after_download);
+    }
+
+    #[test]
+    fn the_display_choices_survive_a_restart() {
+        let old: Config = serde_json::from_str(r#"{"sounds":false}"#).unwrap();
+        assert_eq!(old.nvidia, crate::nvidia::Flow::default(), "an older config has no NVIDIA step");
+        assert_eq!(old.session_output, None, "and the automatic output");
+        let mut c = Config::default();
+        c.nvidia.step = crate::nvidia::Step::KeyQueued { boot: "b1".into() };
+        c.session_output = Some(crate::screen::Output { width: 2560, height: 1440, refresh: Some(144) });
+        let back: Config = serde_json::from_slice(&serde_json::to_vec(&c).unwrap()).unwrap();
+        assert_eq!(back.nvidia, c.nvidia);
+        assert_eq!(back.session_output, c.session_output);
     }
 
     #[test]

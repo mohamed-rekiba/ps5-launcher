@@ -62,4 +62,40 @@ else
     failures=$((failures + 1))
 fi
 
+# The screen output the launcher chose (Settings → Display) in session.conf: gamescope gets
+# -W -H (and -r) only when the file sets valid numbers. A fake gamescope logs its arguments.
+printf '#!/bin/sh\necho "$*" > "%s/gamescope.args"\nexit 0\n' "$work" > "$work/bin/gamescope"
+mkdir -p "$work/config/ps5-launcher"
+# output NAME WANT_ARGS_BEFORE_-f, then the lines of session.conf (none: no file)
+output() {
+    local name=$1 want=$2
+    shift 2
+    rm -rf "$work/out-state" "$work/config/ps5-launcher/session.conf" "$work/gamescope.args"
+    [ $# -gt 0 ] && printf '%s\n' "$@" > "$work/config/ps5-launcher/session.conf"
+    (cd "$work" && PATH="$work/bin:$PATH" PS5_LAUNCHER_BIN="$work/launcher" XDG_CACHE_HOME="$work/cache" \
+        XDG_STATE_HOME="$work/out-state" XDG_CONFIG_HOME="$work/config" "$session") || true
+    local got
+    got=$(sed 's/ *-f -- .*//' "$work/gamescope.args" 2>/dev/null || echo "gamescope did not start")
+    if [ "$got" = "$want" ]; then
+        echo "ok   $name"
+    else
+        echo "FAIL $name: gamescope got \"$got\" (want \"$want\")"
+        failures=$((failures + 1))
+    fi
+}
+output "no session.conf: gamescope picks the output" ""
+output "a size and a rate" "-W 2560 -H 1440 -r 144" "# Written by PS5 Launcher" WIDTH=2560 HEIGHT=1440 REFRESH=144
+output "a size with an automatic rate" "-W 1920 -H 1080" WIDTH=1920 HEIGHT=1080 REFRESH=
+output "a bad rate is left out" "-W 1920 -H 1080" WIDTH=1920 HEIGHT=1080 REFRESH=0
+output "a width without a height is ignored" "" WIDTH=1920
+output "a size that is not a number is ignored" "" WIDTH=abc HEIGHT=1080 REFRESH=60
+output "a size out of range is ignored" "" WIDTH=99999 HEIGHT=1080
+output "a size with a leading zero is ignored" "" WIDTH=01920 HEIGHT=1080
+output "a size with extra words is ignored" "" "WIDTH=1920 -O DP-1" HEIGHT=1080
+output "the file is read, never run" "" 'WIDTH=$(touch pwned)' 'HEIGHT=`touch pwned`'
+if [ -e "$work/pwned" ]; then
+    echo "FAIL session.conf ran a command"
+    failures=$((failures + 1))
+fi
+
 [ "$failures" = 0 ]

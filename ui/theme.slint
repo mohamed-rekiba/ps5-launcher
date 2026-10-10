@@ -238,6 +238,10 @@ export struct QuickCard { label: string, status: string, icon: string, danger: b
 // A category of the Settings rail. system: in the System group; sep: the divider above it.
 // dot: something waits there (an update).
 export struct SettingsCat { label: string, icon: string, dot: bool, system: bool, sep: bool }
+// The NVIDIA driver's card on System → Display. step: the stepper's step (0 to 3), -1 without a
+// stepper. kind: 0 the offer (NVIDIA green chip), 1 a warning (old or unknown card), 2 done or
+// ready (green check), 3 neutral. lines: the text under the title, the first one larger.
+export struct NvCard { show: bool, step: int, kind: int, title: string, lines: [string] }
 // A Settings search hit: the row's label and its category.
 export struct SettingsHit { label: string, place: string }
 export struct RunningData { active: bool, name: string, time: string }

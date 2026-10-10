@@ -27,7 +27,8 @@ for fixed in "^sddm_dir=$work/sddm$" "^os_release=$work/os-release$" "^cert_dir=
     fi
 done
 printf 'IMAGE=main\nIMAGE_REF=ghcr.io/owner/ps5-launcher-fedora:main\n' > "$work/os-release"
-# The fakes. bootc logs its arguments. skopeo answers from $work/registry/<tag> ("digest label").
+# The fakes. bootc and timedatectl log their arguments; timedatectl lists the zones in
+# $work/zones. skopeo answers from $work/registry/<tag> ("digest label").
 # mokutil answers from $work/sb-state and $work/mok ("enrolled", "pending" or "not"), and logs
 # what --import gets on stdin.
 # bootc hangs while $work/hang exists, to test the helper's own deadlines.
@@ -55,7 +56,14 @@ case "\$1" in
 --revoke-import) echo not > "$work/mok"; echo revoked >> "$work/revoke.log" ;;
 esac
 FAKE
-chmod +x "$work/bin/bootc" "$work/bin/skopeo" "$work/bin/mokutil"
+cat > "$work/bin/timedatectl" <<FAKE
+#!/bin/sh
+echo "\$*" >> "$work/timedatectl.log"
+[ "\$1" = list-timezones ] && cat "$work/zones"
+exit 0
+FAKE
+printf 'Africa/Abidjan\nAmerica/Argentina/Buenos_Aires\nEurope/Berlin\nUTC\n' > "$work/zones"
+chmod +x "$work/bin/bootc" "$work/bin/skopeo" "$work/bin/mokutil" "$work/bin/timedatectl"
 # macOS has no timeout on the helper's PATH (Homebrew's coreutils has one); Fedora does.
 if ! PATH=/usr/sbin:/usr/bin:/bin command -v timeout >/dev/null; then
     ln -s "$(command -v timeout || command -v gtimeout)" "$work/bin/timeout"
@@ -176,6 +184,33 @@ check "queue-key again replaces the waiting request" gate 0 queue-key
 check "  by revoking it first" grep -qx revoked "$work/revoke.log"
 check "  so the new password is the one mokutil got" diff <(cat "$work/out" "$work/out") "$work/import.stdin"
 check "  and it is a new one" test "$(cat "$work/out")" != "$first"
+# key-state only reads: it never queues or revokes a key.
+: > "$work/revoke.log"
+echo not > "$work/mok"
+rm -f "$work/import.file"
+check "key-state with the key missing says missing" gate 0 key-state
+check "  in one word" grep -qx missing "$work/out"
+check "  and queues nothing" test ! -e "$work/import.file"
+echo pending > "$work/mok"
+check "key-state with the key queued says pending" gate 0 key-state
+check "  in one word" grep -qx pending "$work/out"
+check "  and revokes nothing" test ! -s "$work/revoke.log"
+echo enrolled > "$work/mok"
+check "key-state with the key enrolled says enrolled" gate 0 key-state
+check "  in one word" grep -qx enrolled "$work/out"
+echo "SecureBoot disabled" > "$work/sb-state"
+check "key-state without Secure Boot says secure-boot-off" gate 0 key-state
+check "  in one word" grep -qx secure-boot-off "$work/out"
+echo "Cannot determine secure boot state." > "$work/sb-state"
+check "key-state with an unknown Secure Boot state fails" gate 1 key-state
+echo "SecureBoot enabled" > "$work/sb-state"
+echo "sha256:aaaa 0000" > "$work/registry/nvidia"
+check "key-state for an image signed with an unknown key fails" gate 1 key-state
+echo "sha256:aaaa $cert" > "$work/registry/nvidia"
+printf 'IMAGE=main\nIMAGE_REF=ghcr.io/owner/ps5-launcher-fedora:main\n' > "$work/os-release"
+check "key-state on main asks about the NVIDIA image's key" gate 0 key-state
+check "  which is enrolled" grep -qx enrolled "$work/out"
+printf 'IMAGE=nvidia\nIMAGE_REF=ghcr.io/owner/ps5-launcher-fedora:nvidia\n' > "$work/os-release"
 echo enrolled > "$work/mok"
 check "queue-key with the key already enrolled queues nothing" gate 0 queue-key
 check "  and says key-enrolled" grep -qx key-enrolled "$work/out"
@@ -227,6 +262,34 @@ if [ "$real_flock" = 1 ]; then
 else
     echo "skip the lock tests: no flock here"
 fi
+# The time zone and automatic time: timedated wants an admin password for both
+# (auth_admin_keep), so the helper sets them, and only to a zone timedatectl lists.
+tz() { # EXPECTED_EXIT, then the helper's arguments
+    local want=$1 got=0
+    shift
+    : > "$work/timedatectl.log"
+    helper "$@" > "$work/out" || got=$?
+    [ "$got" = "$want" ]
+}
+check "set-timezone sets a listed zone" tz 0 set-timezone Europe/Berlin
+check "  with timedatectl" grep -qx "set-timezone Europe/Berlin" "$work/timedatectl.log"
+check "set-timezone takes three parts" tz 0 set-timezone America/Argentina/Buenos_Aires
+check "set-timezone takes a zone without a region" tz 0 set-timezone UTC
+for bad in ../../etc/shadow /etc/passwd Europe/../../etc/shadow Europe/Nowhere Europe "" -h \
+    "Europe/Berlin
+UTC" "Europe/Berlin "; do
+    check "set-timezone refuses ${bad:-an empty zone}" tz 1 set-timezone "$bad"
+    check "  without setting it" fails grep -q "^set-timezone" "$work/timedatectl.log"
+done
+check "set-timezone with no zone is refused" tz 2 set-timezone
+check "set-timezone with two zones is refused" tz 2 set-timezone UTC Europe/Berlin
+check "set-ntp on turns automatic time on" tz 0 set-ntp on
+check "  with timedatectl" grep -qx "set-ntp true" "$work/timedatectl.log"
+check "set-ntp off turns it off" tz 0 set-ntp off
+check "  with timedatectl" grep -qx "set-ntp false" "$work/timedatectl.log"
+check "set-ntp takes only on or off" tz 2 set-ntp yes
+check "  without touching timedatectl" test ! -s "$work/timedatectl.log"
+
 mkdir -p "$work/health"
 echo '{}' > "$work/health/notice.json"
 check "health-ack deletes the boot check's notice" helper health-ack

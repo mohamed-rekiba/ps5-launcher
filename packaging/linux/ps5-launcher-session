@@ -113,6 +113,33 @@ if ! command -v gamescope >/dev/null 2>&1; then
     exit 1
 fi
 
-# The launcher and the games open X11 windows, even when a Wayland socket is around.
-exec gamescope -f -- env -u WAYLAND_DISPLAY \
+# The screen output the launcher chose (Settings → Display): WIDTH=, HEIGHT= and REFRESH= lines
+# in session.conf. gamescope gets -W -H, and -r with a rate, only when the width and the height
+# are whole numbers in range; otherwise it picks the output itself. The file is read, never run.
+session_conf="${XDG_CONFIG_HOME:-$HOME/.config}/ps5-launcher/session.conf"
+conf_value() {
+    sed -n "s/^$1=//p" "$session_conf" | tail -1
+}
+in_range() { # VALUE MIN MAX: digits only, no leading zero, MIN to MAX
+    case "$1" in "" | 0* | *[!0-9]*) return 1 ;; esac
+    [ "${#1}" -le 5 ] && [ "$1" -ge "$2" ] && [ "$1" -le "$3" ]
+}
+output=""
+if [ -f "$session_conf" ]; then
+    width=$(conf_value WIDTH)
+    height=$(conf_value HEIGHT)
+    refresh=$(conf_value REFRESH)
+    if in_range "$width" 320 16384 && in_range "$height" 320 16384; then
+        output="-W $width -H $height"
+        in_range "$refresh" 1 1000 && output="$output -r $refresh"
+        echo "screen output from $session_conf: $output"
+    else
+        echo "ignoring $session_conf: it has no valid WIDTH and HEIGHT"
+    fi
+fi
+
+# The launcher and the games open X11 windows, even when a Wayland socket is around. $output
+# holds only the checked numbers and flags, so it is split into words on purpose.
+# shellcheck disable=SC2086 # the words of $output are separate arguments
+exec gamescope $output -f -- env -u WAYLAND_DISPLAY \
     SDL_VIDEO_DRIVER=x11 SDL_VIDEODRIVER=x11 QT_QPA_PLATFORM=xcb GDK_BACKEND=x11 "$0" --inner

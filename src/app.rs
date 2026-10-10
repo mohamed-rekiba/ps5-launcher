@@ -475,6 +475,9 @@ pub fn run(ui: AppWindow, monitors: Vec<Monitor>, target_monitor: Option<Monitor
     if crate::system::Mode::current() != crate::system::Mode::Desktop {
         with_app(|app| app.sound_load(false));
     }
+    // PS5 Launcher OS: resume the NVIDIA driver's install after a restart, and compare the
+    // screen's card with the image.
+    with_app(|app| app.nvidia_start());
 
     wire_callbacks(&ui);
     crate::gamepad::spawn(|p| post(move |app| app.on_pad(p)));
