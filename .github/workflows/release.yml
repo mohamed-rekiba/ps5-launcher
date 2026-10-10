@@ -2,29 +2,24 @@ name: Release
 
 # Release Please keeps a release pull request open on main. It collects the Conventional Commit
 # messages since the last release, bumps the version in Cargo.toml / Cargo.lock and writes
-# CHANGELOG.md. Merging that pull request creates a *draft* release and pushes its tag at once
-# (force-tag-creation in .github/release-please-config.json). Then:
+# CHANGELOG.md. Merging that pull request creates a *draft* release and pushes its v* tag at once
+# (force-tag-creation in .github/release-please-config.json). The tag starts two workflows:
 #   package.yml  builds the Linux and macOS files, attaches them to the draft, checks them, and
 #                publishes the release
-#   os.yml       builds and tests PS5 Launcher OS with that release
+#   os.yml       waits for that, then builds and tests PS5 Launcher OS with the release
 # The app's self-updater reads the latest published release, so it never sees one without files.
 #
-# How each step starts: GitHub starts no workflow from a tag, a pull request or a release made
-# with the workflow's own token, except a workflow_dispatch. So:
-# - Without the secret RELEASE_PLEASE_TOKEN (the default), this workflow starts package.yml on the
-#   new tag, and package.yml starts os.yml after it publishes. One repository setting is needed:
-#   Settings -> Actions -> General -> "Allow GitHub Actions to create and approve pull requests".
-# - With RELEASE_PLEASE_TOKEN (a fine-grained personal access token for this repository, with
-#   Contents, Pull requests and Workflows set to "Read and write"), the tag push starts
-#   package.yml and the published release starts os.yml, and checks also run on the release pull
-#   request. Nothing is started twice: the dispatches below run only without the token.
+# This needs the secret RELEASE_PLEASE_TOKEN: GitHub starts no workflow from a tag (or a pull
+# request) made with the workflow's own token. Use a fine-grained personal access token for this
+# repository only, with Contents, Pull requests and Workflows set to "Read and write" (Workflows,
+# so a release commit that changes a workflow can be tagged). With it, checks also run on the
+# release pull request.
 on:
   push:
     branches: [main]
 
 permissions:
-  contents: write
-  pull-requests: write
+  contents: read
 
 concurrency:
   group: release
@@ -34,13 +29,17 @@ jobs:
   release-please:
     runs-on: ubuntu-24.04
     timeout-minutes: 10
-    outputs:
-      created: ${{ steps.rp.outputs.release_created }}
-      tag: ${{ steps.rp.outputs.tag_name }}
     steps:
-      - id: rp
-        uses: googleapis/release-please-action@45996ed1f6d02564a971a2fa1b5860e934307cf7 # v5.0.0
+      - name: Require RELEASE_PLEASE_TOKEN
+        env:
+          TOKEN: ${{ secrets.RELEASE_PLEASE_TOKEN }}
+        run: |
+          if [ -z "$TOKEN" ]; then
+            echo "::error::The secret RELEASE_PLEASE_TOKEN is missing. Without it, a release tag starts neither Package nor OS. See the top of .github/workflows/release.yml."
+            exit 1
+          fi
+      - uses: googleapis/release-please-action@45996ed1f6d02564a971a2fa1b5860e934307cf7 # v5.0.0
         with:
-          token: ${{ secrets.RELEASE_PLEASE_TOKEN || github.token }}
+          token: ${{ secrets.RELEASE_PLEASE_TOKEN }}
           config-file: .github/release-please-config.json
           manifest-file: .github/release-please-manifest.json

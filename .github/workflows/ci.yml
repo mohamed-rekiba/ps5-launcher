@@ -1,8 +1,8 @@
 name: CI
 
 # Pull requests and main. Checks use the `ci` profile (see Cargo.toml): release optimization
-# without LTO, which removes the link step that dominates a warm-cache build. The release
-# workflow builds the full release profile.
+# without LTO, which removes the link step that dominates a warm-cache build. Package
+# (package.yml) builds the full release profile.
 #
 # Each platform is built and unit-tested natively, then the binary is run (`--version`). macOS
 # also bundles the two architectures into a universal app. Runners have no GPU or controller, so

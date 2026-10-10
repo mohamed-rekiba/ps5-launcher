@@ -1,9 +1,9 @@
 name: OS
 
-# The Fedora bootc OS image (packaging/os/) and its installer ISO. It runs when a launcher release
-# is published (package.yml publishes it after its v* tag; prereleases are skipped) and by hand.
-# It replaces the Bazzite image
-# (os/ and os.yml, both removed). Never push to the Bazzite repository ps5-launcher-os or its
+# The Fedora bootc OS image (packaging/os/) and its installer ISO. It starts when a v* tag is
+# pushed, at the same time as package.yml, and waits until package.yml has published that
+# release with its files (job wait; prereleases are skipped). It also runs by hand. It replaces
+# the Bazzite image (os/ and the old os.yml, both removed). Never push to the Bazzite repository ps5-launcher-os or its
 # tags: installed Bazzite PCs still follow them. packaging/os/README.md describes the
 # images, the gates and the owner's setup.
 #
@@ -24,8 +24,8 @@ name: OS
 # packaging/os/signing/cosign.pub.
 #
 # Each run:
-# 1. prepare: resolves the inputs once: the launcher release (the published release, the tag the
-#    run was started from, or the latest), the
+# 1. prepare: resolves the inputs once: the launcher release (the tag the run is for, or the
+#    latest when started from a branch), the
 #    digest of fedora-bootc:44 (so daily builds pick up Fedora's updates), the image name, the
 #    Secure Boot certificate and the image signing public key.
 # 2. main: checks the launcher tarball's checksum, builds its rpm, builds the main image, checks
@@ -35,7 +35,8 @@ name: OS
 # 4. test-images (CI only): the install test's upgrade target, the same image unsigned, and one
 #    signed with a throwaway key made in the job.
 # 5. sign: signs the main, NVIDIA and upgrade digests (environment os-fedora-signing, which only
-#    the protected main branch and the protected v* tags may use), with the run id, attempt and commit as annotations, then
+#    the protected main branch and the protected v* tags may use), with the run id, attempt and
+#    commit as annotations, then
 #    verifies them against the committed public key.
 # 6. Gates, all on a runner with KVM (no KVM fails them):
 #    boot-test     a qcow2 of the main candidate boots, and its checks pass (session included)
@@ -64,8 +65,8 @@ name: OS
 on:
   # TODO: bring back the nightly schedule (cron "45 4 * * *") once the signing environment and
   # SECUREBOOT_KEY exist and one manual run is green. Without them every scheduled run fails.
-  release:
-    types: [published]
+  push:
+    tags: ["v*"]
   # By hand, "Use workflow from" picks the launcher: a v* tag builds that release, and a branch
   # builds the latest release (promotion runs only from main).
   workflow_dispatch:
@@ -107,9 +108,54 @@ defaults:
     shell: bash
 
 jobs:
+  # On a tag push: wait for package.yml to publish this release with its files. A prerelease is
+  # not a launcher release that installed PCs should get, so it skips the rest.
+  wait:
+    if: github.event_name == 'push'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 100
+    outputs:
+      build: ${{ steps.release.outputs.build }}
+    steps:
+      - id: release
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
+          TAG: ${{ github.ref_name }}
+        run: |
+          # Package builds and tests for about 30 minutes; give it up to 90.
+          for _ in $(seq 90); do
+            if state=$(gh release view "$TAG" --json isDraft,isPrerelease,assets \
+                --jq '"\(.isDraft) \(.isPrerelease) \(any(.assets[]; .name == "ps5-launcher-linux-x86_64.tar.gz"))"' 2>/dev/null); then
+              read -r draft prerelease tarball <<<"$state"
+              if [ "$draft" = false ] && [ "$prerelease" = true ]; then
+                echo "$TAG is a prerelease: no OS image"
+                echo "build=false" >> "$GITHUB_OUTPUT"
+                exit 0
+              fi
+              if [ "$draft" = false ] && [ "$tarball" = true ]; then
+                echo "$TAG is published with its files"
+                echo "build=true" >> "$GITHUB_OUTPUT"
+                exit 0
+              fi
+            fi
+            # Stop early when this tag's Package run failed or was cancelled.
+            result=$(gh run list --workflow package.yml --branch "$TAG" --limit 1 \
+                --json status,conclusion --jq '.[0] | "\(.status) \(.conclusion)"' 2>/dev/null || true)
+            case $result in
+              "completed failure" | "completed cancelled" | "completed timed_out")
+                echo "::error::Package failed for $TAG ($result), so its release has no files to build the OS from"
+                exit 1 ;;
+            esac
+            sleep 60
+          done
+          echo "::error::$TAG was not published with its files within 90 minutes. Check the Package run for $TAG."
+          exit 1
+
   prepare:
-    # A prerelease is not a launcher release that installed PCs should get.
-    if: github.event_name != 'release' || !github.event.release.prerelease
+    needs: wait
+    # After wait on a tag push; by hand, wait is skipped.
+    if: ${{ !cancelled() && (needs.wait.result == 'skipped' || needs.wait.outputs.build == 'true') }}
     runs-on: ubuntu-24.04
     timeout-minutes: 10
     outputs:
@@ -126,8 +172,9 @@ jobs:
       - id: resolve
         env:
           GH_TOKEN: ${{ github.token }}
-          # The published release, or the tag the run was started from; empty means the latest.
-          LAUNCHER_TAG: ${{ github.event.release.tag_name || (startsWith(github.ref, 'refs/tags/') && github.ref_name) || '' }}
+          # The tag the run is for (pushed, or picked under "Use workflow from"); from a branch,
+          # empty, which means the latest release.
+          LAUNCHER_TAG: ${{ startsWith(github.ref, 'refs/tags/') && github.ref_name || '' }}
         run: |
           if [ ! -f "$CERT" ]; then
             echo "::error::No Secure Boot certificate at $CERT. The owner makes it once: see packaging/os/secureboot/README.md"
@@ -413,7 +460,8 @@ jobs:
 
   # Signs this run's candidates right after they are pushed, before any gate pulls them. The
   # signing secrets are environment secrets of os-fedora-signing, whose deployment rule allows
-  # only the protected main branch (packaging/os/signing/README.md): no other branch can sign.
+  # only the protected main branch and the protected v* tags (packaging/os/signing/README.md):
+  # no other branch or tag can sign.
   # cosign v3.1.3 flags (cmd/cosign/cli/options/sign.go): --new-bundle-format=false (:161) and
   # --tlog-upload=false (:125) write the legacy signature with the simple signing payload and no
   # transparency log; both need --use-signing-config=false (:164; signcommon/common.go:437-442).

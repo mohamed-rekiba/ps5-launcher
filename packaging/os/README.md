@@ -278,11 +278,12 @@ Find the current base digest with
 
 ## The workflow and its gates
 
-`.github/workflows/os.yml` (**OS**) runs when a launcher release is
-published (Package publishes it after its `v*` tag; prereleases are skipped) and by hand. Its
+`.github/workflows/os.yml` (**OS**) starts when a `v*` tag is pushed, at the same time as
+Package, and its `wait` job waits up to 90 minutes for Package to publish that release with its
+files (it stops early when Package fails, and skips prereleases). It also runs by hand. Its
 daily schedule is off until the keys exist (a TODO in the file). It resolves its inputs once:
-the launcher release (the published release, the tag picked under "Use workflow from", or the
-latest release when started from a branch), and the current digest of `fedora-bootc:44`, so each daily build picks up
+the launcher release (the tag the run is for, or the latest release when started from a
+branch), and the current digest of `fedora-bootc:44`, so each daily build picks up
 Fedora's updates. Both go into the job summary and the image labels.
 
 1. **main:** checks the launcher tarball against its `.sha256`, builds the rpm with
@@ -382,7 +383,7 @@ Then set it to `enabled` in a separate, reviewed change that cites that run's id
 5. **Protect `main` and the `v*` tags:** the environments trust them, so protect both (Settings →
    Rules): `main` changes only through reviewed pull requests, and only the release token may
    create, move or delete a `v*` tag.
-6. **After a launcher release:** the published release starts this workflow, without
+6. **After a launcher release:** the release's `v*` tag starts this workflow, without
    promotion. Promote by hand after the hardware tests: start it from `main` with `promote` on
    (and `attach_iso`, once the release guard is lifted).
 7. Optional repository variables: `OS_IMAGE_OWNER` (a fork's registry name), `OS_VM_RUNNER` (a
@@ -425,5 +426,5 @@ switches to the candidate by digest.
 - Recovery mode is reached only by editing the GRUB entry; there is no menu entry for it, and
   PCs installed before the GRUB drop-in keep the 1-second menu.
 - Old `testing-*` tags are not deleted from the registry.
-- A published release starts this workflow without promotion and the ISO: the release guard is
-  still on.
+- A release tag starts this workflow without promotion and the ISO: the release guard is still
+  on.
