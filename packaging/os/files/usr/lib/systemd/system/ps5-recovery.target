@@ -1,0 +1,9 @@
+[Unit]
+Description=PS5 Launcher OS recovery: a text menu on tty1, no login screen
+Documentation=file:/usr/libexec/ps5-launcher-os/recovery-menu
+# Entered from GRUB: press e on the boot entry, add systemd.unit=ps5-recovery.target to the linux
+# line, then Ctrl-X or F10 (packaging/os/README.md, "Recovery").
+Requires=multi-user.target ps5-recovery-menu.service
+After=multi-user.target ps5-recovery-menu.service
+Conflicts=sddm.service display-manager.service ps5-boot-health.service
+AllowIsolate=yes

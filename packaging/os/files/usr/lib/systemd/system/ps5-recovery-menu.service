@@ -1,0 +1,20 @@
+[Unit]
+Description=PS5 Launcher OS recovery menu on tty1
+Documentation=file:/usr/libexec/ps5-launcher-os/recovery-menu
+# Only ps5-recovery.target starts it; it is never enabled.
+Conflicts=getty@tty1.service
+After=getty@tty1.service systemd-user-sessions.service plymouth-quit-wait.service NetworkManager.service
+
+[Service]
+Type=idle
+ExecStart=/usr/libexec/ps5-launcher-os/recovery-menu
+StandardInput=tty
+StandardOutput=tty
+StandardError=tty
+TTYPath=/dev/tty1
+TTYReset=yes
+TTYVHangup=yes
+TTYVTDisallocate=yes
+# The menu stays: if it ends for any reason, it starts again.
+Restart=always
+RestartSec=1
