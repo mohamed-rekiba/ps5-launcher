@@ -1,0 +1,74 @@
+{
+   "blockdevices": [
+      {
+         "name": "sr0",
+         "path": "/dev/sr0",
+         "size": 1073741312,
+         "type": "rom",
+         "fstype": null,
+         "mountpoint": null,
+         "rm": true,
+         "hotplug": false,
+         "label": null,
+         "model": "QEMU DVD-ROM"
+      },{
+         "name": "vda",
+         "path": "/dev/vda",
+         "size": 10737418240,
+         "type": "disk",
+         "fstype": null,
+         "mountpoint": null,
+         "rm": false,
+         "hotplug": false,
+         "label": null,
+         "model": null,
+         "children": [
+            {
+               "name": "vda1",
+               "path": "/dev/vda1",
+               "size": 1048576,
+               "type": "part",
+               "fstype": null,
+               "mountpoint": null,
+               "rm": false,
+               "hotplug": false,
+               "label": null,
+               "model": null
+            },{
+               "name": "vda2",
+               "path": "/dev/vda2",
+               "size": 525336576,
+               "type": "part",
+               "fstype": "vfat",
+               "mountpoint": "/boot/efi",
+               "rm": false,
+               "hotplug": false,
+               "label": "EFI-SYSTEM",
+               "model": null
+            },{
+               "name": "vda3",
+               "path": "/dev/vda3",
+               "size": 1073741824,
+               "type": "part",
+               "fstype": "ext4",
+               "mountpoint": "/boot",
+               "rm": false,
+               "hotplug": false,
+               "label": "boot",
+               "model": null
+            },{
+               "name": "vda4",
+               "path": "/dev/vda4",
+               "size": 9135194112,
+               "type": "part",
+               "fstype": "ext4",
+               "mountpoint": "/sysroot",
+               "rm": false,
+               "hotplug": false,
+               "label": "root",
+               "model": null
+            }
+         ]
+      }
+   ]
+}

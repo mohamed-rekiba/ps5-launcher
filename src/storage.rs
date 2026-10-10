@@ -15,6 +15,8 @@ pub struct Drive {
     pub bytes: u64,
     /// Removable or hot-plugged (USB): offered as "Use it for games?".
     pub removable: bool,
+    /// The OS runs from it: never offered for formatting.
+    pub system: bool,
     pub partitions: Vec<Partition>,
 }
 
@@ -50,6 +52,11 @@ struct Lsblk {
     blockdevices: Vec<Entry>,
 }
 
+/// Where the OS mounts its own partitions (bootc mounts the root at /sysroot).
+fn is_system_mount(mountpoint: &str) -> bool {
+    matches!(mountpoint, "/" | "/sysroot" | "/boot" | "/boot/efi" | "/usr" | "/var" | "[SWAP]")
+}
+
 /// The drives in lsblk's JSON. Empty and virtual devices (nbd, loop, zram, ram) are left out.
 pub fn parse_drives(json: &str) -> Result<Vec<Drive>, String> {
     let lsblk: Lsblk = serde_json::from_str(json).map_err(|e| format!("unexpected lsblk output: {e}"))?;
@@ -58,22 +65,26 @@ pub fn parse_drives(json: &str) -> Result<Vec<Drive>, String> {
         .blockdevices
         .into_iter()
         .filter(|e| e.kind == "disk" && e.size > 0 && !virtual_name(&e.name))
-        .map(|e| Drive {
-            name: e.model.map(|m| m.trim().to_string()).filter(|m| !m.is_empty()).unwrap_or(e.name),
-            path: e.path,
-            bytes: e.size,
-            removable: e.rm || e.hotplug,
-            partitions: e
-                .children
-                .into_iter()
-                .map(|c| Partition {
-                    path: c.path,
-                    bytes: c.size,
-                    fstype: c.fstype,
-                    label: c.label,
-                    mountpoint: c.mountpoint,
-                })
-                .collect(),
+        .map(|e| {
+            let system = e.children.iter().chain([&e]).any(|p| p.mountpoint.as_deref().is_some_and(is_system_mount));
+            Drive {
+                name: e.model.map(|m| m.trim().to_string()).filter(|m| !m.is_empty()).unwrap_or(e.name),
+                path: e.path,
+                bytes: e.size,
+                removable: e.rm || e.hotplug,
+                system,
+                partitions: e
+                    .children
+                    .into_iter()
+                    .map(|c| Partition {
+                        path: c.path,
+                        bytes: c.size,
+                        fstype: c.fstype,
+                        label: c.label,
+                        mountpoint: c.mountpoint,
+                    })
+                    .collect(),
+            }
         })
         .collect())
 }
@@ -110,6 +121,7 @@ mod tests {
                 name: "vda".into(),
                 bytes: 994662416384,
                 removable: false,
+                system: false,
                 partitions: vec![Partition {
                     path: "/dev/vda1".into(),
                     bytes: 994661367808,
@@ -143,6 +155,15 @@ mod tests {
         assert!(drives[0].removable);
         assert_eq!(drives[0].partitions[0].fstype.as_deref(), Some("exfat"));
         assert_eq!(drives[0].partitions[0].label.as_deref(), Some("GAMES"));
+    }
+
+    #[test]
+    fn the_disk_the_os_runs_from_is_the_system_disk() {
+        let drives = parse_drives(include_str!("testdata/fedora44-vm-lsblk.json")).unwrap();
+        assert_eq!(drives.len(), 1, "the DVD drive (type rom) is left out");
+        assert!(drives[0].system, "/sysroot, /boot and /boot/efi are on it");
+        assert_eq!(drives[0].partitions.len(), 4);
+        assert!(!parse_drives(CAPTURED).unwrap()[1].system);
     }
 
     #[test]

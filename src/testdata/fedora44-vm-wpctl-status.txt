@@ -1,0 +1,39 @@
+PipeWire 'pipewire-0' [1.6.9, player@fedora, cookie:294771618]
+ └─ Clients:
+        32. kwin_wayland                        [1.6.9, player@fedora, pid:1332]
+        33. WirePlumber                         [1.6.9, player@fedora, pid:1358]
+        42. WirePlumber [client]                [1.6.9, player@fedora, pid:1358]
+        49. pipewire                            [1.6.9, player@fedora, pid:1466]
+        51. libcanberra                         [1.6.9, player@fedora, pid:1446]
+        56.                                     [1.6.9, player@fedora, pid:1446]
+        57.                                     [1.6.9, player@fedora, pid:1458]
+        58. wpctl                               [1.6.9, player@fedora, pid:1800]
+        63. xdg-desktop-portal                  [1.6.9, player@fedora, pid:1638]
+        64. plasmashell                         [1.6.9, player@fedora, pid:1458]
+        65. libcanberra                         [1.6.9, player@fedora, pid:1458]
+
+Audio
+ ├─ Devices:
+ │  
+ ├─ Sinks:
+ │  *   50. Dummy Output                        [vol: 1.00]
+ │  
+ ├─ Sources:
+ │  
+ ├─ Filters:
+ │  
+ └─ Streams:
+
+Video
+ ├─ Devices:
+ │  
+ ├─ Sinks:
+ │  
+ ├─ Sources:
+ │  
+ ├─ Filters:
+ │  
+ └─ Streams:
+
+Settings
+ └─ Default Configured Devices:
