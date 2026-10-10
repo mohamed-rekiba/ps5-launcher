@@ -24,12 +24,16 @@ below is the advisor's design as written.
   form from them where it has no value (new keys win), then sets them from it; a save stores
   their edits. The first save over a version-0 file keeps it as `config.json.legacy`.
 - Fullscreen and the three update switches stay app-wide fields, with their old rule.
-- Ratings and skips record the emulator id and its build (`MyResult.kyty` is now
-  `emulator_version`; old files still load). Old records take the emulator from the title id.
-  They are still keyed by title id; keying by emulator comes with phase 6.
-- A launch records the emulator id and its build in `Session` and `Ended`; a rating after play
-  uses them.
-- `main` loads the addons once, on its own thread (`startup::shared`, `startup::snapshot`).
+- Ratings and skips record the emulator id and its build (`emulator`, `emulator_version`,
+  `skipped_emulators`). The file stays readable by the previous launcher: results still write
+  `kyty`, and `skipped` still maps a title id to a build. Old records take the emulator from the
+  title id. They are still keyed by title id; keying by emulator comes with phase 6.
+- An emulator entry that cannot be read is kept as raw JSON. A config.json that cannot be read,
+  or one from a newer launcher, is never saved over.
+- A launch records the emulator id and its build in `Session` and `Ended`, through a cell the
+  banner probe fills even after the game ends; a rating after play waits for it.
+- `main` loads the addons once, on its own thread (`startup::shared`, `startup::snapshot`). The
+  app reads the catalog, which reads the addons, off the UI thread.
 
 Not done in phase 2: the registry does not choose the emulator yet (phase 3), and nothing in
 the UI sets the new choices or the on/off switch (phase 5).
