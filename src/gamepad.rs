@@ -34,6 +34,8 @@ pub enum Pad {
     ConfirmHold,
 }
 
+const EV_SYN: u16 = 0;
+const SYN_REPORT: u16 = 0;
 const EV_KEY: u16 = 1;
 const EV_ABS: u16 = 3;
 const BTN_SOUTH: u16 = 0x130;
@@ -86,6 +88,9 @@ struct Device {
     buttons: [bool; 4], // dpad buttons up/down/left/right
     ps: HoldButton,
     confirm: HoldButton,
+    /// The axes that are L2 and R2 on this device, if any (see `trigger_axes`).
+    trigger_codes: [Option<u16>; 2],
+    triggers: [TriggerAxis; 2],
 }
 
 /// evdev nodes of gamepads (devices with a joystick handler and a south face button).
@@ -202,13 +207,24 @@ fn open_device(path: &str) -> Option<Device> {
         return None;
     }
     let mut ranges = HashMap::new();
-    for axis in [0u16, 1, 16, 17] {
+    for axis in [0u16, 1, 16, 17, ABS_Z, ABS_RX, ABS_RY, ABS_RZ, ABS_GAS, ABS_BRAKE] {
         if let Some(i) = abs_info(fd, axis) {
             ranges.insert(axis, (i.minimum, i.maximum));
         }
     }
+    let trigger_codes = trigger_axes(|c| ranges.contains_key(&c));
     crate::log!("controller connected: {path}");
-    Some(Device { fd, path: path.to_string(), ranges, axes: HashMap::new(), buttons: [false; 4], ps: HoldButton::ps(), confirm: HoldButton::confirm() })
+    Some(Device {
+        fd,
+        path: path.to_string(),
+        ranges,
+        axes: HashMap::new(),
+        buttons: [false; 4],
+        ps: HoldButton::ps(),
+        confirm: HoldButton::confirm(),
+        trigger_codes,
+        triggers: [TriggerAxis::new(Pad::L2), TriggerAxis::new(Pad::R2)],
+    })
 }
 
 /// Spawns the input thread. `emit` receives presses (directions auto-repeat while held).
@@ -323,6 +339,91 @@ impl HoldButton {
     }
 }
 
+/// An analog trigger read as a button: L2 or R2 for a pad that reports its triggers only as an
+/// axis (Xbox pads under `xpad`, for example). Pulling past 3/4 is one press; the trigger must come
+/// back to 0.65 before the next pull counts. These are the thresholds gilrs uses on macOS.
+///
+/// Pads that report the trigger as a button too (DualSense, DualShock 4) must not press twice:
+/// once the device sends the button, its axis is ignored for good (`button`).
+struct TriggerAxis {
+    pad: Pad,
+    /// The latest normalised value, 0.0 (let go) to 1.0 (fully pulled).
+    level: f32,
+    pressed: bool,
+    /// The device sent the digital button for this trigger: the button presses, not the axis.
+    digital: bool,
+}
+
+const TRIGGER_PRESS: f32 = 0.75;
+const TRIGGER_RELEASE: f32 = 0.65;
+
+impl TriggerAxis {
+    fn new(pad: Pad) -> Self {
+        TriggerAxis { pad, level: 0.0, pressed: false, digital: false }
+    }
+
+    /// The axis moved to `level` (0.0 to 1.0). Takes effect at the next `sync`.
+    fn axis(&mut self, level: f32) {
+        self.level = level;
+    }
+
+    /// The device sent the digital button for this trigger (pressed or released).
+    fn button(&mut self) {
+        self.digital = true;
+        self.pressed = false;
+    }
+
+    /// End of one report from the device: sends the press if this pull crossed the threshold.
+    /// Called once per report so that a button sent in the same report as the axis counts first.
+    fn sync(&mut self, mut emit: impl FnMut(Pad)) {
+        if self.digital {
+            return;
+        }
+        if !self.pressed && self.level >= TRIGGER_PRESS {
+            self.pressed = true;
+            emit(self.pad);
+        } else if self.pressed && self.level <= TRIGGER_RELEASE {
+            self.pressed = false;
+        }
+    }
+}
+
+const ABS_Z: u16 = 0x02;
+const ABS_RX: u16 = 0x03;
+const ABS_RY: u16 = 0x04;
+const ABS_RZ: u16 = 0x05;
+const ABS_GAS: u16 = 0x09;
+const ABS_BRAKE: u16 = 0x0a;
+const BTN_TL2: u16 = 0x138;
+const BTN_TR2: u16 = 0x139;
+
+/// Which axes are the L2 and R2 triggers on a device, given the axes it has (`has`).
+///
+/// ABS_BRAKE and ABS_GAS are triggers wherever they appear: the kernel gives them only to the
+/// HID "Brake" and "Accelerator" controls, never to a stick. ABS_Z and ABS_RZ are triggers only
+/// when the device also has ABS_RX and ABS_RY: then the right stick is there (xpad,
+/// hid-playstation). A generic HID pad without RX/RY puts its right stick on Z/RZ, and a stick
+/// pushed to one side must not press L2 or R2. The range alone cannot tell them apart: both a
+/// DualSense trigger and a generic stick can run from 0 to 255.
+fn trigger_axes(has: impl Fn(u16) -> bool) -> [Option<u16>; 2] {
+    let right_stick = has(ABS_RX) && has(ABS_RY);
+    let pick = |pedal: u16, axis: u16| {
+        if has(pedal) {
+            Some(pedal)
+        } else if right_stick && has(axis) {
+            Some(axis)
+        } else {
+            None
+        }
+    };
+    [pick(ABS_BRAKE, ABS_Z), pick(ABS_GAS, ABS_RZ)]
+}
+
+/// A raw trigger value as 0.0 (let go) to 1.0 (fully pulled), for the axis range `lo..=hi`.
+fn trigger_level(value: i32, lo: i32, hi: i32) -> f32 {
+    ((value - lo) as f32 / (hi - lo) as f32).clamp(0.0, 1.0)
+}
+
 /// The on-screen keyboard is open: Confirm tells a press from a hold (see `HoldButton`).
 static CONFIRM_HOLDS: AtomicBool = AtomicBool::new(false);
 
@@ -404,6 +505,14 @@ fn run(emit: impl Fn(Pad)) {
                         0 => dev.confirm.cancel(),
                         _ => {}
                     },
+                    // L2/R2 as buttons: from now on this device's trigger axes are ignored.
+                    EV_KEY if code == BTN_TL2 || code == BTN_TR2 => {
+                        let t = &mut dev.triggers[(code - BTN_TL2) as usize];
+                        t.button();
+                        if value == 1 {
+                            emit(t.pad);
+                        }
+                    }
                     EV_KEY => match map_button(code) {
                         Some(p @ (Pad::Up | Pad::Down | Pad::Left | Pad::Right)) => {
                             dev.buttons[p as usize] = value != 0;
@@ -417,6 +526,18 @@ fn run(emit: impl Fn(Pad)) {
                             _ => value.signum() as f32,
                         };
                         dev.axes.insert(code, v);
+                    }
+                    EV_ABS => {
+                        let side = dev.trigger_codes.iter().position(|&c| c == Some(code));
+                        if let (Some(i), Some(&(lo, hi))) = (side, dev.ranges.get(&code)) {
+                            dev.triggers[i].axis(trigger_level(value, lo, hi));
+                        }
+                    }
+                    // The end of one report: the triggers press now, after any L2/R2 button in it.
+                    EV_SYN if code == SYN_REPORT => {
+                        for t in &mut dev.triggers {
+                            t.sync(|p| emit(p));
+                        }
                     }
                     _ => {}
                 }
@@ -736,6 +857,112 @@ mod tests {
         assert!(release(&mut b, t0, 700).is_empty());
         b.press(ms(t0, 800));
         assert_eq!(release(&mut b, t0, 900), [Pad::Confirm], "the next press works again");
+    }
+
+    /// Move the trigger to `level`, end the report, and collect what it sends.
+    fn pull(t: &mut TriggerAxis, level: f32) -> Vec<Pad> {
+        let mut out = Vec::new();
+        t.axis(level);
+        t.sync(|p| out.push(p));
+        out
+    }
+
+    #[test]
+    fn a_trigger_presses_once_per_pull() {
+        let mut t = TriggerAxis::new(Pad::L2);
+        assert!(pull(&mut t, 0.74).is_empty(), "not far enough");
+        assert_eq!(pull(&mut t, 0.75), [Pad::L2], "exactly at 3/4");
+        assert!(pull(&mut t, 1.0).is_empty(), "only once while held");
+        assert!(pull(&mut t, 0.70).is_empty(), "between the thresholds: still held");
+        assert!(pull(&mut t, 0.80).is_empty(), "so this is the same pull");
+        assert!(pull(&mut t, 0.65).is_empty(), "let go at 0.65");
+        assert_eq!(pull(&mut t, 0.80), [Pad::L2], "the next pull presses again");
+    }
+
+    #[test]
+    fn a_trigger_must_come_back_to_0_65() {
+        let mut t = TriggerAxis::new(Pad::R2);
+        assert_eq!(pull(&mut t, 0.9), [Pad::R2]);
+        assert!(pull(&mut t, 0.66).is_empty(), "not let go yet");
+        assert!(pull(&mut t, 0.9).is_empty(), "so no second press");
+        assert!(pull(&mut t, 0.0).is_empty());
+        assert_eq!(pull(&mut t, 0.9), [Pad::R2]);
+    }
+
+    #[test]
+    fn the_axis_counts_only_at_the_end_of_a_report() {
+        let mut t = TriggerAxis::new(Pad::L2);
+        t.axis(1.0);
+        t.axis(0.0);
+        let mut out = Vec::new();
+        t.sync(|p| out.push(p));
+        assert!(out.is_empty(), "the value at the end of the report is what counts");
+    }
+
+    #[test]
+    fn a_pad_that_sends_the_button_does_not_press_twice() {
+        // DualSense and DualShock 4 send BTN_TL2 and ABS_Z in the same report, the axis first.
+        let mut t = TriggerAxis::new(Pad::L2);
+        t.axis(1.0);
+        t.button();
+        let mut out = Vec::new();
+        t.sync(|p| out.push(p));
+        assert!(out.is_empty(), "the button press is the only press");
+        assert!(pull(&mut t, 0.0).is_empty());
+        assert!(pull(&mut t, 1.0).is_empty(), "and the axis stays ignored after that");
+    }
+
+    #[test]
+    fn a_button_seen_after_an_axis_press_ends_the_axis_press() {
+        let mut t = TriggerAxis::new(Pad::R2);
+        assert_eq!(pull(&mut t, 1.0), [Pad::R2]);
+        t.button();
+        assert!(pull(&mut t, 0.0).is_empty());
+        assert!(pull(&mut t, 1.0).is_empty());
+    }
+
+    fn axes_of(list: &'static [u16]) -> [Option<u16>; 2] {
+        trigger_axes(|c| list.contains(&c))
+    }
+
+    #[test]
+    fn xpad_and_playstation_triggers_are_z_and_rz() {
+        // xpad: sticks on X/Y and RX/RY, triggers on Z/RZ. hid-playstation: the same.
+        assert_eq!(axes_of(&[0, 1, ABS_Z, ABS_RX, ABS_RY, ABS_RZ, 16, 17]), [Some(ABS_Z), Some(ABS_RZ)]);
+    }
+
+    #[test]
+    fn z_and_rz_are_the_right_stick_without_rx_and_ry() {
+        // A generic HID pad: right stick on Z/RZ, no RX/RY.
+        assert_eq!(axes_of(&[0, 1, ABS_Z, ABS_RZ, 16, 17]), [None, None]);
+        assert_eq!(axes_of(&[0, 1, ABS_Z, ABS_RX, ABS_RZ]), [None, None], "both RX and RY are needed");
+    }
+
+    #[test]
+    fn brake_and_gas_are_always_triggers() {
+        // An Xbox pad through hid-generic: right stick on Z/RZ, triggers on BRAKE/GAS.
+        assert_eq!(axes_of(&[0, 1, ABS_Z, ABS_RZ, ABS_GAS, ABS_BRAKE]), [Some(ABS_BRAKE), Some(ABS_GAS)]);
+        assert_eq!(
+            axes_of(&[0, 1, ABS_Z, ABS_RX, ABS_RY, ABS_RZ, ABS_GAS, ABS_BRAKE]),
+            [Some(ABS_BRAKE), Some(ABS_GAS)],
+            "BRAKE/GAS win over Z/RZ"
+        );
+    }
+
+    #[test]
+    fn a_pad_without_trigger_axes_has_none() {
+        // xpad with MAP_TRIGGERS_TO_BUTTONS (fight sticks): BTN_TL2/BTN_TR2 only.
+        assert_eq!(axes_of(&[0, 1, ABS_RX, ABS_RY, 16, 17]), [None, None]);
+    }
+
+    #[test]
+    fn trigger_levels_use_the_axis_range() {
+        assert_eq!(trigger_level(0, 0, 255), 0.0);
+        assert_eq!(trigger_level(255, 0, 255), 1.0);
+        assert!(trigger_level(191, 0, 255) < TRIGGER_PRESS && trigger_level(192, 0, 255) >= TRIGGER_PRESS);
+        assert_eq!(trigger_level(1023, 0, 1023), 1.0, "Xbox One pads under xpad");
+        assert_eq!(trigger_level(-10, 0, 255), 0.0, "clamped below");
+        assert_eq!(trigger_level(300, 0, 255), 1.0, "clamped above");
     }
 
     #[test]
