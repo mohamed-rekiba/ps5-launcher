@@ -88,8 +88,64 @@ pub fn set_volume_call(id: u32, volume: f32) -> Call {
     Call::new("wpctl", &["set-volume", &id.to_string(), &format!("{:.2}", volume.clamp(0.0, 1.0))], 10)
 }
 
-pub fn toggle_mute_call(id: u32) -> Call {
-    Call::new("wpctl", &["set-mute", &id.to_string(), "toggle"], 10)
+/// Mute or unmute: the state the player chose, never a toggle, so a second press cannot undo
+/// the first.
+pub fn set_mute_call(id: u32, on: bool) -> Call {
+    Call::new("wpctl", &["set-mute", &id.to_string(), if on { "1" } else { "0" }], 10)
+}
+
+/// A change to the sound settings, by output id.
+#[derive(Clone, Copy, PartialEq, Debug)]
+pub enum Write {
+    Volume(u32, f32),
+    Mute(u32, bool),
+    Default(u32),
+}
+
+impl Write {
+    pub fn call(self) -> Call {
+        match self {
+            Write::Volume(id, volume) => set_volume_call(id, volume),
+            Write::Mute(id, on) => set_mute_call(id, on),
+            Write::Default(id) => set_default_call(id),
+        }
+    }
+}
+
+/// The sound writes, one at a time and in order: two `wpctl` calls that run at once can finish
+/// in either order, and the older volume would win. A volume change that waits is replaced by a
+/// newer one for the same output, so only the latest value is sent.
+#[derive(Default)]
+pub struct Writes {
+    running: bool,
+    waiting: std::collections::VecDeque<Write>,
+}
+
+impl Writes {
+    /// Add `write`. Returns the write to start now: `write` itself when none runs.
+    pub fn push(&mut self, write: Write) -> Option<Write> {
+        let waiting_volume = self.waiting.iter_mut().find_map(|w| match (w, write) {
+            (Write::Volume(id, volume), Write::Volume(new_id, new_volume)) if *id == new_id => Some((volume, new_volume)),
+            _ => None,
+        });
+        match waiting_volume {
+            Some((volume, new_volume)) => *volume = new_volume,
+            None => self.waiting.push_back(write),
+        }
+        if self.running { None } else { self.done() }
+    }
+
+    /// The running write ended. Returns the next write to start, if one waits.
+    pub fn done(&mut self) -> Option<Write> {
+        let next = self.waiting.pop_front();
+        self.running = next.is_some();
+        next
+    }
+
+    /// No write runs or waits.
+    pub fn idle(&self) -> bool {
+        !self.running
+    }
 }
 
 #[cfg(test)]
@@ -119,8 +175,46 @@ mod tests {
         assert_eq!(set_volume_call(58, 0.7).args, ["set-volume", "58", "0.70"]);
         assert_eq!(set_volume_call(58, 1.4).args, ["set-volume", "58", "1.00"]);
         assert_eq!(set_default_call(51).args, ["set-default", "51"]);
-        assert_eq!(toggle_mute_call(51).args, ["set-mute", "51", "toggle"]);
+        assert_eq!(set_mute_call(51, true).args, ["set-mute", "51", "1"]);
+        assert_eq!(set_mute_call(51, false).args, ["set-mute", "51", "0"]);
         assert_eq!(status_call().program, "wpctl");
+    }
+
+    #[test]
+    fn writes_run_one_at_a_time_in_order() {
+        let mut w = Writes::default();
+        assert_eq!(w.push(Write::Default(51)), Some(Write::Default(51)), "nothing runs: start it");
+        assert_eq!(w.push(Write::Mute(51, true)), None, "one runs: it waits");
+        assert_eq!(w.push(Write::Volume(51, 0.5)), None);
+        assert!(!w.idle());
+        assert_eq!(w.done(), Some(Write::Mute(51, true)));
+        assert_eq!(w.done(), Some(Write::Volume(51, 0.5)));
+        assert_eq!(w.done(), None);
+        assert!(w.idle());
+        assert_eq!(w.push(Write::Mute(51, false)), Some(Write::Mute(51, false)), "idle again: it starts");
+    }
+
+    #[test]
+    fn waiting_volume_changes_keep_only_the_latest() {
+        let mut w = Writes::default();
+        assert_eq!(w.push(Write::Volume(58, 0.65)), Some(Write::Volume(58, 0.65)));
+        assert_eq!(w.push(Write::Volume(58, 0.70)), None);
+        assert_eq!(w.push(Write::Mute(58, true)), None);
+        assert_eq!(w.push(Write::Volume(58, 0.75)), None);
+        assert_eq!(w.push(Write::Volume(58, 0.80)), None);
+        // Another output's volume is a write of its own.
+        assert_eq!(w.push(Write::Volume(51, 0.20)), None);
+        assert_eq!(w.done(), Some(Write::Volume(58, 0.80)));
+        assert_eq!(w.done(), Some(Write::Mute(58, true)));
+        assert_eq!(w.done(), Some(Write::Volume(51, 0.20)));
+        assert_eq!(w.done(), None);
+    }
+
+    #[test]
+    fn each_write_has_its_command_line() {
+        assert_eq!(Write::Volume(58, 0.7).call(), set_volume_call(58, 0.7));
+        assert_eq!(Write::Mute(58, true).call(), set_mute_call(58, true));
+        assert_eq!(Write::Default(51).call(), set_default_call(51));
     }
 
     #[test]

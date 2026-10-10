@@ -25,12 +25,46 @@ pub struct SystemUi {
     pub os: Os,
     /// When each page was last read on opening.
     opened: Vec<(Cat, Instant)>,
+    gen: Gens,
+    /// The sound writes that run or wait.
+    writes: sound::Writes,
+    /// Read the outputs again once the sound writes are done.
+    sound_reload: bool,
 }
 
 /// A page opened again within this time is not read again.
 const REREAD: Duration = Duration::from_secs(20);
 /// The Updates page asks the registry at most this often; "PS5 Launcher OS" checks at once.
 const RECHECK: Duration = Duration::from_secs(10 * 60);
+
+/// Which read of a domain (network, sound, storage, OS) is the latest. A read takes a ticket
+/// when it starts; a newer read or a change the player makes moves the count on, and a read
+/// whose ticket is old is dropped when it ends, so an older answer never overwrites a newer
+/// state.
+#[derive(Default)]
+pub struct Gen(u64);
+
+impl Gen {
+    /// A read starts, or the state changes. Returns the read's ticket.
+    fn next(&mut self) -> u64 {
+        self.0 += 1;
+        self.0
+    }
+
+    /// The read with `ticket` is the latest, and nothing changed since it started.
+    fn current(&self, ticket: u64) -> bool {
+        self.0 == ticket
+    }
+}
+
+/// The generation of each domain.
+#[derive(Default)]
+pub struct Gens {
+    net: Gen,
+    sound: Gen,
+    storage: Gen,
+    os: Gen,
+}
 
 /// Whether something done at `last` is due again at `now`.
 fn due(last: Option<Instant>, now: Instant, wait: Duration) -> bool {
@@ -44,6 +78,8 @@ pub struct Net {
     pub wifi: Vec<network::Wifi>,
     pub saved: Vec<network::Saved>,
     pub scanning: bool,
+    /// The ticket of the read that scans. It ends the scan, even when a newer read drops it.
+    scan: Option<u64>,
     /// The network being joined.
     pub joining: Option<String>,
     /// The secured network whose password is being typed.
@@ -56,7 +92,11 @@ pub struct Os {
     /// What update-check found on the NVIDIA image (a digest).
     pub found: Option<String>,
     pub checking: bool,
-    /// "Downloading…" or "Undoing…" while the helper works.
+    /// The ticket of the read that checks for an update. It ends the check, even when a newer
+    /// read drops it.
+    check: Option<u64>,
+    /// "Downloading…" or "Undoing…" while the helper works, and until the state is read again
+    /// after it: a retry needs the real state, not the one before the task.
     pub busy: Option<&'static str>,
     /// The password of the queued Secure Boot key, for the blue MOK screen.
     pub key: Option<String>,
@@ -143,9 +183,12 @@ impl App {
             return;
         }
         let os = mode == Mode::Os;
+        let g = &mut self.sys.gen;
+        let tickets = (g.net.next(), g.sound.next(), g.storage.next(), g.os.next());
         bg(
             move || (load_net(false), load_sound(), load_storage(), if os { load_os() } else { Err("not the OS".into()) }),
-            |app, (net, sound, storage, os)| {
+            move |app, (net, sound, storage, os)| {
+                let (net_t, sound_t, storage_t, os_t) = tickets;
                 for (page, e) in [("network", net.as_ref().err()), ("sound", sound.as_ref().err()), ("storage", storage.as_ref().err())] {
                     if let Some(e) = e {
                         crate::log!("System page {page} hidden: {e}");
@@ -158,14 +201,22 @@ impl App {
                     storage: storage.is_ok(),
                     os_updates: os.is_ok(),
                 };
-                if let Ok(net) = net {
+                // A page read or a change since the probe started is newer: keep it.
+                let g = &app.sys.gen;
+                let sound_t = g.sound.current(sound_t) && app.sys.writes.idle();
+                let current = (g.net.current(net_t), sound_t, g.storage.current(storage_t), g.os.current(os_t));
+                if let (true, Ok(net)) = (current.0, net) {
                     app.sys_set_net(net);
                 }
-                app.sys.outputs = sound.unwrap_or_default();
-                if let Ok((drives, free)) = storage {
+                if current.1 {
+                    app.sys.outputs = sound.unwrap_or_default();
+                }
+                if let (true, Ok((drives, free))) = (current.2, storage) {
                     (app.sys.drives, app.sys.free) = (drives, free);
                 }
-                app.sys.os.status = os.ok();
+                if current.3 {
+                    app.sys.os.status = os.ok();
+                }
                 app.sys_show();
             },
         );
@@ -192,7 +243,8 @@ impl App {
             Cat::Sound => self.sound_load(true),
             Cat::Storage => self.storage_load(),
             Cat::OsUpdates => {
-                let check = due(self.sys.os.checked, now, RECHECK);
+                // No check while the helper works: the next opening checks instead.
+                let check = due(self.sys.os.checked, now, RECHECK) && self.sys.os.busy.is_none();
                 if check {
                     self.sys.os.checked = Some(now);
                 }
@@ -358,16 +410,24 @@ impl App {
         }
     }
 
+    /// Read the Network page again. An answer older than a change or a newer read is dropped.
     pub fn net_load(&mut self, rescan: bool) {
+        let ticket = self.sys.gen.net.next();
         if rescan {
             self.sys.net.scanning = true;
+            self.sys.net.scan = Some(ticket);
             self.sys_show();
         }
-        bg(move || load_net(rescan), |app, res| {
-            app.sys.net.scanning = false;
-            match res {
-                Ok(net) => app.sys_set_net(net),
-                Err(e) => app.sys_error("Couldn't read the network", &e),
+        bg(move || load_net(rescan), move |app, res| {
+            let net = &mut app.sys.net;
+            if net.scan == Some(ticket) {
+                (net.scanning, net.scan) = (false, None);
+            }
+            if app.sys.gen.net.current(ticket) {
+                match res {
+                    Ok(net) => app.sys_set_net(net),
+                    Err(e) => app.sys_error("Couldn't read the network", &e),
+                }
             }
             app.sys_show();
         });
@@ -378,6 +438,7 @@ impl App {
             return;
         }
         audio::play(Sound::Move);
+        self.sys.gen.net.next();
         self.sys.net.radio = on;
         self.sys_show();
         self.sys_run(network::set_radio_call(on), "Couldn't switch Wi-Fi", |app, _| app.net_load(false));
@@ -436,6 +497,7 @@ impl App {
     }
 
     fn net_connect(&mut self, ssid: String, call: Call) {
+        self.sys.gen.net.next();
         self.sys.net.joining = Some(ssid.clone());
         self.sys_show();
         bg(move || system::call(&call), move |app, res| {
@@ -451,6 +513,7 @@ impl App {
     fn net_forget(&mut self, i: usize) {
         let Some(saved) = self.sys.net.saved.get(i).cloned() else { return };
         audio::play(Sound::Select);
+        self.sys.gen.net.next();
         self.sys_run(network::forget_call(&saved.uuid), "Couldn't forget the network", move |app, ok| {
             if ok {
                 app.toast(&format!("Forgot {}", saved.name), "Joining it again asks for its password.", 1);
@@ -482,9 +545,18 @@ impl App {
         }
     }
 
-    /// Read the outputs again. `loud`: a failure shows as a toast.
+    /// Read the outputs again. `loud`: a failure shows as a toast. While sound writes run or
+    /// wait, the read waits for them: it would show the state before them.
     pub fn sound_load(&mut self, loud: bool) {
+        if !self.sys.writes.idle() {
+            self.sys.sound_reload = true;
+            return;
+        }
+        let ticket = self.sys.gen.sound.next();
         bg(load_sound, move |app, res| {
+            if !app.sys.gen.sound.current(ticket) || !app.sys.writes.idle() {
+                return;
+            }
             match res {
                 Ok(outputs) => app.sys.outputs = outputs,
                 Err(e) if loud => app.sys_error("Couldn't read the sound outputs", &e),
@@ -493,6 +565,36 @@ impl App {
             app.sys_show();
             if app.quick_open() {
                 app.push_quick();
+            }
+        });
+    }
+
+    /// Queue a sound write; it starts when no other runs. A read that runs now is dropped.
+    fn sound_write(&mut self, write: sound::Write) {
+        self.sys.gen.sound.next();
+        if let Some(next) = self.sys.writes.push(write) {
+            self.sound_run(next);
+        }
+    }
+
+    /// Run `write`, then the next one that waits. Mute and output changes read the outputs
+    /// again when the writes are done; a volume change only when it failed.
+    fn sound_run(&mut self, write: sound::Write) {
+        let fail = match write {
+            sound::Write::Volume(..) => "Couldn't change the volume",
+            sound::Write::Mute(..) => "Couldn't mute the sound",
+            sound::Write::Default(..) => "Couldn't change the output",
+        };
+        let call = write.call();
+        bg(move || system::call(&call), move |app, res| {
+            if let Err(e) = &res {
+                app.sys_error(fail, e);
+            }
+            app.sys.sound_reload |= res.is_err() || !matches!(write, sound::Write::Volume(..));
+            match app.sys.writes.done() {
+                Some(next) => app.sound_run(next),
+                None if std::mem::take(&mut app.sys.sound_reload) => app.sound_load(false),
+                None => {}
             }
         });
     }
@@ -511,11 +613,7 @@ impl App {
         if self.quick_open() {
             self.push_quick();
         }
-        self.sys_run(sound::set_volume_call(id, volume), "Couldn't change the volume", |app, ok| {
-            if !ok {
-                app.sound_load(false);
-            }
-        });
+        self.sound_write(sound::Write::Volume(id, volume));
     }
 
     fn sound_mute(&mut self, on: bool) {
@@ -527,7 +625,7 @@ impl App {
         let id = out.id;
         audio::play(Sound::Move);
         self.sys_show();
-        self.sys_run(sound::toggle_mute_call(id), "Couldn't mute the sound", |app, _| app.sound_load(false));
+        self.sound_write(sound::Write::Mute(id, on));
     }
 
     fn sound_set_default(&mut self, i: usize) {
@@ -541,7 +639,7 @@ impl App {
             o.default = j == i;
         }
         self.sys_show();
-        self.sys_run(sound::set_default_call(id), "Couldn't change the output", |app, _| app.sound_load(false));
+        self.sound_write(sound::Write::Default(id));
     }
 
     // ------------------------------------------------------------------ Storage
@@ -582,7 +680,11 @@ impl App {
     }
 
     fn storage_load(&mut self) {
-        bg(load_storage, |app, res| {
+        let ticket = self.sys.gen.storage.next();
+        bg(load_storage, move |app, res| {
+            if !app.sys.gen.storage.current(ticket) {
+                return;
+            }
             match res {
                 Ok((drives, free)) => (app.sys.drives, app.sys.free) = (drives, free),
                 Err(e) => app.sys_error("Couldn't read the drives", &e),
@@ -656,10 +758,20 @@ impl App {
         }
     }
 
-    /// Read `bootc status` again; with `check`, ask the helper for an update first.
+    /// Read `bootc status` again; with `check`, ask the helper for an update first. No check
+    /// starts while the helper downloads or undoes an update.
     pub fn os_load(&mut self, check: bool) {
+        let check = check && self.sys.os.busy.is_none();
+        self.os_read(check, false);
+    }
+
+    /// `after_task`: the read after a helper task, which ends `busy` whatever the task's end. An
+    /// answer older than a change or a newer read is dropped.
+    fn os_read(&mut self, check: bool, after_task: bool) {
+        let ticket = self.sys.gen.os.next();
         if check {
             self.sys.os.checking = true;
+            self.sys.os.check = Some(ticket);
             self.sys_show();
         }
         bg(
@@ -668,15 +780,23 @@ impl App {
                 (found, load_os())
             },
             move |app, (found, status)| {
-                app.sys.os.checking = false;
-                match found {
-                    Some(Ok(found)) => app.sys.os.found = found,
-                    Some(Err(e)) => app.sys_error("Couldn't check for a system update", &e),
-                    None => {}
+                let os = &mut app.sys.os;
+                if os.check == Some(ticket) {
+                    (os.checking, os.check) = (false, None);
                 }
-                match status {
-                    Ok(status) => app.sys.os.status = Some(status),
-                    Err(e) => app.sys_error("Couldn't read the system's state", &e),
+                if after_task {
+                    os.busy = None;
+                }
+                if app.sys.gen.os.current(ticket) {
+                    match found {
+                        Some(Ok(found)) => app.sys.os.found = found,
+                        Some(Err(e)) => app.sys_error("Couldn't check for a system update", &e),
+                        None => {}
+                    }
+                    match status {
+                        Ok(status) => app.sys.os.status = Some(status),
+                        Err(e) => app.sys_error("Couldn't read the system's state", &e),
+                    }
                 }
                 app.sys_show();
             },
@@ -694,16 +814,23 @@ impl App {
         }
     }
 
+    /// A helper task may start: none runs, no check runs, and the state was read after the last
+    /// one.
+    fn os_idle(&self) -> bool {
+        self.sys.os.busy.is_none() && !self.sys.os.checking
+    }
+
     fn os_update(&mut self) {
-        if self.sys.os.busy.is_some() {
+        if !self.os_idle() {
             return;
         }
         audio::play(Sound::Select);
+        self.sys.gen.os.next();
         // No toast yet: on the NVIDIA image the helper may stop at the key before downloading.
         self.sys.os.busy = Some("Downloading…");
         self.sys_show();
         bg(|| osupdate::update_flow(&system::call_status), |app, end| {
-            app.sys.os.busy = None;
+            // `busy` stays until the state is read again.
             match end {
                 UpdateEnd::Staged => {
                     app.sys.os.key = None;
@@ -719,23 +846,24 @@ impl App {
                 }
                 UpdateEnd::Failed(e) => app.sys_error("Couldn't download the system update", &e),
             }
-            app.os_load(false);
+            app.os_read(false, true);
         });
     }
 
     fn os_rollback(&mut self) {
-        if self.sys.os.busy.is_some() {
+        if !self.os_idle() {
             return;
         }
         audio::play(Sound::Select);
+        self.sys.gen.os.next();
         self.sys.os.busy = Some("Undoing…");
         self.sys_show();
         self.sys_run(osupdate::helper_call(Task::Rollback), "Couldn't undo the system update", |app, ok| {
-            app.sys.os.busy = None;
+            // `busy` stays until the state is read again.
             if ok {
                 app.toast("The previous system starts at the next restart", "Restart from the Power menu.", 1);
             }
-            app.os_load(false);
+            app.os_read(false, true);
         });
     }
 
@@ -756,6 +884,20 @@ mod tests {
         assert!(!due(Some(now), now + Duration::from_secs(5), REREAD));
         assert!(due(Some(now), now + REREAD, REREAD));
         assert!(!due(Some(now + Duration::from_secs(1)), now, REREAD), "a clock going back is not due");
+    }
+
+    #[test]
+    fn a_read_older_than_a_change_or_a_newer_read_is_dropped() {
+        let mut gen = Gen::default();
+        let first = gen.next();
+        assert!(gen.current(first));
+        let second = gen.next();
+        assert!(!gen.current(first), "a newer read started");
+        assert!(gen.current(second));
+        gen.next(); // the player changed something
+        assert!(!gen.current(second), "the read started before the change");
+        let third = gen.next();
+        assert!(gen.current(third), "a read after the change counts");
     }
 
     #[test]
