@@ -4,6 +4,7 @@
 //! the registry yet: kyty.rs, shad.rs, sessions.rs and the rest still do all the work.
 
 pub mod bundle;
+pub mod discovery;
 pub mod document;
 pub mod manifest;
 pub mod registry;
