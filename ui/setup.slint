@@ -107,7 +107,7 @@ export component SetupPage inherits Rectangle {
                         selected: root.zone == Zone.settings ? root.idx : -1;
                         edit-index: root.edit-index;
                         edit-text <=> root.edit-text;
-                        hint-w: col.width - (36px * S.k);
+                        hint-w: col.width;
                         osk: root.osk;
                         caret: root.caret;
                         choose(i) => { root.click(Zone.settings, i); }

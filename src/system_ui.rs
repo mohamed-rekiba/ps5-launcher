@@ -324,7 +324,7 @@ fn header(rows: &mut Vec<(Cat, SId, SettingData)>, cat: Cat, label: &str) {
 }
 
 impl App {
-    /// Find which tools work and read every page, when Settings opens. The rail gains the pages
+    /// Find which tools work and read every page, when Settings opens. SYSTEM gains the areas
     /// whose tool answered.
     pub fn sys_probe(&mut self) {
         let mode = Mode::current();
@@ -400,7 +400,7 @@ impl App {
     }
 
     /// A System page opened: read it again. The Network page scans for networks; the Updates
-    /// page checks for an update. Moving along the rail passes pages quickly, so a page read a
+    /// page checks for an update. Going in and out of an area is quick, so a page read a
     /// moment ago is not read again.
     pub fn sys_page_opened(&mut self, cat: Cat) {
         let now = Instant::now();
@@ -432,10 +432,10 @@ impl App {
         }
     }
 
-    /// The System page on screen, in Settings or in the setup.
+    /// The System page on screen: Settings' open sub-sheet, or the setup's step.
     pub fn sys_page(&self) -> Option<Cat> {
         let shown = matches!(self.overlay, Overlay::Settings | Overlay::Setup);
-        shown.then(|| self.settings_nav.cats.get(self.settings_nav.cat).copied()).flatten()
+        shown.then_some(self.settings_nav.sub).flatten()
     }
 
     /// Close what a page has open (pairing, the zone picker), when the setup leaves it.
@@ -446,24 +446,28 @@ impl App {
         self.sys.time.picker = None;
     }
 
-    /// Show what changed: the rail's pages and the open page, in Settings or in the setup. A row
-    /// being typed in keeps the page as it is until the typing ends.
+    /// Show what changed: the System areas and the sheet on screen, in Settings or in the setup.
+    /// A row being typed in keeps the sheet as it is until the typing ends.
     fn sys_show(&mut self) {
         let setup = self.overlay == Overlay::Setup;
         if self.overlay != Overlay::Settings && !setup {
             return;
         }
-        // The setup shows one page at a time: its rail does not change.
+        // The setup shows one page at a time: its categories do not change.
         let cats = if setup { self.settings_nav.cats.clone() } else { categories(Mode::current(), self.sys.tools) };
-        let nav = &mut self.settings_nav;
-        if cats != nav.cats {
-            let open = nav.cats.get(nav.cat).copied();
-            let kept = open.and_then(|c| cats.iter().position(|x| *x == c));
-            nav.cat = kept.unwrap_or(0);
-            nav.cats = cats;
-            if kept.is_none() || self.zone == Z_SETTINGS_RAIL {
-                let cat = self.settings_nav.cat as i32;
-                self.set_focus(Z_SETTINGS_RAIL, cat);
+        if cats != self.settings_nav.cats {
+            self.settings_nav.cats = cats;
+            // The open area is gone: back to the root sheet.
+            if let Some(sub) = self.settings_nav.sub.filter(|c| !self.settings_nav.cats.contains(c)) {
+                crate::log!("System area {sub:?} gone: back to the root sheet");
+                if self.edit_index >= 0 {
+                    self.finish_edit(None);
+                }
+                self.sys_close_pages();
+                let ret = self.settings_nav.ret.take();
+                self.settings_nav.sub = None;
+                self.build_settings();
+                return self.settings_root(ret);
             }
         }
         if self.edit_index >= 0 {
@@ -480,7 +484,8 @@ impl App {
                 Some(_) => {}
                 // The setup's page has no rows left: its buttons.
                 None if setup => self.set_focus(Z_SETUP_NAV, self.setup_main_button()),
-                None => self.set_focus(Z_SETTINGS_RAIL, self.settings_nav.cat as i32),
+                // A sub-sheet with no rows: Back still leaves it.
+                None => self.set_focus(Z_SETTINGS, -1),
             }
         }
         self.push_settings();
@@ -1138,14 +1143,36 @@ impl App {
         self.sys_focus(to);
     }
 
-    /// Back on a System page: close what it has open. True when Back was used.
-    pub fn sys_back(&mut self) -> bool {
-        let page = self.settings_nav.cats.get(self.settings_nav.cat) == Some(&Cat::Controllers);
-        if page && self.sys.ctl.pairing.is_some() {
-            self.pair_close();
-            return true;
+    /// The System page on screen has something open that Back leaves: pairing a controller, or
+    /// the time zone list.
+    pub fn sys_flow(&self) -> bool {
+        match self.sys_page() {
+            Some(Cat::Controllers) => self.sys.ctl.pairing.is_some(),
+            Some(Cat::Time) => self.sys.time.picker.is_some(),
+            _ => false,
         }
-        false
+    }
+
+    /// Back on a System page: close what it has open, one level (a region's zones go back to
+    /// the regions). True when Back was used.
+    pub fn sys_back(&mut self) -> bool {
+        if !self.sys_flow() {
+            return false;
+        }
+        match self.sys.time.picker.filter(|_| self.sys_page() == Some(Cat::Time)) {
+            Some(Picker::Region(i)) => {
+                audio::play(Sound::Back);
+                self.sys.time.picker = Some(Picker::Regions);
+                self.sys_focus(SId::TzRegion(i));
+            }
+            Some(Picker::Regions) => {
+                audio::play(Sound::Back);
+                self.sys.time.picker = None;
+                self.sys_focus(SId::TimeZone);
+            }
+            None => self.pair_close(),
+        }
+        true
     }
 
     // ------------------------------------------------------------------ Sound

@@ -12,7 +12,7 @@ use crate::app::*;
 use crate::audio::{self, Sound};
 use crate::notice;
 use crate::nvidia::{Image, Offer};
-use crate::settings::{left_changes, Cat};
+use crate::settings::Cat;
 use crate::setup::{self, Button, Ending, Facts, Machine, Screen, Step};
 use crate::system::Mode;
 use crate::system_ui::bg;
@@ -155,7 +155,7 @@ impl App {
         self.sys_close_pages();
         let cat = page(step);
         self.settings_nav.cats = vec![cat];
-        self.settings_nav.cat = 0;
+        self.settings_nav.sub = Some(cat);
         self.ui().set_settings_y(0.0);
         self.build_settings();
         let first = self.settings_rows.iter().position(|r| r.kind != 0);
@@ -267,11 +267,8 @@ impl App {
             }
             return;
         }
-        let on_cycle = self.settings_rows.get(self.idx as usize).is_some_and(|r| left_changes(r.kind));
         match a {
             Act::Down if !(self.idx + 1..n).any(|i| focusable(&self.settings_rows, i)) => self.move_focus(Z_SETUP_NAV, self.setup_main_button()),
-            // No rail to go to.
-            Act::Left if !on_cycle => {}
             Act::Up | Act::Down | Act::Left | Act::Right | Act::Confirm => self.act_settings_page(a),
             _ => {}
         }

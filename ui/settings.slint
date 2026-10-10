@@ -1,21 +1,23 @@
-// Settings, full screen: a side rail on the left with the categories in two groups, Launcher and
-// System, and the open category's page on the right (docs/plans/ps5-launcher-os.md, Phase 4; the
-// prototype's pick A). The rail shows labels while it has focus and folds to icons when focus
-// moves into the page. One focus style, the app's own: the focused rail entry or search hit turns
-// white; the focused row gets the white ring it has always had.
+// Settings: the right-side sheet over the dimmed app (docs/screenshots/settings.jpg). One sheet
+// scrolls through the Launcher's sections, then SYSTEM, whose areas are entry rows; an entry row
+// opens the area's sub-sheet in the same panel. Each row is its own box: a text field has its
+// label above it and its hint below; switches and ‹ value › pickers sit in the row. The focused
+// row has the white ring.
 
-import { S, Theme, Icons, Zone, SettingData, SettingsCat, SettingsHit, NvCard, PairCard } from "theme.slint";
-import { Switch, KeyCap } from "widgets.slint";
+import { S, Theme, Icons, Zone, SettingData, SettingsHit, NvCard, PairCard } from "theme.slint";
+import { Switch, BackButton } from "widgets.slint";
 import { AboutSlint } from "std-widgets.slint";
 
-// The rows of one page. Rows between two headers share a card.
+// The rows of a sheet, or of a setup step.
 export component SettingRows inherits VerticalLayout {
     in property <[SettingData]> rows;
     in property <int> selected: -1;
     in property <int> edit-index: -1;
     in-out property <string> edit-text;
     in property <length> hint-w;
-    // The on-screen keyboard edits the row: the field below stays closed.
+    // The space over the first heading.
+    in property <length> first-gap: (8px * S.k);
+    // The on-screen keyboard edits the row: the field shows its text, without a caret.
     in property <bool> osk;
     // Where the caret goes when the field opens (a byte offset); -1 selects all.
     in property <int> caret: -1;
@@ -24,120 +26,176 @@ export component SettingRows inherits VerticalLayout {
     spacing: 0;
     for s[i] in root.rows: VerticalLayout {
         property <bool> f: root.selected == i;
-        property <length> r: (14px * S.k);
-        padding-top: s.kind == 0 ? (i == 0 ? (8px * S.k) : (32px * S.k)) : 0;
-        padding-bottom: s.kind == 0 ? (12px * S.k) : 0;
-        if s.kind == 0: Text { text: s.label; font-size: (16px * S.k); font-weight: 600; letter-spacing: (2px * S.k); color: Theme.text3; }
-        if s.kind != 0: Rectangle {
-            background: f ? (s.danger ? #ff5a6a33 : #ffffff1f) : (s.danger ? #ff5a6a0d : #ffffff0b);
-            border-top-left-radius: s.group-first || f ? r : 0;
-            border-top-right-radius: s.group-first || f ? r : 0;
-            border-bottom-left-radius: s.group-last || f ? r : 0;
-            border-bottom-right-radius: s.group-last || f ? r : 0;
-            border-width: f ? (3px * S.k) : 0;
-            border-color: s.danger ? Theme.danger : #ffffff;
-            if !s.group-first && !f && root.selected != i - 1: Rectangle {
+        padding-top: s.kind == 0 ? (s.label == "" ? (20px * S.k) : i == 0 ? root.first-gap : (36px * S.k)) : (8px * S.k);
+        padding-bottom: s.kind == 0 ? (10px * S.k) : (4px * S.k);
+        spacing: (6px * S.k);
+        // A heading, with a dot when something waits in its section.
+        if s.kind == 0 && s.label != "": HorizontalLayout {
+            alignment: start;
+            spacing: (10px * S.k);
+            Text { text: s.label; font-size: (16px * S.k); font-weight: 600; letter-spacing: (2px * S.k); color: Theme.text3; }
+            if s.dot: VerticalLayout {
+                alignment: center;
+                Rectangle { width: (8px * S.k); height: (8px * S.k); border-radius: (4px * S.k); background: Theme.warn; }
+            }
+        }
+        // A text field: its label above, the field itself, its hint below.
+        if s.kind == 1: Text { text: s.label; font-size: (19px * S.k); color: Theme.text2; }
+        if s.kind == 1: Rectangle {
+            height: (54px * S.k);
+            border-radius: (12px * S.k);
+            background: f ? #ffffff1f : #ffffff12;
+            border-width: f ? (3px * S.k) : 1px;
+            border-color: f ? #ffffff : (s.hint-kind == 2 ? Theme.danger : Theme.line);
+            if root.edit-index != i || root.osk: Text {
                 x: (18px * S.k);
-                y: 0;
                 width: parent.width - (36px * S.k);
-                height: 1px;
-                background: Theme.line;
+                text: s.value != "" ? s.value : (s.secret ? "Not set" : "—");
+                font-size: (19px * S.k);
+                color: s.value != "" ? Theme.text : Theme.text3;
+                vertical-alignment: center;
+                overflow: elide;
+                font-family: "DejaVu Sans Mono";
+            }
+            if root.edit-index == i && !root.osk: TextInput {
+                x: (18px * S.k);
+                width: parent.width - (36px * S.k);
+                height: parent.height;
+                text <=> root.edit-text;
+                single-line: true;
+                input-type: s.secret ? InputType.password : InputType.text;
+                font-size: (19px * S.k);
+                color: Theme.text;
+                vertical-alignment: center;
+                font-family: "DejaVu Sans Mono";
+                init => {
+                    self.focus();
+                    if root.caret < 0 { self.select-all(); } else { self.set-selection-offsets(root.caret, root.caret); }
+                }
+                accepted => { root.edit-done(self.text, true); }
             }
             TouchArea { mouse-cursor: pointer; clicked => { root.choose(i); } }
-            VerticalLayout {
+        }
+        // A switch, a picker or a button: its own row box.
+        if s.kind >= 2: Rectangle {
+            height: (64px * S.k);
+            border-radius: (12px * S.k);
+            background: f ? (s.danger ? #ff5a6a40 : #ffffff1f) : #ffffff0d;
+            border-width: f ? (3px * S.k) : 1px;
+            border-color: f ? (s.danger ? Theme.danger : #ffffff) : Theme.line;
+            HorizontalLayout {
                 padding-left: (18px * S.k);
                 padding-right: (18px * S.k);
-                padding-top: (14px * S.k);
-                padding-bottom: (14px * S.k);
-                spacing: (4px * S.k);
-                HorizontalLayout {
-                    spacing: (16px * S.k);
-                    min-height: (36px * S.k);
-                    Text {
-                        text: s.label;
-                        font-size: (19px * S.k);
-                        font-weight: s.kind == 4 ? 600 : 500;
-                        color: s.danger ? #ffb3bb : Theme.text;
-                        vertical-alignment: center;
-                        horizontal-stretch: s.kind == 1 ? 0 : 1;
-                    }
-                    if s.kind == 1 && (root.edit-index != i || root.osk): Text {
-                        text: s.value != "" ? s.value : (s.secret ? "Not set" : "—");
-                        font-size: (17px * S.k);
-                        font-family: "DejaVu Sans Mono";
-                        color: s.value != "" ? Theme.text2 : Theme.text3;
-                        horizontal-alignment: right;
-                        vertical-alignment: center;
-                        horizontal-stretch: 1;
-                        min-width: (120px * S.k);
-                        overflow: elide;
-                    }
-                    if s.kind == 2: VerticalLayout { alignment: center; Switch { on: s.on; } }
-                    if s.kind == 3: HorizontalLayout {
-                        spacing: (8px * S.k);
-                        alignment: end;
-                        Image { source: Icons.chevl; colorize: f ? Theme.text : Theme.text3; width: (22px * S.k); height: (22px * S.k); y: (7px * S.k); }
-                        Text { text: s.value; font-size: (19px * S.k); color: Theme.text; vertical-alignment: center; }
-                        Image { source: Icons.chevr; colorize: f ? Theme.text : Theme.text3; width: (22px * S.k); height: (22px * S.k); y: (7px * S.k); }
-                    }
-                    // A Wi-Fi network: a lock when it is secured, and its signal.
-                    if s.lock: Image {
-                        source: Icons.lock;
-                        colorize: Theme.text3;
-                        width: (18px * S.k);
-                        height: (18px * S.k);
-                        y: (9px * S.k);
-                    }
-                    if s.bars > 0: Rectangle {
+                spacing: (12px * S.k);
+                Text {
+                    text: s.label;
+                    font-size: (19px * S.k);
+                    color: s.danger ? #ffb3bb : Theme.text;
+                    vertical-alignment: center;
+                    horizontal-stretch: 1;
+                    overflow: elide;
+                    font-weight: s.kind == 4 ? 600 : 400;
+                }
+                if s.dot: VerticalLayout {
+                    alignment: center;
+                    Rectangle { width: (10px * S.k); height: (10px * S.k); border-radius: (5px * S.k); background: Theme.warn; }
+                }
+                // A Wi-Fi network: a lock when it is secured, and its signal.
+                if s.lock: VerticalLayout {
+                    alignment: center;
+                    Image { source: Icons.lock; colorize: Theme.text3; width: (18px * S.k); height: (18px * S.k); }
+                }
+                if s.bars > 0: VerticalLayout {
+                    alignment: center;
+                    Rectangle {
                         width: (30px * S.k);
+                        height: (26px * S.k);
                         for b[j] in [1, 2, 3, 4]: Rectangle {
                             x: (j * 8px * S.k);
                             width: (5px * S.k);
                             height: ((6px + j * 5px) * S.k);
-                            y: (27px * S.k) - self.height;
+                            y: parent.height - self.height;
                             border-radius: (1.5px * S.k);
                             background: b <= s.bars ? Theme.text : #ffffff26;
                         }
                     }
-                    if s.kind == 4 && s.value != "": Text {
-                        text: s.value;
-                        font-size: (17px * S.k);
-                        font-weight: s.value-kind == 3 ? 600 : 400;
-                        color: s.value-kind == 1 ? Theme.ok : s.value-kind == 2 ? Theme.danger : s.value-kind == 3 ? #7ab4ff : Theme.text3;
-                        vertical-alignment: center;
-                    }
                 }
-                if s.kind == 1 && root.edit-index == i && !root.osk: Rectangle {
-                    height: (50px * S.k);
-                    border-radius: (10px * S.k);
-                    background: #00000040;
-                    border-width: 1px;
-                    border-color: Theme.line;
-                    TextInput {
-                        x: (14px * S.k);
-                        width: parent.width - (28px * S.k);
-                        height: parent.height;
-                        text <=> root.edit-text;
-                        single-line: true;
-                        input-type: s.secret ? InputType.password : InputType.text;
-                        font-size: (18px * S.k);
-                        color: Theme.text;
-                        vertical-alignment: center;
-                        font-family: "DejaVu Sans Mono";
-                        init => {
-                            self.focus();
-                            if root.caret < 0 { self.select-all(); } else { self.set-selection-offsets(root.caret, root.caret); }
-                        }
-                        accepted => { root.edit-done(self.text, true); }
-                    }
+                if s.kind == 2: VerticalLayout { alignment: center; Switch { on: s.on; } }
+                if s.kind == 3: HorizontalLayout {
+                    spacing: (8px * S.k);
+                    VerticalLayout { alignment: center; Image { source: Icons.chevl; colorize: f ? Theme.text : Theme.text3; width: (22px * S.k); height: (22px * S.k); } }
+                    Text { text: s.value; font-size: (19px * S.k); color: Theme.text; vertical-alignment: center; }
+                    VerticalLayout { alignment: center; Image { source: Icons.chevr; colorize: f ? Theme.text : Theme.text3; width: (22px * S.k); height: (22px * S.k); } }
                 }
-                if s.hint != "": Text {
-                    text: s.hint;
-                    width: root.hint-w;
-                    font-size: (15px * S.k);
-                    wrap: word-wrap;
-                    color: s.hint-kind == 1 ? Theme.ok : s.hint-kind == 2 ? Theme.danger : Theme.text3;
+                if s.kind == 4 && s.value != "": Text {
+                    text: s.value;
+                    font-size: (16px * S.k);
+                    font-weight: s.value-kind == 3 ? 600 : 400;
+                    color: s.value-kind == 1 ? Theme.ok : s.value-kind == 2 ? Theme.danger : s.value-kind == 3 ? #7ab4ff : Theme.text3;
+                    vertical-alignment: center;
                 }
+                // An entry row opens its area.
+                if s.more: VerticalLayout {
+                    alignment: center;
+                    Image { source: Icons.chevr; colorize: f ? Theme.text : Theme.text2; width: (24px * S.k); height: (24px * S.k); }
+                }
+            }
+            TouchArea { mouse-cursor: pointer; clicked => { root.choose(i); } }
+        }
+        if s.kind != 0 && s.hint != "": Text {
+            text: s.hint;
+            width: root.hint-w;
+            font-size: (16px * S.k);
+            wrap: word-wrap;
+            color: s.hint-kind == 1 ? Theme.ok : s.hint-kind == 2 ? Theme.danger : Theme.text3;
+        }
+    }
+}
+
+// A stepper's steps: bars side by side with their labels under them, or, when narrow, one step a
+// line with its bar before it. warn: the step on screen failed.
+component Stepper inherits VerticalLayout {
+    in property <[string]> steps;
+    in property <int> at;
+    in property <bool> warn;
+    in property <bool> narrow;
+    if !root.narrow: HorizontalLayout {
+        spacing: (8px * S.k);
+        for s[i] in root.steps: VerticalLayout {
+            spacing: (8px * S.k);
+            horizontal-stretch: 1;
+            Rectangle {
+                height: (6px * S.k);
+                border-radius: (3px * S.k);
+                background: i < root.at ? Theme.ok : i == root.at ? (root.warn ? Theme.danger : Theme.accent) : #ffffff1f;
+            }
+            Text {
+                text: s;
+                font-size: (16px * S.k);
+                font-weight: i == root.at ? 600 : 400;
+                color: i == root.at ? Theme.text : Theme.text3;
+            }
+        }
+    }
+    if root.narrow: VerticalLayout {
+        spacing: (10px * S.k);
+        for s[i] in root.steps: HorizontalLayout {
+            spacing: (14px * S.k);
+            alignment: start;
+            VerticalLayout {
+                alignment: center;
+                Rectangle {
+                    width: (34px * S.k);
+                    height: (6px * S.k);
+                    border-radius: (3px * S.k);
+                    background: i < root.at ? Theme.ok : i == root.at ? (root.warn ? Theme.danger : Theme.accent) : #ffffff1f;
+                }
+            }
+            Text {
+                text: s;
+                font-size: (17px * S.k);
+                font-weight: i == root.at ? 600 : 400;
+                color: i == root.at ? Theme.text : i < root.at ? Theme.text2 : Theme.text3;
             }
         }
     }
@@ -150,6 +208,8 @@ export component KeySteps inherits VerticalLayout {
     in property <length> text-w;
     // The last step: what to do back in the launcher.
     in property <string> last;
+    // In the Settings sheet: smaller digits, so the eight fit.
+    in property <bool> narrow;
     padding-bottom: (28px * S.k);
     Rectangle {
         border-radius: (14px * S.k);
@@ -159,7 +219,7 @@ export component KeySteps inherits VerticalLayout {
         VerticalLayout {
             padding: (28px * S.k);
             spacing: (14px * S.k);
-            Text { text: "Enroll the NVIDIA driver's key"; font-size: (24px * S.k); font-weight: 600; color: Theme.text; }
+            Text { text: "Enroll the NVIDIA driver's key"; width: root.text-w; wrap: word-wrap; font-size: (24px * S.k); font-weight: 600; color: Theme.text; }
             Text {
                 text: "Secure Boot loads the new NVIDIA driver only after its key is enrolled. You do this once, on a blue screen when the PC starts. That screen needs a USB keyboard: a controller does not work there.";
                 width: root.text-w;
@@ -169,17 +229,17 @@ export component KeySteps inherits VerticalLayout {
             }
             HorizontalLayout {
                 alignment: start;
-                spacing: (12px * S.k);
+                spacing: root.narrow ? (8px * S.k) : (12px * S.k);
                 padding-top: (6px * S.k);
                 padding-bottom: (6px * S.k);
                 for d[i] in root.digits: VerticalLayout {
                     spacing: (6px * S.k);
                     Rectangle {
-                        width: (72px * S.k);
-                        height: (92px * S.k);
+                        width: root.narrow ? (60px * S.k) : (72px * S.k);
+                        height: root.narrow ? (78px * S.k) : (92px * S.k);
                         border-radius: (12px * S.k);
                         background: #ffffff16;
-                        Text { text: d; font-size: (58px * S.k); font-weight: 600; font-family: "DejaVu Sans Mono"; color: Theme.text; }
+                        Text { text: d; font-size: root.narrow ? (48px * S.k) : (58px * S.k); font-weight: 600; font-family: "DejaVu Sans Mono"; color: Theme.text; }
                     }
                     Text { text: i + 1; font-size: (15px * S.k); color: Theme.text3; horizontal-alignment: center; }
                 }
@@ -199,30 +259,19 @@ export component KeySteps inherits VerticalLayout {
     }
 }
 
-// The NVIDIA driver on the Display page (the prototype's stepper): the numbered steps, then a
-// card with a title and its text. Its buttons are the rows under it.
+// The NVIDIA driver on Display (the prototype's stepper): the numbered steps, then a card with a
+// title and its text. Its buttons are the rows under it.
 export component NvidiaCard inherits VerticalLayout {
     in property <NvCard> card;
     in property <length> text-w;
+    // In the Settings sheet: the steps one a line.
+    in property <bool> narrow;
     padding-bottom: (28px * S.k);
     spacing: (22px * S.k);
-    if root.card.step >= 0: HorizontalLayout {
-        spacing: (8px * S.k);
-        for s[i] in ["1  Install", "2  Secure Boot key", "3  Download", "4  Restart"]: VerticalLayout {
-            spacing: (8px * S.k);
-            horizontal-stretch: 1;
-            Rectangle {
-                height: (6px * S.k);
-                border-radius: (3px * S.k);
-                background: i < root.card.step ? Theme.ok : i == root.card.step ? Theme.accent : #ffffff1f;
-            }
-            Text {
-                text: s;
-                font-size: (16px * S.k);
-                font-weight: i == root.card.step ? 600 : 400;
-                color: i == root.card.step ? Theme.text : Theme.text3;
-            }
-        }
+    if root.card.step >= 0: Stepper {
+        steps: ["1  Install", "2  Secure Boot key", "3  Download", "4  Restart"];
+        at: root.card.step;
+        narrow: root.narrow;
     }
     Rectangle {
         border-radius: (14px * S.k);
@@ -235,14 +284,16 @@ export component NvidiaCard inherits VerticalLayout {
             HorizontalLayout {
                 spacing: (14px * S.k);
                 alignment: start;
-                Image {
-                    source: root.card.kind == 0 ? Icons.chip : root.card.kind == 2 ? Icons.check : Icons.info;
-                    colorize: root.card.kind == 0 ? #76b900 : root.card.kind == 1 ? Theme.warn : root.card.kind == 2 ? Theme.ok : Theme.text2;
-                    width: (34px * S.k);
-                    height: (34px * S.k);
-                    y: (3px * S.k);
+                VerticalLayout {
+                    alignment: center;
+                    Image {
+                        source: root.card.kind == 0 ? Icons.chip : root.card.kind == 2 ? Icons.check : Icons.info;
+                        colorize: root.card.kind == 0 ? #76b900 : root.card.kind == 1 ? Theme.warn : root.card.kind == 2 ? Theme.ok : Theme.text2;
+                        width: (34px * S.k);
+                        height: (34px * S.k);
+                    }
                 }
-                Text { text: root.card.title; font-size: (28px * S.k); font-weight: 600; color: Theme.text; vertical-alignment: center; }
+                Text { text: root.card.title; width: root.text-w - (48px * S.k); wrap: word-wrap; font-size: (28px * S.k); font-weight: 600; color: Theme.text; vertical-alignment: center; }
             }
             for line[i] in root.card.lines: Text {
                 text: line;
@@ -273,99 +324,86 @@ component PadButton inherits Rectangle {
 
 // A controller drawn from plain shapes, with the buttons to hold for pairing. kind: 0 DualSense
 // and DualShock 4, 1 Xbox, 2 Switch Pro.
-component PadPicture inherits VerticalLayout {
+component PadDrawing inherits Rectangle {
     in property <int> kind;
-    in property <string> title;
-    in property <string> text;
-    in property <length> text-w;
-    spacing: (10px * S.k);
-    Rectangle {
-        height: (150px * S.k);
-        // The body and its two grips.
-        body := Rectangle {
-            x: (parent.width - self.width) / 2;
-            y: (24px * S.k);
-            width: (220px * S.k);
-            height: (96px * S.k);
-            border-radius: (40px * S.k);
-            background: #ffffff10;
-            border-width: (2px * S.k);
-            border-color: #ffffff38;
-        }
-        for g[i] in [0, 1]: Rectangle {
-            x: body.x + (i == 0 ? (6px * S.k) : body.width - self.width - (6px * S.k));
-            y: body.y + (40px * S.k);
-            width: (64px * S.k);
-            height: (80px * S.k);
-            border-radius: (32px * S.k);
-            background: #ffffff10;
-            border-width: (2px * S.k);
-            border-color: #ffffff38;
-        }
-        // The d-pad and the face buttons, dim.
-        Rectangle { x: body.x + (44px * S.k); y: body.y + (26px * S.k); width: (24px * S.k); height: (8px * S.k); background: #ffffff26; }
-        Rectangle { x: body.x + (52px * S.k); y: body.y + (18px * S.k); width: (8px * S.k); height: (24px * S.k); background: #ffffff26; }
-        for b[i] in [{x: 160, y: 14}, {x: 148, y: 26}, {x: 172, y: 26}, {x: 160, y: 38}]: Rectangle {
-            x: body.x + (b.x * 1px * S.k);
-            y: body.y + (b.y * 1px * S.k);
-            width: (11px * S.k);
-            height: (11px * S.k);
-            border-radius: (5.5px * S.k);
-            background: #ffffff26;
-        }
-        // DualSense and DualShock 4: Create (Share) left of the touchpad, PS below it.
-        if root.kind == 0: Rectangle {
-            x: body.x + (80px * S.k);
-            y: body.y + (8px * S.k);
-            width: (60px * S.k);
-            height: (34px * S.k);
-            border-radius: (6px * S.k);
-            background: #ffffff0d;
-            border-width: 1px;
-            border-color: #ffffff33;
-        }
-        if root.kind == 0: PadButton { hold: true; x: body.x + (66px * S.k); y: body.y + (6px * S.k); width: (12px * S.k); height: (22px * S.k); border-radius: (5px * S.k); }
-        if root.kind == 0: PadButton { hold: true; label: "PS"; x: body.x + (96px * S.k); y: body.y + (54px * S.k); width: (28px * S.k); height: (28px * S.k); border-radius: (14px * S.k); }
-        if root.kind == 0: Text { x: body.x - (6px * S.k); y: (0px * S.k); text: "Create / Share"; font-size: (13px * S.k); color: #8fb6ff; }
-        // Xbox: the Xbox button lights up; the pair button is on the top edge, by the cable port.
-        if root.kind == 1: PadButton { hold: false; label: "X"; x: body.x + (96px * S.k); y: body.y + (8px * S.k); width: (28px * S.k); height: (28px * S.k); border-radius: (14px * S.k); }
-        if root.kind == 1: Rectangle { x: body.x + (100px * S.k); y: body.y - (6px * S.k); width: (20px * S.k); height: (8px * S.k); border-radius: (2px * S.k); background: #ffffff33; }
-        if root.kind == 1: PadButton { hold: true; x: body.x + (132px * S.k); y: body.y - (10px * S.k); width: (20px * S.k); height: (12px * S.k); border-radius: (4px * S.k); }
-        if root.kind == 1: Text { x: body.x + (112px * S.k); y: (0px * S.k); text: "Pair"; font-size: (13px * S.k); color: #8fb6ff; }
-        // Switch Pro: the small sync button on the top edge, left of the cable port.
-        if root.kind == 2: Rectangle { x: body.x + (100px * S.k); y: body.y - (6px * S.k); width: (20px * S.k); height: (8px * S.k); border-radius: (2px * S.k); background: #ffffff33; }
-        if root.kind == 2: PadButton { hold: true; x: body.x + (78px * S.k); y: body.y - (10px * S.k); width: (14px * S.k); height: (14px * S.k); border-radius: (7px * S.k); }
-        if root.kind == 2: PadButton { hold: false; label: "⌂"; x: body.x + (120px * S.k); y: body.y + (40px * S.k); width: (20px * S.k); height: (20px * S.k); border-radius: (10px * S.k); }
-        if root.kind == 2: Text { x: body.x + (48px * S.k); y: (0px * S.k); text: "Sync"; font-size: (13px * S.k); color: #8fb6ff; }
+    height: (150px * S.k);
+    // The body and its two grips.
+    body := Rectangle {
+        x: (parent.width - self.width) / 2;
+        y: (24px * S.k);
+        width: (220px * S.k);
+        height: (96px * S.k);
+        border-radius: (40px * S.k);
+        background: #ffffff10;
+        border-width: (2px * S.k);
+        border-color: #ffffff38;
     }
-    Text { text: root.title; font-size: (18px * S.k); font-weight: 600; color: Theme.text; horizontal-alignment: center; }
-    Text { text: root.text; width: root.text-w; font-size: (15px * S.k); color: Theme.text2; wrap: word-wrap; horizontal-alignment: center; }
+    for g[i] in [0, 1]: Rectangle {
+        x: body.x + (i == 0 ? (6px * S.k) : body.width - self.width - (6px * S.k));
+        y: body.y + (40px * S.k);
+        width: (64px * S.k);
+        height: (80px * S.k);
+        border-radius: (32px * S.k);
+        background: #ffffff10;
+        border-width: (2px * S.k);
+        border-color: #ffffff38;
+    }
+    // The d-pad and the face buttons, dim.
+    Rectangle { x: body.x + (44px * S.k); y: body.y + (26px * S.k); width: (24px * S.k); height: (8px * S.k); background: #ffffff26; }
+    Rectangle { x: body.x + (52px * S.k); y: body.y + (18px * S.k); width: (8px * S.k); height: (24px * S.k); background: #ffffff26; }
+    for b[i] in [{x: 160, y: 14}, {x: 148, y: 26}, {x: 172, y: 26}, {x: 160, y: 38}]: Rectangle {
+        x: body.x + (b.x * 1px * S.k);
+        y: body.y + (b.y * 1px * S.k);
+        width: (11px * S.k);
+        height: (11px * S.k);
+        border-radius: (5.5px * S.k);
+        background: #ffffff26;
+    }
+    // DualSense and DualShock 4: Create (Share) left of the touchpad, PS below it.
+    if root.kind == 0: Rectangle {
+        x: body.x + (80px * S.k);
+        y: body.y + (8px * S.k);
+        width: (60px * S.k);
+        height: (34px * S.k);
+        border-radius: (6px * S.k);
+        background: #ffffff0d;
+        border-width: 1px;
+        border-color: #ffffff33;
+    }
+    if root.kind == 0: PadButton { hold: true; x: body.x + (66px * S.k); y: body.y + (6px * S.k); width: (12px * S.k); height: (22px * S.k); border-radius: (5px * S.k); }
+    if root.kind == 0: PadButton { hold: true; label: "PS"; x: body.x + (96px * S.k); y: body.y + (54px * S.k); width: (28px * S.k); height: (28px * S.k); border-radius: (14px * S.k); }
+    if root.kind == 0: Text { x: body.x - (6px * S.k); y: (0px * S.k); text: "Create / Share"; font-size: (13px * S.k); color: #8fb6ff; }
+    // Xbox: the Xbox button lights up; the pair button is on the top edge, by the cable port.
+    if root.kind == 1: PadButton { hold: false; label: "X"; x: body.x + (96px * S.k); y: body.y + (8px * S.k); width: (28px * S.k); height: (28px * S.k); border-radius: (14px * S.k); }
+    if root.kind == 1: Rectangle { x: body.x + (100px * S.k); y: body.y - (6px * S.k); width: (20px * S.k); height: (8px * S.k); border-radius: (2px * S.k); background: #ffffff33; }
+    if root.kind == 1: PadButton { hold: true; x: body.x + (132px * S.k); y: body.y - (10px * S.k); width: (20px * S.k); height: (12px * S.k); border-radius: (4px * S.k); }
+    if root.kind == 1: Text { x: body.x + (112px * S.k); y: (0px * S.k); text: "Pair"; font-size: (13px * S.k); color: #8fb6ff; }
+    // Switch Pro: the small sync button on the top edge, left of the cable port.
+    if root.kind == 2: Rectangle { x: body.x + (100px * S.k); y: body.y - (6px * S.k); width: (20px * S.k); height: (8px * S.k); border-radius: (2px * S.k); background: #ffffff33; }
+    if root.kind == 2: PadButton { hold: true; x: body.x + (78px * S.k); y: body.y - (10px * S.k); width: (14px * S.k); height: (14px * S.k); border-radius: (7px * S.k); }
+    if root.kind == 2: PadButton { hold: false; label: "⌂"; x: body.x + (120px * S.k); y: body.y + (40px * S.k); width: (20px * S.k); height: (20px * S.k); border-radius: (10px * S.k); }
+    if root.kind == 2: Text { x: body.x + (48px * S.k); y: (0px * S.k); text: "Sync"; font-size: (13px * S.k); color: #8fb6ff; }
 }
 
-// Pairing a controller on the Controllers page: the steps, then a card with the state, the
-// buttons to hold for each controller type, or the error. Its buttons are the rows under it.
+// Pairing a controller on Controllers: the steps, then a card with the state, the buttons to hold
+// for each controller type, or the error. Its buttons are the rows under it.
 export component PairSteps inherits VerticalLayout {
     in property <PairCard> card;
     in property <length> text-w;
+    // In the Settings sheet: the steps one a line, and the controllers one under the other.
+    in property <bool> narrow;
+    property <[{kind: int, title: string, text: string}]> pads: [
+        {kind: 0, title: "DualSense · DualShock 4", text: "Hold PS and Create (Share on a DualShock 4) until the light bar flashes."},
+        {kind: 1, title: "Xbox", text: "Turn it on, then hold the pair button on top until the Xbox button flashes fast."},
+        {kind: 2, title: "Switch Pro", text: "Hold the small sync button on top, next to the cable port, until the lights run."},
+    ];
     padding-bottom: (28px * S.k);
     spacing: (22px * S.k);
-    HorizontalLayout {
-        spacing: (8px * S.k);
-        for s[i] in ["1  Pairing mode", "2  Scan", "3  Pair", "4  Connect"]: VerticalLayout {
-            spacing: (8px * S.k);
-            horizontal-stretch: 1;
-            Rectangle {
-                height: (6px * S.k);
-                border-radius: (3px * S.k);
-                background: i < root.card.step ? Theme.ok : i == root.card.step ? (root.card.kind == 1 ? Theme.danger : Theme.accent) : #ffffff1f;
-            }
-            Text {
-                text: s;
-                font-size: (16px * S.k);
-                font-weight: i == root.card.step ? 600 : 400;
-                color: i == root.card.step ? Theme.text : Theme.text3;
-            }
-        }
+    Stepper {
+        steps: ["1  Pairing mode", "2  Scan", "3  Pair", "4  Connect"];
+        at: root.card.step;
+        warn: root.card.kind == 1;
+        narrow: root.narrow;
     }
     Rectangle {
         border-radius: (14px * S.k);
@@ -378,14 +416,16 @@ export component PairSteps inherits VerticalLayout {
             HorizontalLayout {
                 spacing: (14px * S.k);
                 alignment: start;
-                Image {
-                    source: root.card.kind == 1 ? Icons.alert : root.card.kind == 2 ? Icons.check : Icons.pad;
-                    colorize: root.card.kind == 1 ? Theme.danger : root.card.kind == 2 ? Theme.ok : Theme.text;
-                    width: (34px * S.k);
-                    height: (34px * S.k);
-                    y: (3px * S.k);
+                VerticalLayout {
+                    alignment: center;
+                    Image {
+                        source: root.card.kind == 1 ? Icons.alert : root.card.kind == 2 ? Icons.check : Icons.pad;
+                        colorize: root.card.kind == 1 ? Theme.danger : root.card.kind == 2 ? Theme.ok : Theme.text;
+                        width: (34px * S.k);
+                        height: (34px * S.k);
+                    }
                 }
-                Text { text: root.card.title; font-size: (28px * S.k); font-weight: 600; color: Theme.text; vertical-alignment: center; }
+                Text { text: root.card.title; width: root.text-w - (48px * S.k); wrap: word-wrap; font-size: (28px * S.k); font-weight: 600; color: Theme.text; vertical-alignment: center; }
             }
             for line[i] in root.card.lines: Text {
                 text: line;
@@ -394,36 +434,41 @@ export component PairSteps inherits VerticalLayout {
                 font-size: i == 0 ? (20px * S.k) : (16px * S.k);
                 color: i == 0 ? (root.card.kind == 1 ? #ffb3bb : Theme.text) : Theme.text3;
             }
-            if root.card.pictures: HorizontalLayout {
+            // Three controllers side by side, each over its text.
+            if root.card.pictures && !root.narrow: HorizontalLayout {
                 padding-top: (12px * S.k);
                 spacing: (24px * S.k);
-                PadPicture {
-                    kind: 0;
-                    title: "DualSense · DualShock 4";
-                    text: "Hold PS and Create (Share on a DualShock 4) until the light bar flashes.";
-                    text-w: (root.text-w - (48px * S.k)) / 3;
+                for p in root.pads: VerticalLayout {
+                    spacing: (10px * S.k);
+                    PadDrawing { kind: p.kind; }
+                    Text { text: p.title; font-size: (18px * S.k); font-weight: 600; color: Theme.text; horizontal-alignment: center; }
+                    Text { text: p.text; width: (root.text-w - (48px * S.k)) / 3; font-size: (15px * S.k); color: Theme.text2; wrap: word-wrap; horizontal-alignment: center; }
                 }
-                PadPicture {
-                    kind: 1;
-                    title: "Xbox";
-                    text: "Turn it on, then hold the pair button on top until the Xbox button flashes fast.";
-                    text-w: (root.text-w - (48px * S.k)) / 3;
-                }
-                PadPicture {
-                    kind: 2;
-                    title: "Switch Pro";
-                    text: "Hold the small sync button on top, next to the cable port, until the lights run.";
-                    text-w: (root.text-w - (48px * S.k)) / 3;
+            }
+            // Narrow: one controller a line, its text beside it.
+            if root.card.pictures && root.narrow: VerticalLayout {
+                padding-top: (4px * S.k);
+                spacing: (8px * S.k);
+                for p in root.pads: HorizontalLayout {
+                    spacing: (16px * S.k);
+                    PadDrawing { kind: p.kind; width: (236px * S.k); }
+                    VerticalLayout {
+                        alignment: center;
+                        spacing: (6px * S.k);
+                        Text { text: p.title; font-size: (18px * S.k); font-weight: 600; color: Theme.text; }
+                        Text { text: p.text; width: root.text-w - (252px * S.k); font-size: (15px * S.k); color: Theme.text2; wrap: word-wrap; }
+                    }
                 }
             }
         }
     }
 }
 
-export component SettingsPage inherits Rectangle {
-    in property <[SettingsCat]> cats;
-    in property <int> cat;
-    // The app's focus: Zone.settings-rail, settings-find, settings-hits, or settings (the page).
+// The sheet: a panel on the right over the dimmed app. A click outside it closes Settings.
+export component SettingsSheet inherits Rectangle {
+    // The open sub-sheet's title; empty: the root sheet.
+    in property <string> title;
+    // The app's focus: Zone.settings (the rows), settings-find or settings-hits.
     in property <int> zone;
     in property <int> idx;
     in property <[SettingData]> rows;
@@ -434,14 +479,14 @@ export component SettingsPage inherits Rectangle {
     // The search field has the keyboard.
     in property <bool> find-editing;
     in property <[SettingsHit]> hits;
-    // The About card under the rows (System and About pages): version, mode, Slint.
+    // The About card under the rows: About's sub-sheet, or the root sheet on a desktop.
     in property <bool> about;
-    // The Updates page (OS): the Secure Boot key's password, a digit each, over its steps.
+    // Updates (OS) and Display: the Secure Boot key's password, a digit each, over its steps.
     in property <[string]> key;
     in property <string> key-last;
-    // The Display page: the NVIDIA driver's card over the rows.
+    // Display: the NVIDIA driver's card over the rows.
     in property <NvCard> nv;
-    // The Controllers page: pairing a controller, over the rows.
+    // Controllers: pairing a controller, over the rows.
     in property <PairCard> pair;
     in property <string> version;
     in property <string> mode;
@@ -457,303 +502,171 @@ export component SettingsPage inherits Rectangle {
     callback find-done();
     callback back();
 
-    property <bool> folded: root.zone == Zone.settings;
-    property <bool> finding: root.zone == Zone.settings-find || root.zone == Zone.settings-hits;
-    property <length> rail-w: folded ? (116px * S.k) : (400px * S.k);
-    property <SettingsCat> current: root.cats[root.cat];
+    property <bool> sub: root.title != "";
+    property <length> inner: (648px * S.k);
     property <bool> entered: false;
     init => { entered = true; }
-    opacity: entered ? 1 : 0;
-    animate opacity { duration: 200ms; easing: ease-out-quad; }
-    background: @radial-gradient(circle, #101a3a 0%, Theme.bg 75%);
-    TouchArea {}
+    background: entered ? #03050ccc : #03050c00;
+    animate background { duration: 260ms; }
+    TouchArea { clicked => { root.click(Zone.settings, -1); } }
+    Rectangle {
+        x: root.width - (760px * S.k) + (root.entered ? 0 : (120px * S.k));
+        opacity: root.entered ? 1 : 0;
+        animate x { duration: 420ms; easing: ease-out-expo; }
+        animate opacity { duration: 220ms; easing: ease-out-quad; }
+        width: (760px * S.k);
+        background: @linear-gradient(180deg, #111a33 0%, #0a1024 100%);
+        border-width: 1px;
+        border-color: Theme.line;
+        TouchArea {}
+        Flickable {
+            content-y <=> root.scroll-y;
+            content-height: sheet.preferred-height;
+            sheet := VerticalLayout {
+                x: 0;
+                y: 0;
+                width: (760px * S.k);
+                height: self.preferred-height;
+                padding-left: (56px * S.k);
+                padding-right: (56px * S.k);
+                padding-top: (64px * S.k);
+                padding-bottom: (120px * S.k);
+                spacing: 0;
+                HorizontalLayout {
+                    alignment: start;
+                    padding-bottom: (20px * S.k);
+                    BackButton { pad: root.pad; clicked => { root.back(); } }
+                }
+                Text { text: root.sub ? root.title : "Settings"; font-size: (44px * S.k); font-weight: 600; color: Theme.text; }
+                Text { text: root.sub ? "System" : "Changes are saved automatically"; font-size: (18px * S.k); color: Theme.text3; }
 
-    // ---------------------------------------------------------------- the page
-    page := Rectangle {
-        x: root.rail-w + (72px * S.k);
-        width: min((1100px * S.k), root.width - self.x - (96px * S.k));
-        animate x { duration: 300ms; easing: ease-out-expo; }
-        Text {
-            x: 0;
-            y: (52px * S.k);
-            text: root.current.system ? "SYSTEM" : "LAUNCHER";
-            font-size: (16px * S.k);
-            font-weight: 600;
-            letter-spacing: (2px * S.k);
-            color: Theme.text3;
-        }
-        Text { x: 0; y: (74px * S.k); text: root.current.label; font-size: (44px * S.k); font-weight: 600; color: Theme.text; }
-        if !root.current.system: Text {
-            x: parent.width - self.width;
-            y: (96px * S.k);
-            text: "Changes are saved automatically";
-            font-size: (16px * S.k);
-            color: Theme.text3;
-        }
-        Rectangle {
-            y: (170px * S.k);
-            height: root.height - self.y - (110px * S.k);
-            clip: true;
-            Flickable {
-                content-y <=> root.scroll-y;
-                content-height: list.preferred-height;
-                list := VerticalLayout {
-                    x: 0;
-                    y: 0;
-                    width: page.width;
-                    height: self.preferred-height;
-                    padding-bottom: (24px * S.k);
-                    if root.nv.show: NvidiaCard { card: root.nv; text-w: page.width - (56px * S.k); }
-                    if root.pair.show: PairSteps { card: root.pair; text-w: page.width - (56px * S.k); }
-                    if root.key.length > 0: KeySteps { digits: root.key; text-w: page.width - (56px * S.k); last: root.key-last; }
-                    SettingRows {
-                        rows: root.rows;
-                        selected: root.zone == Zone.settings ? root.idx : -1;
-                        edit-index: root.edit-index;
-                        edit-text <=> root.edit-text;
-                        hint-w: page.width - (36px * S.k);
-                        osk: root.osk;
-                        caret: root.caret;
-                        choose(i) => { root.click(Zone.settings, i); }
-                        edit-done(text, accepted) => { root.edit-done(text, accepted); }
+                // The search field, and its hits under it while it or a hit has focus.
+                if !root.sub: VerticalLayout {
+                    padding-top: (24px * S.k);
+                    spacing: (8px * S.k);
+                    Rectangle {
+                        property <bool> f: root.zone == Zone.settings-find;
+                        height: (54px * S.k);
+                        border-radius: (12px * S.k);
+                        background: f ? #ffffff1f : #ffffff12;
+                        border-width: f ? (3px * S.k) : 1px;
+                        border-color: f ? #ffffff : Theme.line;
+                        Image {
+                            x: (18px * S.k);
+                            source: Icons.search;
+                            colorize: Theme.text2;
+                            width: (24px * S.k);
+                            height: (24px * S.k);
+                        }
+                        if root.find-editing && !root.osk: TextInput {
+                            x: (56px * S.k);
+                            width: parent.width - (74px * S.k);
+                            height: parent.height;
+                            text <=> root.query;
+                            single-line: true;
+                            font-size: (19px * S.k);
+                            color: Theme.text;
+                            vertical-alignment: center;
+                            init => {
+                                self.focus();
+                                self.set-selection-offsets(root.caret < 0 ? 1000000 : root.caret, root.caret < 0 ? 1000000 : root.caret);
+                            }
+                            edited => { root.find-edited(self.text); }
+                            accepted => { root.find-done(); }
+                        }
+                        if !root.find-editing || root.osk: Text {
+                            x: (56px * S.k);
+                            width: parent.width - (74px * S.k);
+                            text: root.query != "" ? root.query : "Search settings";
+                            font-size: (19px * S.k);
+                            color: root.query != "" ? Theme.text : Theme.text3;
+                            vertical-alignment: center;
+                            overflow: elide;
+                        }
+                        TouchArea { mouse-cursor: text; clicked => { root.click(Zone.settings-find, 0); } }
                     }
-                    // About: the required attribution for the Slint royalty-free license (section 2a).
-                    if root.about: VerticalLayout {
-                        padding-top: root.rows.length > 0 ? (36px * S.k) : (8px * S.k);
-                        Rectangle {
-                            border-radius: (14px * S.k);
-                            background: #ffffff0b;
+                    if root.query != "" && (root.zone == Zone.settings-find || root.zone == Zone.settings-hits): VerticalLayout {
+                        padding-top: (4px * S.k);
+                        spacing: (8px * S.k);
+                        for h[i] in root.hits: Rectangle {
+                            property <bool> f: root.zone == Zone.settings-hits && root.idx == i;
+                            height: (64px * S.k);
+                            border-radius: (12px * S.k);
+                            background: f ? #ffffff1f : #ffffff0d;
+                            border-width: f ? (3px * S.k) : 1px;
+                            border-color: f ? #ffffff : Theme.line;
                             HorizontalLayout {
                                 padding-left: (18px * S.k);
-                                padding-right: (10px * S.k);
-                                padding-top: (14px * S.k);
-                                padding-bottom: (14px * S.k);
-                                spacing: (16px * S.k);
-                                VerticalLayout {
-                                    alignment: center;
-                                    Image { source: Icons.app; width: (60px * S.k); height: (60px * S.k); }
-                                }
-                                VerticalLayout {
-                                    alignment: center;
-                                    spacing: (4px * S.k);
-                                    horizontal-stretch: 1;
-                                    Text { text: "PS5 Launcher"; font-size: (19px * S.k); font-weight: 600; color: Theme.text; }
-                                    Text { text: "Version " + root.version + " · " + root.mode; font-size: (15px * S.k); color: Theme.text3; }
-                                    Text { text: "PS5 games on KytyPS5 · PS4 games on shadPS4"; font-size: (15px * S.k); color: Theme.text3; }
-                                }
-                                VerticalLayout {
-                                    alignment: center;
-                                    AboutSlint { width: (190px * S.k); }
-                                }
+                                padding-right: (18px * S.k);
+                                spacing: (12px * S.k);
+                                Text { text: h.label; font-size: (19px * S.k); color: Theme.text; vertical-alignment: center; overflow: elide; horizontal-stretch: 1; }
+                                Text { text: h.place; font-size: (16px * S.k); color: Theme.text3; vertical-alignment: center; }
+                            }
+                            TouchArea { mouse-cursor: pointer; clicked => { root.click(Zone.settings-hits, i); } }
+                        }
+                        if root.hits.length == 0: Text {
+                            height: (64px * S.k);
+                            text: "No settings match";
+                            font-size: (19px * S.k);
+                            color: Theme.text3;
+                            vertical-alignment: center;
+                        }
+                    }
+                }
+                if root.sub: Rectangle { height: (20px * S.k); }
+
+                // A System area's cards over its rows.
+                if root.nv.show: NvidiaCard { card: root.nv; text-w: root.inner - (56px * S.k); narrow: true; }
+                if root.pair.show: PairSteps { card: root.pair; text-w: root.inner - (56px * S.k); narrow: true; }
+                if root.key.length > 0: KeySteps { digits: root.key; text-w: root.inner - (56px * S.k); last: root.key-last; narrow: true; }
+                SettingRows {
+                    rows: root.rows;
+                    selected: root.zone == Zone.settings ? root.idx : -1;
+                    edit-index: root.edit-index;
+                    edit-text <=> root.edit-text;
+                    hint-w: root.inner;
+                    first-gap: (36px * S.k);
+                    osk: root.osk;
+                    caret: root.caret;
+                    choose(i) => { root.click(Zone.settings, i); }
+                    edit-done(text, accepted) => { root.edit-done(text, accepted); }
+                }
+                // About: the required attribution for the Slint royalty-free license (section 2a).
+                if root.about: VerticalLayout {
+                    padding-top: (36px * S.k);
+                    spacing: (12px * S.k);
+                    Text { text: "ABOUT"; font-size: (16px * S.k); font-weight: 600; letter-spacing: (2px * S.k); color: Theme.text3; }
+                    Rectangle {
+                        border-radius: (12px * S.k);
+                        background: #ffffff0d;
+                        border-width: 1px;
+                        border-color: Theme.line;
+                        HorizontalLayout {
+                            padding-left: (18px * S.k);
+                            padding-right: (10px * S.k);
+                            padding-top: (14px * S.k);
+                            padding-bottom: (14px * S.k);
+                            spacing: (16px * S.k);
+                            VerticalLayout {
+                                alignment: center;
+                                Image { source: Icons.app; width: (56px * S.k); height: (56px * S.k); }
+                            }
+                            VerticalLayout {
+                                alignment: center;
+                                spacing: (4px * S.k);
+                                horizontal-stretch: 1;
+                                Text { text: "PS5 Launcher"; font-size: (19px * S.k); font-weight: 600; color: Theme.text; }
+                                Text { text: "Version " + root.version + " · " + root.mode; font-size: (15px * S.k); color: Theme.text3; }
+                                Text { text: "PS5 games on KytyPS5 · PS4 games on shadPS4"; font-size: (15px * S.k); color: Theme.text3; wrap: word-wrap; }
+                            }
+                            VerticalLayout {
+                                alignment: center;
+                                AboutSlint { width: (170px * S.k); }
                             }
                         }
                     }
                 }
             }
         }
-    }
-
-    // ---------------------------------------------------------------- the rail
-    rail := Rectangle {
-        x: 0;
-        width: root.rail-w;
-        background: #0a1024;
-        border-width: 1px;
-        border-color: Theme.line;
-        clip: true;
-        animate width { duration: 300ms; easing: ease-out-expo; }
-        property <bool> labels: self.width > (300px * S.k);
-        VerticalLayout {
-            padding-top: (44px * S.k);
-            padding-left: (28px * S.k);
-            padding-right: (28px * S.k);
-            spacing: 0;
-            alignment: start;
-            Text { text: rail.labels ? "Settings" : ""; font-size: (40px * S.k); font-weight: 600; color: Theme.text; height: (60px * S.k); }
-            // The search field.
-            Rectangle {
-                property <bool> f: root.zone == Zone.settings-find;
-                height: (54px * S.k);
-                border-radius: (27px * S.k);
-                background: f ? #ffffff24 : #ffffff10;
-                border-width: f ? (3px * S.k) : 1px;
-                border-color: f ? #ffffff : Theme.line;
-                Image {
-                    x: (16px * S.k);
-                    source: Icons.search;
-                    colorize: Theme.text2;
-                    width: (24px * S.k);
-                    height: (24px * S.k);
-                }
-                if root.find-editing && !root.osk: TextInput {
-                    x: (52px * S.k);
-                    width: parent.width - (68px * S.k);
-                    height: parent.height;
-                    text <=> root.query;
-                    single-line: true;
-                    font-size: (18px * S.k);
-                    color: Theme.text;
-                    vertical-alignment: center;
-                    init => {
-                        self.focus();
-                        self.set-selection-offsets(root.caret < 0 ? 1000000 : root.caret, root.caret < 0 ? 1000000 : root.caret);
-                    }
-                    edited => { root.find-edited(self.text); }
-                    accepted => { root.find-done(); }
-                }
-                if (!root.find-editing || root.osk) && rail.labels: Text {
-                    x: (52px * S.k);
-                    width: parent.width - (68px * S.k);
-                    text: root.query != "" ? root.query : "Search settings";
-                    font-size: (18px * S.k);
-                    color: root.query != "" ? Theme.text : Theme.text3;
-                    vertical-alignment: center;
-                    overflow: elide;
-                }
-                TouchArea { mouse-cursor: text; clicked => { root.click(Zone.settings-find, 0); } }
-            }
-            Rectangle { height: (22px * S.k); }
-            for c[i] in root.cats: VerticalLayout {
-                if i == 0: Text {
-                    text: rail.labels ? "LAUNCHER" : "";
-                    height: (34px * S.k);
-                    vertical-alignment: bottom;
-                    font-size: (14px * S.k);
-                    font-weight: 600;
-                    letter-spacing: (2px * S.k);
-                    color: Theme.text3;
-                }
-                // The divider above the System group.
-                if c.sep: VerticalLayout {
-                    padding-top: (18px * S.k);
-                    Rectangle { height: 1px; background: Theme.line; }
-                    Text {
-                        text: rail.labels ? "SYSTEM" : "";
-                        height: (34px * S.k);
-                        vertical-alignment: bottom;
-                        font-size: (14px * S.k);
-                        font-weight: 600;
-                        letter-spacing: (2px * S.k);
-                        color: Theme.text3;
-                    }
-                }
-                Rectangle { height: (6px * S.k); }
-                Rectangle {
-                    property <bool> sel: root.cat == i;
-                    property <bool> foc: sel && root.zone == Zone.settings-rail;
-                    height: (54px * S.k);
-                    border-radius: (14px * S.k);
-                    background: foc ? #ffffff : sel ? #ffffff1c : ta.has-hover ? #ffffff0e : transparent;
-                    animate background { duration: Theme.fast; }
-                    Image {
-                        x: (16px * S.k);
-                        source: Icons.get(c.icon);
-                        colorize: foc ? #0a0d18 : sel ? Theme.text : Theme.text2;
-                        width: (28px * S.k);
-                        height: (28px * S.k);
-                    }
-                    Text {
-                        x: (60px * S.k);
-                        text: c.label;
-                        font-size: (20px * S.k);
-                        font-weight: sel ? 600 : 500;
-                        color: foc ? #0a0d18 : sel ? Theme.text : Theme.text2;
-                        vertical-alignment: center;
-                        height: parent.height;
-                        opacity: rail.labels ? 1 : 0;
-                        animate opacity { duration: 150ms; }
-                    }
-                    if c.dot: Rectangle {
-                        x: rail.labels ? parent.width - (30px * S.k) : (38px * S.k);
-                        y: rail.labels ? (parent.height - self.height) / 2 : (8px * S.k);
-                        width: (12px * S.k);
-                        height: (12px * S.k);
-                        border-radius: (6px * S.k);
-                        background: Theme.warn;
-                    }
-                    ta := TouchArea { mouse-cursor: pointer; clicked => { root.click(Zone.settings-rail, i); } }
-                }
-            }
-        }
-    }
-
-    // ---------------------------------------------------------------- search hits, over the rail
-    if root.finding && root.query != "": Rectangle {
-        x: (28px * S.k);
-        y: (164px * S.k);
-        width: (560px * S.k);
-        height: hl.preferred-height;
-        border-radius: (16px * S.k);
-        background: #18223f;
-        border-width: 1px;
-        border-color: Theme.line;
-        drop-shadow-blur: (40px * S.k);
-        drop-shadow-color: #000000aa;
-        TouchArea {}
-        hl := VerticalLayout {
-            padding: (8px * S.k);
-            for h[i] in root.hits: Rectangle {
-                property <bool> f: root.zone == Zone.settings-hits && root.idx == i;
-                height: (56px * S.k);
-                border-radius: (12px * S.k);
-                background: f ? #ffffff : hta.has-hover ? #ffffff14 : transparent;
-                HorizontalLayout {
-                    padding-left: (16px * S.k);
-                    padding-right: (16px * S.k);
-                    spacing: (12px * S.k);
-                    Text {
-                        text: h.label;
-                        font-size: (19px * S.k);
-                        font-weight: 500;
-                        color: f ? #0a0d18 : Theme.text;
-                        vertical-alignment: center;
-                        overflow: elide;
-                        horizontal-stretch: 1;
-                    }
-                    Text {
-                        text: h.place;
-                        font-size: (16px * S.k);
-                        color: f ? #33405e : Theme.text3;
-                        vertical-alignment: center;
-                        horizontal-alignment: right;
-                    }
-                }
-                hta := TouchArea { mouse-cursor: pointer; clicked => { root.click(Zone.settings-hits, i); } }
-            }
-            if root.hits.length == 0: Text {
-                height: (56px * S.k);
-                x: (16px * S.k);
-                text: "No settings match";
-                font-size: (19px * S.k);
-                color: Theme.text3;
-                vertical-alignment: center;
-            }
-        }
-    }
-
-    // ---------------------------------------------------------------- button hints
-    HorizontalLayout {
-        x: root.width - self.preferred-width - (48px * S.k);
-        y: root.height - self.height - (36px * S.k);
-        height: (50px * S.k);
-        spacing: (24px * S.k);
-        for h[i] in root.pad
-            ? [{k: "✕", l: "Select", c: #8fb6ff, r: true}, {k: "○", l: "Back", c: #ff8f9c, r: true}, {k: "L1 R1", l: "Category", c: #ffffff, r: false}, {k: "△", l: "Search", c: #5fe0c0, r: true}]
-            : [{k: "Enter", l: "Select", c: #ffffff, r: false}, {k: "Esc", l: "Back", c: #ffffff, r: false}, {k: "Tab", l: "Category", c: #ffffff, r: false}, {k: "/", l: "Search", c: #ffffff, r: false}]
-            : Rectangle {
-                width: hint.preferred-width;
-                hint := HorizontalLayout {
-                    spacing: (10px * S.k);
-                    KeyCap { text: h.k; round: h.r; fg: h.c; y: (10px * S.k); }
-                    Text { text: h.l; font-size: (17px * S.k); color: Theme.text2; vertical-alignment: center; }
-                }
-                TouchArea {
-                    mouse-cursor: pointer;
-                    clicked => {
-                        if i == 1 { root.back(); }
-                        if i == 3 { root.click(Zone.settings-find, 0); }
-                    }
-                }
-            }
     }
 }

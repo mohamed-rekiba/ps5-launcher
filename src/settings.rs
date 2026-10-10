@@ -1,5 +1,5 @@
-//! Settings, full screen: the rail of categories, each category's rows, controller-friendly
-//! editing, instant save, and search over every row.
+//! Settings, a sheet on the right: the Launcher's sections, then the System areas, each on its own
+//! sub-sheet; controller-friendly editing, instant save, and search over every row.
 
 use crate::app::*;
 use crate::audio::{self, Sound};
@@ -98,10 +98,13 @@ pub enum SId {
     RestartLauncher,
     /// PS5 Launcher OS: the first-start setup again.
     RunSetup,
+    /// The root sheet's entry row of a System area: it opens the area's sub-sheet. Only on the
+    /// sheet, never in `SettingsNav::all`.
+    Open(Cat),
 }
 
-/// A category of the Settings rail, top to bottom. The Launcher group comes first; the System
-/// group sits below a divider.
+/// A category of Settings, top to bottom. The Launcher's are sections of the root sheet; the
+/// System ones (but the desktop's System) are areas, each with its own sub-sheet.
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub enum Cat {
     Games,
@@ -130,7 +133,7 @@ pub enum Cat {
     Time,
     /// Session and OS mode: version, mode, Restart launcher.
     About,
-    /// The first-start setup's last step; never on the rail. It has no rows, only buttons.
+    /// The first-start setup's last step; never in Settings. It has no rows, only buttons.
     Setup,
 }
 
@@ -158,29 +161,15 @@ impl Cat {
         }
     }
 
-    pub fn icon(self) -> &'static str {
-        match self {
-            Cat::Games => "grid",
-            Cat::Playing => "play",
-            Cat::Downloads => "download",
-            Cat::Emulators => "chip",
-            Cat::Appearance => "palette",
-            Cat::Updates | Cat::OsUpdates => "update",
-            Cat::Advanced => "tune",
-            Cat::System => "desktop",
-            Cat::Network => "wifi",
-            Cat::Controllers => "pad",
-            Cat::Sound => "sound",
-            Cat::Storage => "disk",
-            Cat::Display => "desktop",
-            Cat::Time => "cal",
-            Cat::About | Cat::Setup => "info",
-        }
-    }
-
-    /// In the System group, below the divider.
+    /// Under the SYSTEM heading.
     pub fn system(self) -> bool {
         matches!(self, Cat::System | Cat::Network | Cat::Controllers | Cat::Sound | Cat::Display | Cat::Storage | Cat::OsUpdates | Cat::Time | Cat::About)
+    }
+
+    /// A System area: an entry row on the root sheet, its rows on a sub-sheet. The desktop's
+    /// System row stays on the root sheet.
+    pub fn area(self) -> bool {
+        self.system() && self != Cat::System
     }
 }
 
@@ -200,7 +189,7 @@ pub struct Tools {
     pub bluetooth: bool,
 }
 
-/// The rail's categories in `mode`, with the System pages whose tools work.
+/// The categories in `mode`, top to bottom, with the System areas whose tools work.
 pub fn categories(mode: Mode, tools: Tools) -> Vec<Cat> {
     let mut cats = vec![Cat::Games, Cat::Playing, Cat::Downloads, Cat::Emulators, Cat::Appearance, Cat::Updates, Cat::Advanced];
     if mode == Mode::Desktop {
@@ -246,10 +235,16 @@ pub fn category(id: SId) -> Option<Cat> {
         Gpu | NvInstall | NvLater | NvRetry | NvRestart | NvOpenSource | OutResolution | OutRefresh => Cat::Display,
         TimeZone | Ntp | TzBack | TzRegion(_) | TzZone(_) => Cat::Time,
         RestartLauncher | RunSetup => Cat::About,
+        Open(cat) => cat,
     })
 }
 
-/// L1/R1: the previous or next of `n` categories, wrapping at both ends.
+/// The sub-sheet a row shows on: its System area's. None: the root sheet.
+pub fn sub_sheet(id: SId) -> Option<Cat> {
+    category(id).filter(|c| c.area())
+}
+
+/// L1/R1: the previous or next of `n` sections, wrapping at both ends.
 pub fn step(n: usize, cur: usize, dir: i32) -> usize {
     if n == 0 {
         return 0;
@@ -257,10 +252,120 @@ pub fn step(n: usize, cur: usize, dir: i32) -> usize {
     (cur as i64 + dir as i64).rem_euclid(n as i64) as usize
 }
 
-/// In the page, Left changes a row that cycles through values; on any other row it goes back
-/// to the rail.
+/// Left changes a row that cycles through values; on any other row it does nothing. Back leaves
+/// a sub-sheet or closes Settings.
 pub fn left_changes(kind: i32) -> bool {
     kind == 3
+}
+
+/// The sheet on screen: its rows, what each one is, and where each section starts (L1/R1).
+#[derive(Default)]
+pub struct Projection {
+    pub ids: Vec<SId>,
+    pub rows: Vec<SettingData>,
+    /// The first row of each section: a heading, or the top of a sub-sheet.
+    pub sections: Vec<usize>,
+}
+
+impl Projection {
+    fn push(&mut self, id: SId, row: SettingData) {
+        self.ids.push(id);
+        self.rows.push(row);
+    }
+}
+
+/// The rows of `all` that the sheet shows. The root sheet (`sub` None): each launcher category
+/// of `cats` under its heading, then SYSTEM: the desktop's own row, or one entry row per System
+/// area. A sub-sheet: the rows of its area. `dot`: something waits in that category.
+pub fn project(all: &[(Cat, SId, SettingData)], cats: &[Cat], sub: Option<Cat>, dot: &dyn Fn(Cat) -> bool) -> Projection {
+    let mut p = Projection::default();
+    let rows_of = |cat: Cat| all.iter().filter(move |(c, _, _)| *c == cat).map(|(_, id, r)| (*id, r.clone()));
+    if let Some(cat) = sub {
+        for (id, r) in rows_of(cat) {
+            if id == SId::Header || p.ids.is_empty() {
+                p.sections.push(p.ids.len());
+            }
+            p.push(id, r);
+        }
+        return p;
+    }
+    let heading = |label: &str, dot: bool| SettingData { dot, ..row(0, &label.to_uppercase()) };
+    for cat in cats.iter().copied().filter(|c| !c.system()) {
+        p.sections.push(p.ids.len());
+        p.push(SId::Header, heading(cat.label(), dot(cat)));
+        rows_of(cat).for_each(|(id, r)| p.push(id, r));
+    }
+    let mut system = Projection::default();
+    for cat in cats.iter().copied().filter(|c| c.system()) {
+        if cat.area() {
+            system.push(SId::Open(cat), SettingData { more: true, dot: dot(cat), ..row(4, cat.label()) });
+        } else {
+            rows_of(cat).for_each(|(id, r)| system.push(id, r));
+        }
+    }
+    if !system.ids.is_empty() {
+        p.sections.push(p.ids.len());
+        p.push(SId::Header, heading("System", false));
+        p.ids.extend(system.ids);
+        p.rows.extend(system.rows);
+    }
+    p
+}
+
+/// Where L1/R1 goes, and whether the row being typed in is dropped on the way.
+#[derive(Debug, PartialEq, Eq)]
+pub struct Jump {
+    pub drop_edit: bool,
+    pub to: Option<usize>,
+}
+
+/// L1/R1 from row `idx` (-1: the search field): the first row of the previous or next section,
+/// wrapping around. An edit is dropped first, as Escape drops it: its row leaves the screen.
+pub fn jump(sections: &[usize], rows: &[SettingData], idx: i32, dir: i32, editing: bool) -> Jump {
+    let n = sections.len();
+    let cur = sections.iter().rposition(|s| *s as i32 <= idx);
+    let to = match cur {
+        _ if n == 0 => None,
+        Some(cur) => Some(step(n, cur, dir)),
+        // Above the first section: R1 goes to the first one, L1 to the last.
+        None => Some(if dir > 0 { 0 } else { n - 1 }),
+    };
+    let to = to.and_then(|s| {
+        let end = sections.get(s + 1).copied().unwrap_or(rows.len()).min(rows.len());
+        (sections[s]..end).find(|i| rows[*i].kind != 0)
+    });
+    Jump { drop_edit: editing, to }
+}
+
+/// Where the root sheet was when a sub-sheet opened: the entry row (its index on the sheet then)
+/// and the scroll.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct Return {
+    pub entry: SId,
+    pub idx: usize,
+    pub y: f32,
+}
+
+/// What Back does, innermost first.
+#[derive(Debug, PartialEq)]
+pub enum Back {
+    /// Drop the row being typed in.
+    Edit,
+    /// Leave what the sub-sheet has open: pairing, the time zone list.
+    Flow,
+    /// Back to the root sheet, where it was.
+    Root(Option<Return>),
+    /// Close Settings.
+    Close,
+}
+
+/// The focus and scroll on the rebuilt root sheet `ids` for `ret`: its row with its scroll when
+/// the row did not move, else the entry row (scroll to it). None: the area is gone.
+pub fn restore(ret: &Return, ids: &[SId]) -> Option<(usize, Option<f32>)> {
+    if ids.get(ret.idx) == Some(&ret.entry) {
+        return Some((ret.idx, Some(ret.y)));
+    }
+    ids.iter().position(|id| *id == ret.entry).map(|i| (i, None))
 }
 
 /// Every word of `query` is in the label or the hint, ignoring case. An empty query matches
@@ -327,31 +432,63 @@ fn plural(n: usize, one: &str) -> String {
     format!("{n} {one}{}", if n == 1 { "" } else { "s" })
 }
 
-/// Widths and heights of the Settings page on the 1920×1080 canvas (ui/settings.slint).
-const RAIL_FOLDED: f32 = 116.0;
-const PAGE_TOP: f32 = 170.0;
-const PAGE_BOTTOM: f32 = 110.0;
-/// The Secure Boot key's steps on the Updates page, with the space under them.
+/// Sizes of the Settings sheet on the 1920×1080 canvas (ui/settings.slint), for the scroll.
+/// The sheet's content is 648 wide: 760 less 56 each side.
+const SHEET_W: f32 = 648.0;
+/// The root sheet's top: the padding, Back, the title, the subtitle and the search field.
+const ROOT_TOP: f32 = 64.0 + 68.0 + 53.0 + 22.0 + 78.0;
+/// A sub-sheet's top: the same, with a space instead of the search field.
+const SUB_TOP: f32 = 64.0 + 68.0 + 53.0 + 22.0 + 20.0;
+/// A search hit under the search field, and the space over the first one.
+const HIT: f32 = 72.0;
+const HITS_TOP: f32 = 12.0;
+/// The About card under the rows, with its space or heading.
+const ABOUT_CARD: f32 = 36.0 + 30.0 + 120.0;
+/// The Secure Boot key's steps (Updates, Display), with the space under them: the setup's wide
+/// page, and the sheet, where the steps wrap more.
 const KEY_CARD: f32 = 510.0;
-/// The NVIDIA driver's card on the Display page (the stepper, a title and its text).
+const KEY_CARD_NARROW: f32 = 660.0;
+/// The NVIDIA driver's card on Display (the stepper, a title and its text).
 const NV_CARD: f32 = 300.0;
-/// The pairing card on the Controllers page: the stepper, a title, its text and the pictures of
-/// the buttons to hold; and without the pictures.
+const NV_CARD_NARROW: f32 = 470.0;
+/// The pairing card on Controllers: the stepper, a title, its text and the pictures of the
+/// buttons to hold; and without the pictures.
 const PAIR_CARD: f32 = 560.0;
+const PAIR_CARD_NARROW: f32 = 930.0;
 const PAIR_CARD_TEXT: f32 = 280.0;
+const PAIR_CARD_TEXT_NARROW: f32 = 420.0;
 /// The setup's page (ui/setup.slint): its rows start under the stepper, the title and the text,
 /// and end over the buttons.
 const SETUP_TOP: f32 = 330.0;
 const SETUP_BOTTOM: f32 = 150.0;
 
-/// The rail and the page: which category is open, every row of every category (for search), and
-/// the search field.
+/// The height of a row of `SettingRows` (ui/settings.slint) whose hints wrap at `per_line`
+/// characters. `gap`: the space over a heading.
+fn row_height(r: &SettingData, gap: f32, per_line: usize) -> f32 {
+    let hint = match r.hint.chars().count().div_ceil(per_line.max(1)) {
+        0 => 0.0,
+        lines => 6.0 + lines as f32 * 20.0,
+    };
+    match r.kind {
+        0 if r.label.is_empty() => 20.0 + 10.0,
+        0 => gap + 20.0 + 10.0,
+        1 => 8.0 + 23.0 + 6.0 + 54.0 + hint + 4.0,
+        _ => 8.0 + 64.0 + hint + 4.0,
+    }
+}
+
+/// Settings' state: the categories, the sheet on screen, every row of every category (for
+/// search), and the search field.
 #[derive(Default)]
 pub struct SettingsNav {
     pub cats: Vec<Cat>,
-    /// The open category, an index into `cats`.
-    pub cat: usize,
-    /// Every row of every category, in rail order. The page shows those of `cats[cat]`.
+    /// The open sub-sheet's area; None: the root sheet. The setup shows its step's area.
+    pub sub: Option<Cat>,
+    /// Where the root sheet was when the sub-sheet opened.
+    pub ret: Option<Return>,
+    /// The sheet's sections: indices of their first rows (see `Projection`).
+    pub sections: Vec<usize>,
+    /// Every row of every category, in `cats` order. The sheet shows a projection of them.
     pub all: Vec<(Cat, SId, SettingData)>,
     pub query: String,
     /// Search hits: indices into `all`.
@@ -360,6 +497,28 @@ pub struct SettingsNav {
     pub find_editing: bool,
     /// Desktop mode: the desktop's settings app, looked up when Settings opens.
     pub system_app: Option<(&'static str, &'static [&'static str])>,
+}
+
+impl SettingsNav {
+    /// Open the sub-sheet of `area`; Back comes back to `from`.
+    pub fn open_sub(&mut self, area: Cat, from: Return) {
+        self.sub = Some(area);
+        self.ret = Some(from);
+    }
+
+    /// Back, innermost first: the row being typed in, what the sub-sheet has open (`flow`), the
+    /// sub-sheet, then Settings. Leaving the sub-sheet gives where the root sheet was.
+    pub fn back(&mut self, editing: bool, flow: bool) -> Back {
+        if editing {
+            Back::Edit
+        } else if flow {
+            Back::Flow
+        } else if self.sub.take().is_some() {
+            Back::Root(self.ret.take())
+        } else {
+            Back::Close
+        }
+    }
 }
 
 /// Is `program` installed: an absolute path that exists, or a file in a `PATH` folder.
@@ -630,18 +789,19 @@ impl App {
         self.settings_page();
     }
 
-    /// The open category's rows become the page.
+    /// The sheet on screen: the root sheet or the open sub-sheet, from every row.
     fn settings_page(&mut self) {
-        let cat = self.settings_nav.cats.get(self.settings_nav.cat).copied().unwrap_or(Cat::Games);
-        let mut rows: Vec<(SId, SettingData)> = self.settings_nav.all.iter().filter(|(c, _, _)| *c == cat).map(|(_, id, r)| (*id, r.clone())).collect();
-        // Rows between two headers form one card.
-        for i in 0..rows.len() {
-            let first = i == 0 || rows[i - 1].1.kind == 0;
-            let last = i + 1 == rows.len() || rows[i + 1].1.kind == 0;
-            (rows[i].1.group_first, rows[i].1.group_last) = (first, last);
-        }
-        self.settings_ids = rows.iter().map(|(id, _)| *id).collect();
-        self.settings_rows = rows.into_iter().map(|(_, r)| r).collect();
+        let (app_update, emulator_update, display) = (self.upd.installed.is_some() || self.app_update_available(), self.kyty_update_available(), self.display_dot());
+        let nav = &self.settings_nav;
+        let p = project(&nav.all, &nav.cats, nav.sub, &|cat| waiting(cat, app_update, emulator_update, display));
+        self.settings_nav.sections = p.sections;
+        self.settings_ids = p.ids;
+        self.settings_rows = p.rows;
+    }
+
+    /// The first row that takes focus on the sheet; -1: it has none.
+    fn settings_first_row(&self) -> i32 {
+        self.settings_rows.iter().position(|r| r.kind != 0).map_or(-1, |i| i as i32)
     }
 
     /// Open Settings on "Share your game ratings".
@@ -650,106 +810,159 @@ impl App {
         self.settings_show_row(SId::Share);
     }
 
-    /// Open the category of `id`, with focus on that row.
+    /// Focus on row `id`: on the root sheet, or on its area's sub-sheet. Back from that sub-sheet
+    /// goes to the area's entry row.
     pub fn settings_show_row(&mut self, id: SId) {
         let Some(cat) = category(id) else { return };
-        let Some(c) = self.settings_nav.cats.iter().position(|x| *x == cat) else { return };
-        self.settings_nav.cat = c;
+        if !self.settings_nav.cats.contains(&cat) {
+            return;
+        }
+        let sub = sub_sheet(id);
+        if sub != self.settings_nav.sub {
+            if self.edit_index >= 0 {
+                self.finish_edit(None);
+            }
+            match sub {
+                Some(area) => {
+                    self.settings_nav.open_sub(area, Return { entry: SId::Open(area), idx: usize::MAX, y: 0.0 });
+                    self.sys_page_opened(area);
+                }
+                None => (self.settings_nav.sub, self.settings_nav.ret) = (None, None),
+            }
+        }
         self.settings_page();
-        let i = self.settings_ids.iter().position(|s| *s == id).unwrap_or(0);
-        self.set_focus(Z_SETTINGS, i as i32);
+        let i = self.settings_ids.iter().position(|s| *s == id).map_or(self.settings_first_row(), |i| i as i32);
+        self.set_focus(Z_SETTINGS, i);
         self.push_settings();
         self.scroll_settings();
     }
 
+    /// An entry row: open its area's sub-sheet, with focus on its first row. Back comes back to
+    /// this row and this scroll.
+    fn settings_open_sub(&mut self, area: Cat) {
+        if self.edit_index >= 0 {
+            self.finish_edit(None);
+        }
+        self.settings_find_stop();
+        audio::play(Sound::Select);
+        let ui = self.ui();
+        let from = Return { entry: SId::Open(area), idx: self.idx.max(0) as usize, y: ui.get_settings_y() };
+        self.settings_nav.open_sub(area, from);
+        self.settings_page();
+        self.set_focus(Z_SETTINGS, self.settings_first_row());
+        self.push_settings();
+        ui.set_settings_y(0.0);
+        self.sys_page_opened(area);
+    }
+
+    /// Back on the root sheet from a sub-sheet: focus and scroll as they were.
+    pub(crate) fn settings_root(&mut self, ret: Option<Return>) {
+        audio::play(Sound::Back);
+        self.settings_page();
+        self.push_settings();
+        match ret.and_then(|r| restore(&r, &self.settings_ids)) {
+            Some((i, y)) => {
+                self.set_focus(Z_SETTINGS, i as i32);
+                match y {
+                    Some(y) => self.ui().set_settings_y(y),
+                    None => self.scroll_settings(),
+                }
+            }
+            None => {
+                self.set_focus(Z_SETTINGS, self.settings_first_row());
+                self.scroll_settings();
+            }
+        }
+    }
+
+    /// The search hits show under the search field while it or a hit has focus.
+    fn settings_hits_shown(&self) -> bool {
+        self.settings_nav.sub.is_none() && !self.settings_nav.query.is_empty() && matches!(self.zone, Z_SETTINGS_FIND | Z_SETTINGS_HITS)
+    }
+
     pub fn push_settings(&mut self) {
         let nav = &self.settings_nav;
-        let app_update = self.upd.installed.is_some() || self.app_update_available();
-        let emulator_update = self.kyty_update_available();
-        let display = self.display_dot();
-        let cats: Vec<crate::SettingsCat> = nav.cats.iter().enumerate().map(|(i, c)| crate::SettingsCat {
-            label: c.label().into(),
-            icon: c.icon().into(),
-            dot: waiting(*c, app_update, emulator_update, display),
-            system: c.system(),
-            sep: c.system() && i > 0 && !nav.cats[i - 1].system(),
-        }).collect();
         let hits: Vec<crate::SettingsHit> = nav.hits.iter().filter_map(|i| nav.all.get(*i)).map(|(cat, _, r)| crate::SettingsHit {
             label: r.label.clone(),
-            place: cat.label().into(),
+            place: if cat.area() { format!("System · {}", cat.label()) } else { cat.label().to_string() }.into(),
         }).collect();
-        let cat = nav.cats.get(nav.cat).copied().unwrap_or(Cat::Games);
+        let sub = nav.sub;
         let ui = self.ui();
-        ui.set_settings_cats(model(cats));
-        ui.set_settings_cat(nav.cat as i32);
+        ui.set_settings_title(sub.map(|c| c.label()).unwrap_or_default().into());
         ui.set_settings_hits(model(hits));
-        ui.set_settings_about(matches!(cat, Cat::System | Cat::About));
-        let key = match cat {
-            Cat::OsUpdates => self.os_key_digits(),
-            Cat::Display => self.nv_key_digits(),
+        // The About card: on About's sub-sheet, or at the root sheet's end on a desktop.
+        ui.set_settings_about(sub == Some(Cat::About) || (sub.is_none() && nav.cats.contains(&Cat::System)));
+        let key = match sub {
+            Some(Cat::OsUpdates) => self.os_key_digits(),
+            Some(Cat::Display) => self.nv_key_digits(),
             _ => Vec::new(),
         };
         ui.set_settings_key(model(key));
         ui.set_settings_key_last(
             if self.overlay == Overlay::Setup {
                 "Choose \"Reboot\". The setup comes back, checks the key by itself and downloads the driver."
-            } else if cat == Cat::Display {
+            } else if sub == Some(Cat::Display) {
                 "Choose \"Reboot\". Back here, the launcher checks the key by itself; then download the driver."
             } else {
                 "Choose \"Reboot\". Back here, choose Download update again."
             }
             .into(),
         );
-        ui.set_settings_nv(if cat == Cat::Display { self.nv_card() } else { crate::NvCard::default() });
-        ui.set_settings_pair(if cat == Cat::Controllers { self.pair_card() } else { crate::PairCard::default() });
+        ui.set_settings_nv(if sub == Some(Cat::Display) { self.nv_card() } else { crate::NvCard::default() });
+        ui.set_settings_pair(if sub == Some(Cat::Controllers) { self.pair_card() } else { crate::PairCard::default() });
         ui.set_settings_mode(mode_label(Mode::current()).into());
         ui.set_settings(model(self.settings_rows.clone()));
         ui.set_edit_index(self.edit_index);
         self.push_setup();
     }
 
-    /// Keep the focused row of the page in view.
+    /// Keep the focused row, or the focused search hit, in view.
     pub fn scroll_settings(&mut self) {
-        // Estimated heights matching ui/settings.slint and ui/setup.slint.
+        // Estimated heights matching ui/settings.slint and ui/setup.slint. Hints are 16 px text,
+        // about 8.5 px a character.
         let (w, h) = self.logical_size();
-        // The page is at most 1100 wide, right of the folded rail; the setup's is centred, with
-        // no rail. Hints wrap at about 8 px a character (15 px text).
         let setup = self.overlay == Overlay::Setup;
-        let (left, page_top, page_bottom) = if setup { (0.0, SETUP_TOP, SETUP_BOTTOM) } else { (RAIL_FOLDED + 72.0, PAGE_TOP, PAGE_BOTTOM) };
-        let hint_w = (w - left - 96.0 * if setup { 2.0 } else { 1.0 }).min(1100.0) - 36.0;
-        let per_line = (hint_w / 8.0).max(20.0) as usize;
-        // The key's steps on the Updates page come before the rows.
-        let cat = self.settings_nav.cats.get(self.settings_nav.cat).copied();
-        let mut y = if cat == Some(Cat::OsUpdates) && self.sys.os.key.is_some() { KEY_CARD } else { 0.0 };
-        if cat == Some(Cat::Display) {
-            let ui = self.ui();
-            y += if ui.get_settings_nv().show { NV_CARD } else { 0.0 } + if self.nv_key_digits().is_empty() { 0.0 } else { KEY_CARD };
-        }
-        if cat == Some(Cat::Controllers) {
-            let pair = self.ui().get_settings_pair();
-            y += match (pair.show, pair.pictures) {
-                (false, _) => 0.0,
-                (true, true) => PAIR_CARD,
-                (true, false) => PAIR_CARD_TEXT,
-            };
-        }
-        let mut target = y;
+        let sub = self.settings_nav.sub;
+        let ui = self.ui();
+        // The setup's page is centred, at most 1100 wide, under its title; all of the sheet
+        // scrolls, from its top.
+        let (width, view, mut y) = if setup {
+            ((w - 192.0).min(1100.0), h - SETUP_TOP - SETUP_BOTTOM, 0.0)
+        } else if sub.is_some() {
+            (SHEET_W, h, SUB_TOP)
+        } else {
+            let hits = if self.settings_hits_shown() { HITS_TOP + HIT * self.settings_nav.hits.len().max(1) as f32 } else { 0.0 };
+            (SHEET_W, h, ROOT_TOP + hits)
+        };
+        let per_line = (width / 8.5).max(20.0) as usize;
+        // The cards over the rows of a System area.
+        let (key, nv, pair) = if setup { (KEY_CARD, NV_CARD, (PAIR_CARD, PAIR_CARD_TEXT)) } else { (KEY_CARD_NARROW, NV_CARD_NARROW, (PAIR_CARD_NARROW, PAIR_CARD_TEXT_NARROW)) };
+        y += if slint::Model::row_count(&ui.get_settings_key()) > 0 { key } else { 0.0 };
+        y += if ui.get_settings_nv().show { nv } else { 0.0 };
+        let p = ui.get_settings_pair();
+        y += match (p.show, p.pictures) {
+            (false, _) => 0.0,
+            (true, true) => pair.0,
+            (true, false) => pair.1,
+        };
+        let mut target = match self.zone {
+            Z_SETTINGS_HITS => ROOT_TOP + HITS_TOP + HIT * self.idx.max(0) as f32,
+            Z_SETTINGS => y,
+            _ => 0.0,
+        };
         for (i, r) in self.settings_rows.iter().enumerate() {
             if i as i32 == self.idx && self.zone == Z_SETTINGS {
                 target = y;
             }
-            let hint_lines = r.hint.chars().count().div_ceil(per_line) as f32;
-            y += match r.kind {
-                0 => (if i == 0 { 8.0 } else { 32.0 }) + 20.0 + 12.0,
-                _ => 64.0 + if hint_lines > 0.0 { 4.0 + hint_lines * 19.0 } else { 0.0 } + if self.edit_index == i as i32 { 54.0 } else { 0.0 },
-            };
+            // The setup's first heading sits close under its text.
+            y += row_height(r, if i == 0 && setup { 8.0 } else { 36.0 }, per_line);
         }
-        if self.ui().get_settings_about() {
-            y += 36.0 + 120.0; // the About card under the rows
+        if ui.get_settings_about() {
+            y += ABOUT_CARD;
         }
-        let view = h - page_top - page_bottom;
+        y += if setup { 24.0 } else { 120.0 };
         let max = (y - view).max(0.0);
-        self.ui().set_settings_y(-(target - view * 0.4).clamp(0.0, max) * self.scale);
+        ui.set_settings_y(-(target - view * 0.4).clamp(0.0, max) * self.scale);
     }
 
     pub(crate) fn save_cfg(&mut self, f: impl FnOnce(&mut crate::config::Config)) {
@@ -946,6 +1159,7 @@ impl App {
             SId::Downloads => self.open_downloads(None),
             SId::Share => self.share_results(),
             SId::Controls => self.open_controls(),
+            SId::Open(area) => self.settings_open_sub(area),
             SId::Header => {}
         }
     }
@@ -1041,9 +1255,9 @@ impl App {
         slint::Timer::single_shot(std::time::Duration::from_millis(600), || with_app(|app| app.app_restart()));
     }
 
-    // ------------------------------------------------------------------ the rail and the page
+    // ------------------------------------------------------------------ the sheet
 
-    /// Open Settings full screen, with focus on the rail and its first category.
+    /// Open Settings: the root sheet, with focus on its first row.
     pub fn open_settings(&mut self) {
         audio::play(Sound::Select);
         let mode = Mode::current();
@@ -1058,18 +1272,27 @@ impl App {
         ui.set_settings_query("".into());
         ui.set_settings_find_editing(false);
         ui.set_settings_y(0.0);
-        self.push_overlay(Overlay::Settings, Z_SETTINGS_RAIL, 0);
+        self.push_overlay(Overlay::Settings, Z_SETTINGS, self.settings_first_row());
         self.push_settings();
         self.sys_probe();
     }
 
     pub fn act_settings(&mut self, a: Act) {
-        let nav = &self.settings_nav;
-        let (n, cat) = (nav.cats.len(), nav.cat);
-        // L1/R1 (Tab on a keyboard) from anywhere; focus stays in the page or on the rail.
+        // L1/R1 (Tab on a keyboard) from anywhere: the previous or next section.
         if let Act::TabPrev | Act::TabNext = a {
-            let into_page = self.zone == Z_SETTINGS;
-            return self.settings_open_cat(step(n, cat, if a == Act::TabPrev { -1 } else { 1 }), into_page);
+            let from = if self.zone == Z_SETTINGS { self.idx } else { -1 };
+            let j = jump(&self.settings_nav.sections, &self.settings_rows, from, if a == Act::TabPrev { -1 } else { 1 }, self.edit_index >= 0);
+            // Dropping the edit can take a row away (a Wi-Fi password): find the target again.
+            let to = j.to.and_then(|i| self.settings_ids.get(i).copied());
+            if j.drop_edit {
+                self.finish_edit(None);
+            }
+            self.settings_find_stop();
+            if let Some(i) = to.and_then(|id| self.settings_ids.iter().position(|x| *x == id)) {
+                self.move_focus(Z_SETTINGS, i as i32);
+                self.scroll_settings();
+            }
+            return;
         }
         if a == Act::Search {
             return self.settings_find_start();
@@ -1078,8 +1301,14 @@ impl App {
             Z_SETTINGS => self.act_settings_page(a),
             Z_SETTINGS_FIND => match a {
                 Act::Confirm => self.settings_find_start(),
-                Act::Down if !self.settings_nav.hits.is_empty() => self.move_focus(Z_SETTINGS_HITS, 0),
-                Act::Down => self.move_focus(Z_SETTINGS_RAIL, cat as i32),
+                Act::Down if !self.settings_nav.hits.is_empty() && !self.settings_nav.query.is_empty() => {
+                    self.move_focus(Z_SETTINGS_HITS, 0);
+                    self.scroll_settings();
+                }
+                Act::Down => {
+                    self.move_focus(Z_SETTINGS, self.settings_first_row());
+                    self.scroll_settings();
+                }
                 Act::Back if !self.settings_nav.query.is_empty() => {
                     audio::play(Sound::Back);
                     self.settings_find_edited(String::new());
@@ -1101,39 +1330,30 @@ impl App {
                 }
                 _ => {}
             },
-            _ => match a {
-                Act::Up if cat > 0 => self.settings_open_cat(cat - 1, false),
-                Act::Up => self.move_focus(Z_SETTINGS_FIND, 0),
-                Act::Down if cat + 1 < n => self.settings_open_cat(cat + 1, false),
-                Act::Right | Act::Confirm => {
-                    if let Some(i) = self.settings_rows.iter().position(|r| r.kind != 0) {
-                        self.move_focus(Z_SETTINGS, i as i32);
-                        self.scroll_settings();
-                    }
-                }
-                Act::Back => self.back(),
-                _ => {}
-            },
+            _ => {}
+        }
+        if self.zone == Z_SETTINGS_HITS {
+            self.scroll_settings();
         }
     }
 
     pub(crate) fn act_settings_page(&mut self, a: Act) {
-        // Back first leaves what a page has open: pairing a controller.
-        if a == Act::Back && self.sys_back() {
-            return;
-        }
         let n = self.settings_rows.len() as i32;
         let focusable = |rows: &Vec<crate::SettingData>, i: i32| i >= 0 && i < rows.len() as i32 && rows[i as usize].kind != 0;
-        let to_rail = a == Act::Back || (a == Act::Left && !self.settings_rows.get(self.idx as usize).is_some_and(|r| left_changes(r.kind)));
-        // Leaving the row drops an unsaved edit, as Escape does.
-        if to_rail && self.edit_index >= 0 {
-            self.finish_edit(None);
-        }
         match a {
-            Act::Back => {
-                audio::play(Sound::Back);
-                self.set_focus(Z_SETTINGS_RAIL, self.settings_nav.cat as i32);
-            }
+            // Back, innermost first: the row being typed in, what the sub-sheet has open, the
+            // sub-sheet, Settings.
+            Act::Back => match self.settings_nav.back(self.edit_index >= 0, self.sys_flow()) {
+                Back::Edit => {
+                    audio::play(Sound::Back);
+                    self.finish_edit(None);
+                }
+                Back::Flow => {
+                    self.sys_back();
+                }
+                Back::Root(ret) => self.settings_root(ret),
+                Back::Close => self.back(),
+            },
             Act::Up | Act::Down => {
                 let step = if a == Act::Up { -1 } else { 1 };
                 let mut j = self.idx + step;
@@ -1143,45 +1363,35 @@ impl App {
                 if focusable(&self.settings_rows, j) {
                     self.move_focus(Z_SETTINGS, j);
                     self.scroll_settings();
+                } else if a == Act::Up && self.overlay == Overlay::Settings && self.settings_nav.sub.is_none() {
+                    // Over the root sheet's first row: the search field.
+                    self.move_focus(Z_SETTINGS_FIND, 0);
+                    self.scroll_settings();
                 }
             }
-            Act::Left if !self.settings_rows.get(self.idx as usize).is_some_and(|r| left_changes(r.kind)) => {
-                self.move_focus(Z_SETTINGS_RAIL, self.settings_nav.cat as i32);
-            }
+            // Left changes a value; on any other row it stays.
+            Act::Left if !self.settings_rows.get(self.idx as usize).is_some_and(|r| left_changes(r.kind)) => {}
             Act::Left | Act::Right => self.settings_change(self.idx as usize, if a == Act::Left { -1 } else { 1 }),
             Act::Confirm => self.settings_activate(self.idx as usize),
             _ => {}
         }
     }
 
-    /// Open category `c`, with focus on its first row or on the rail.
-    fn settings_open_cat(&mut self, c: usize, into_page: bool) {
-        if self.edit_index >= 0 {
-            self.finish_edit(None);
-        }
-        self.settings_find_stop();
-        self.settings_nav.cat = c.min(self.settings_nav.cats.len().saturating_sub(1));
-        self.settings_page();
-        self.push_settings();
-        self.ui().set_settings_y(0.0);
-        let first = self.settings_rows.iter().position(|r| r.kind != 0);
-        match first {
-            Some(i) if into_page => self.move_focus(Z_SETTINGS, i as i32),
-            _ => self.move_focus(Z_SETTINGS_RAIL, self.settings_nav.cat as i32),
-        }
-        if let Some(cat) = self.settings_nav.cats.get(self.settings_nav.cat).copied() {
-            self.sys_page_opened(cat);
-        }
-    }
-
-    /// The search field takes the keyboard.
+    /// The search field takes the keyboard. It is on the root sheet: a sub-sheet closes first.
     pub fn settings_find_start(&mut self) {
         if self.edit_index >= 0 {
             self.finish_edit(None);
         }
+        if self.settings_nav.sub.is_some() {
+            self.sys_close_pages();
+            (self.settings_nav.sub, self.settings_nav.ret) = (None, None);
+            self.settings_page();
+            self.push_settings();
+        }
         self.settings_nav.find_editing = true;
         self.set_focus(Z_SETTINGS_FIND, 0);
         let ui = self.ui();
+        ui.set_settings_y(0.0);
         ui.set_edit_caret(-1);
         if self.last_input_pad {
             let query = self.settings_nav.query.clone();
@@ -1290,13 +1500,17 @@ mod tests {
         assert!(categories(Mode::Session, none).contains(&Cat::Controllers));
         assert!(categories(Mode::Os, none).contains(&Cat::Controllers));
         assert!(!categories(Mode::Desktop, Tools { bluetooth: true, ..none }).contains(&Cat::Controllers), "the desktop owns Bluetooth");
-        assert_eq!((Cat::Controllers.label(), Cat::Controllers.icon()), ("Controllers", "pad"));
+        assert_eq!(Cat::Controllers.label(), "Controllers");
+        assert!(Cat::Controllers.area() && Cat::About.area());
+        assert!(!Cat::System.area() && !Cat::Games.area(), "the desktop's row and the launcher stay on the root sheet");
     }
 
     #[test]
     fn every_row_has_a_home() {
         use SId::*;
         assert_eq!(category(Header), None);
+        // An entry row of the root sheet stands for its area.
+        assert_eq!(category(Open(Cat::Network)), Some(Cat::Network));
         for (cat, ids) in [
             (Cat::Games, &[Dirs, InstallDir, DownloadDir, Rescan][..]),
             (Cat::Playing, &[Fullscreen, ReturnOnExit, Controls]),
@@ -1331,11 +1545,176 @@ mod tests {
     }
 
     #[test]
-    fn left_cycles_a_value_and_otherwise_goes_to_the_rail() {
+    fn left_cycles_a_value_and_otherwise_stays_on_the_row() {
+        // No rail to go to: Back leaves a sub-sheet or closes Settings.
         assert!(left_changes(3));
         assert!(!left_changes(1));
         assert!(!left_changes(2));
         assert!(!left_changes(4));
+    }
+
+    /// One row of each launcher category, the Emulators' own headers, and a few System rows.
+    fn model_rows() -> Vec<(Cat, SId, SettingData)> {
+        vec![
+            (Cat::Games, SId::Dirs, data(1, "Game folders", "")),
+            (Cat::Games, SId::Rescan, data(4, "Rescan game folders", "")),
+            (Cat::Playing, SId::Fullscreen, data(2, "Play games in fullscreen", "")),
+            (Cat::Downloads, SId::SeedCompleted, data(2, "Keep sharing finished downloads", "")),
+            (Cat::Emulators, SId::AutoUpdate, data(2, "Update automatically", "")),
+            (Cat::Emulators, SId::Header, data(0, "PS5 GAMES · KYTYPS5", "")),
+            (Cat::Emulators, SId::Resolution, data(3, "Resolution", "")),
+            (Cat::Emulators, SId::Header, data(0, "PS4 GAMES · SHADPS4", "")),
+            (Cat::Emulators, SId::ShadUpdate, data(4, "shadPS4", "")),
+            (Cat::Appearance, SId::Sounds, data(2, "Interface sounds", "")),
+            (Cat::Updates, SId::AppUpdate, data(4, "PS5 Launcher", "")),
+            (Cat::Advanced, SId::Rawg, data(1, "RAWG API key", "")),
+            (Cat::System, SId::OpenSystemSettings, data(4, "Your desktop manages these", "")),
+            (Cat::Network, SId::WifiOn, data(2, "Wi-Fi", "")),
+            (Cat::Network, SId::Header, data(0, "NETWORKS", "")),
+            (Cat::Network, SId::Network(0), data(4, "Home", "")),
+            (Cat::Controllers, SId::Header, data(0, "CONNECTED", "")),
+            (Cat::Controllers, SId::Pad(0), data(4, "DualSense", "")),
+            (Cat::Display, SId::Gpu, data(4, "Graphics card", "")),
+            (Cat::Time, SId::TimeZone, data(4, "Time zone", "")),
+            (Cat::About, SId::RestartLauncher, data(4, "Restart launcher", "")),
+        ]
+    }
+
+    fn headings(p: &Projection) -> Vec<String> {
+        p.sections.iter().map(|i| p.rows[*i].label.to_string()).collect()
+    }
+
+    #[test]
+    fn the_root_sheet_shows_the_launcher_first_then_one_entry_row_per_system_area() {
+        let all = model_rows();
+        let cats = categories(Mode::Os, Tools { network: true, display: true, time: true, ..Tools::default() });
+        let p = project(&all, &cats, None, &|c| c == Cat::Display);
+        assert_eq!(headings(&p), ["GAMES", "PLAYING", "DOWNLOADS", "EMULATORS", "APPEARANCE", "UPDATES", "ADVANCED", "SYSTEM"]);
+        assert_eq!(p.ids.len(), p.rows.len());
+        // The Emulators keep their two sub-headings; they are not sections of their own.
+        let emu = p.sections[3];
+        assert_eq!(p.ids[emu + 1..emu + 6], [SId::AutoUpdate, SId::Header, SId::Resolution, SId::Header, SId::ShadUpdate]);
+        assert_eq!(p.rows[emu + 2].label, "PS5 GAMES · KYTYPS5");
+        // SYSTEM: an entry row per area, in the old rail's order.
+        let system = p.sections[7];
+        assert_eq!(p.ids[system + 1..], [SId::Open(Cat::Network), SId::Open(Cat::Controllers), SId::Open(Cat::Display), SId::Open(Cat::Time), SId::Open(Cat::About)]);
+        let display = &p.rows[system + 3];
+        assert_eq!((display.kind, display.label.as_str(), display.more, display.dot), (4, "Display", true, true), "the NVIDIA driver waits there");
+        assert!(!p.rows[system + 1].dot);
+        assert!(!p.ids.contains(&SId::Network(0)) && !p.ids.contains(&SId::RestartLauncher), "System rows live in their sub-sheet");
+        assert!(!p.ids.contains(&SId::OpenSystemSettings), "not a desktop");
+    }
+
+    #[test]
+    fn a_dot_shows_on_the_section_where_an_update_waits() {
+        let all = model_rows();
+        let cats = categories(Mode::Session, Tools::default());
+        let p = project(&all, &cats, None, &|c| waiting(c, true, true, false));
+        let dotted: Vec<String> = p.rows.iter().filter(|r| r.dot).map(|r| r.label.to_string()).collect();
+        assert_eq!(dotted, ["EMULATORS", "UPDATES"]);
+    }
+
+    #[test]
+    fn desktop_mode_keeps_its_system_row_on_the_root_sheet() {
+        let all = model_rows();
+        let p = project(&all, &categories(Mode::Desktop, Tools::default()), None, &|_| false);
+        assert_eq!(headings(&p).last().map(String::as_str), Some("SYSTEM"));
+        assert_eq!(p.ids[p.sections[7] + 1..], [SId::OpenSystemSettings]);
+        // Without the desktop's settings app the row is not built: no empty SYSTEM section.
+        let no_app: Vec<_> = all.iter().filter(|(_, id, _)| *id != SId::OpenSystemSettings).cloned().collect();
+        let p = project(&no_app, &categories(Mode::Desktop, Tools::default()), None, &|_| false);
+        assert_eq!(headings(&p).last().map(String::as_str), Some("ADVANCED"));
+    }
+
+    #[test]
+    fn a_sub_sheet_shows_only_its_area() {
+        let all = model_rows();
+        let cats = categories(Mode::Os, Tools { network: true, ..Tools::default() });
+        let p = project(&all, &cats, Some(Cat::Network), &|_| false);
+        assert_eq!(p.ids, [SId::WifiOn, SId::Header, SId::Network(0)]);
+        // Its sections: the top, then each heading.
+        assert_eq!(p.sections, [0, 1]);
+        let p = project(&all, &cats, Some(Cat::Controllers), &|_| false);
+        assert_eq!((p.ids.as_slice(), p.sections.as_slice()), (&[SId::Header, SId::Pad(0)][..], &[0][..]));
+    }
+
+    #[test]
+    fn l1_and_r1_jump_to_the_first_row_of_a_section_and_wrap_around() {
+        let all = model_rows();
+        let cats = categories(Mode::Os, Tools { network: true, ..Tools::default() });
+        let p = project(&all, &cats, None, &|_| false);
+        let first = |s: usize| p.sections[s] + 1;
+        assert_eq!(jump(&p.sections, &p.rows, first(0) as i32, 1, false).to, Some(first(1)));
+        // From inside the Emulators, past their sub-headings: the next section.
+        let shad = p.ids.iter().position(|id| *id == SId::ShadUpdate).unwrap() as i32;
+        assert_eq!(jump(&p.sections, &p.rows, shad, 1, false).to, Some(first(4)));
+        assert_eq!(jump(&p.sections, &p.rows, shad, -1, false).to, Some(first(2)), "back to Downloads, not the Emulators' top");
+        assert_eq!(jump(&p.sections, &p.rows, first(7) as i32, 1, false).to, Some(first(0)), "SYSTEM wraps to GAMES");
+        assert_eq!(jump(&p.sections, &p.rows, first(0) as i32, -1, false).to, Some(first(7)), "GAMES wraps to SYSTEM");
+        // From the search field (no row): R1 goes to the first section, L1 to the last.
+        assert_eq!(jump(&p.sections, &p.rows, -1, 1, false).to, Some(first(0)));
+        assert_eq!(jump(&p.sections, &p.rows, -1, -1, false).to, Some(first(7)));
+        assert_eq!(jump(&[], &[], 0, 1, false).to, None);
+    }
+
+    #[test]
+    fn a_section_jump_drops_the_edit_of_the_row_it_leaves() {
+        let all = model_rows();
+        let p = project(&all, &categories(Mode::Session, Tools::default()), None, &|_| false);
+        let rawg = p.ids.iter().position(|id| *id == SId::Rawg).unwrap();
+        // Typing in the RAWG key, R1: the typing is dropped, as Escape drops it, and focus moves on.
+        let j = jump(&p.sections, &p.rows, rawg as i32, 1, true);
+        assert!(j.drop_edit);
+        assert_eq!(j.to, Some(p.sections[7] + 1));
+        assert!(!jump(&p.sections, &p.rows, rawg as i32, 1, false).drop_edit);
+        // An edit is dropped even where there is nowhere to go.
+        assert_eq!(jump(&[], &[], 0, 1, true), Jump { drop_edit: true, to: None });
+    }
+
+    #[test]
+    fn a_search_hit_opens_where_its_row_lives() {
+        assert_eq!(sub_sheet(SId::Resolution), None, "a launcher row: the root sheet");
+        assert_eq!(sub_sheet(SId::OpenSystemSettings), None, "the desktop's row: the root sheet");
+        assert_eq!(sub_sheet(SId::Network(2)), Some(Cat::Network));
+        assert_eq!(sub_sheet(SId::Gpu), Some(Cat::Display));
+        assert_eq!(sub_sheet(SId::OsDownload), Some(Cat::OsUpdates));
+        assert_eq!(sub_sheet(SId::RestartLauncher), Some(Cat::About));
+        assert_eq!(sub_sheet(SId::Header), None);
+        // A hit keeps its category; entry rows are never hits.
+        let all = model_rows();
+        let hits = search(&all, "wi-fi");
+        assert_eq!(hits.iter().map(|i| (all[*i].0, all[*i].1)).collect::<Vec<_>>(), [(Cat::Network, SId::WifiOn)]);
+        assert!(all.iter().all(|(_, id, _)| !matches!(id, SId::Open(_))));
+    }
+
+    #[test]
+    fn back_leaves_an_edit_then_a_flow_then_the_sub_sheet_then_settings() {
+        let mut nav = SettingsNav::default();
+        let from = Return { entry: SId::Open(Cat::Controllers), idx: 31, y: -840.0 };
+        nav.open_sub(Cat::Controllers, from);
+        assert_eq!(nav.sub, Some(Cat::Controllers));
+        assert_eq!(nav.back(true, true), Back::Edit, "typing first");
+        assert_eq!(nav.back(false, true), Back::Flow, "then pairing");
+        assert_eq!(nav.sub, Some(Cat::Controllers), "both stay in the sub-sheet");
+        assert_eq!(nav.back(false, false), Back::Root(Some(from)));
+        assert_eq!(nav.sub, None);
+        assert_eq!(nav.back(false, false), Back::Close);
+        // At the root, an edit is still dropped before Settings closes.
+        assert_eq!(nav.back(true, false), Back::Edit);
+    }
+
+    #[test]
+    fn back_puts_focus_and_scroll_where_they_were_on_the_root_sheet() {
+        let ids = [SId::Header, SId::Dirs, SId::Header, SId::Open(Cat::Network), SId::Open(Cat::Sound)];
+        let ret = Return { entry: SId::Open(Cat::Sound), idx: 4, y: -900.0 };
+        assert_eq!(restore(&ret, &ids), Some((4, Some(-900.0))), "the same row: the same scroll");
+        // An area came or went above it while the sub-sheet was open: the row, scrolled to.
+        let moved = [SId::Header, SId::Dirs, SId::Header, SId::Open(Cat::Sound)];
+        assert_eq!(restore(&ret, &moved), Some((3, None)));
+        // Opened from search: no row index to go back to.
+        let from_search = Return { entry: SId::Open(Cat::Network), idx: usize::MAX, y: 0.0 };
+        assert_eq!(restore(&from_search, &ids), Some((3, None)));
+        assert_eq!(restore(&ret, &[SId::Header, SId::Dirs]), None, "its area is gone");
     }
 
     #[test]

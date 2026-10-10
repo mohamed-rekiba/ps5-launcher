@@ -43,8 +43,7 @@ pub const Z_TRAILER: i32 = 18;
 pub const Z_CONTROLS: i32 = 19;
 pub const Z_POWER: i32 = 20;
 pub const Z_QUICK: i32 = 21;
-/// Settings: the rail, its search field and the search hits. Z_SETTINGS is the page.
-pub const Z_SETTINGS_RAIL: i32 = 22;
+/// Settings: the search field on the root sheet and its hits. Z_SETTINGS is the sheet's rows.
 pub const Z_SETTINGS_FIND: i32 = 23;
 pub const Z_SETTINGS_HITS: i32 = 24;
 /// The setup's buttons (Back, Skip, Next…) under the step's rows; the rows are Z_SETTINGS.
@@ -268,7 +267,7 @@ pub struct App {
     pub hero_flip: bool,
     pub row_flip: bool,
     pub settings_ids: Vec<crate::settings::SId>,
-    /// Settings' rail, open category and search.
+    /// Settings: the categories, the sheet on screen and search.
     pub settings_nav: crate::settings::SettingsNav,
     pub boot: crate::boot::Boot,
     pub kyty: crate::kyty_ui::KytyUi,
@@ -1590,8 +1589,8 @@ impl App {
         if ctrl || alt {
             return false;
         }
-        // Type-to-search on the Settings rail.
-        if self.overlay == Overlay::Settings && matches!(self.zone, Z_SETTINGS_RAIL | Z_SETTINGS_FIND)
+        // Type-to-search on the root sheet of Settings.
+        if self.overlay == Overlay::Settings && self.settings_nav.sub.is_none() && matches!(self.zone, Z_SETTINGS | Z_SETTINGS_FIND)
             && text.chars().count() == 1 && text.chars().all(|c| c.is_alphanumeric()) {
             let q = format!("{}{}", self.settings_nav.query, text);
             self.ui().set_settings_query(q.clone().into());

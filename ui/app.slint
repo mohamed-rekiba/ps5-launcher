@@ -1,10 +1,10 @@
-import { S, Theme, Icons, Zone, DownloadData, BootStep, ChipData, ActionData, TileData, HeroData, CardData, CardRow, GenreChip, Fact, FactRow, Shot, HubData, SettingData, ToastData, MenuItem, RunningData, PowerRow, QuickCard, QuickItem, SettingsCat, SettingsHit, NvCard, PairCard, OskKey, OskField, SetupView, NoticeView } from "theme.slint";
+import { S, Theme, Icons, Zone, DownloadData, BootStep, ChipData, ActionData, TileData, HeroData, CardData, CardRow, GenreChip, Fact, FactRow, Shot, HubData, SettingData, ToastData, MenuItem, RunningData, PowerRow, QuickCard, QuickItem, SettingsHit, NvCard, PairCard, OskKey, OskField, SetupView, NoticeView } from "theme.slint";
 import { FocusRing, Chip, Btn, Kicker, Badge, Switch, KeyCap, BackButton, Shimmer, Cover } from "widgets.slint";
 import { DownloadsSheet, DownloadConsent } from "downloads.slint";
 import { LibraryFilter, LibrarySortPicker } from "library.slint";
 import { PowerMenu, PowerDialog, PowerCountdown, NoticeDialog } from "power.slint";
 import { QuickMenu } from "quick.slint";
-import { SettingsPage } from "settings.slint";
+import { SettingsSheet } from "settings.slint";
 import { SetupPage } from "setup.slint";
 import { Osk } from "osk.slint";
 import { Palette } from "std-widgets.slint";
@@ -239,9 +239,8 @@ export component AppWindow inherits Window {
     in-out property <length> hub-y;
     in property <length> shots-x;
 
-    // Settings: the rail's categories, the open one, and its page's rows.
-    in property <[SettingsCat]> settings-cats;
-    in property <int> settings-cat;
+    // Settings: the sheet's rows, and the open sub-sheet's title (empty: the root sheet).
+    in property <string> settings-title;
     in property <[SettingData]> settings;
     in-out property <length> settings-y;
     in property <int> edit-index: -1;
@@ -262,16 +261,16 @@ export component AppWindow inherits Window {
     in property <int> osk-sug: -1;
     in property <[string]> osk-accents;
     in property <int> osk-accent;
-    // The page shows the About card (System and About pages), and the mode it names.
+    // The sheet shows the About card (About's sub-sheet; the root sheet on a desktop), and the mode it names.
     in property <bool> settings-about;
     in property <string> settings-mode;
-    // The Updates page (OS): the digits of the Secure Boot key's password, with its steps.
+    // Updates (OS) and Display: the digits of the Secure Boot key's password, with its steps.
     in property <[string]> settings-key;
     // The key's last step: what happens back in the launcher (Updates or Display).
     in property <string> settings-key-last;
-    // The Display page: the NVIDIA driver's card.
+    // Display: the NVIDIA driver's card.
     in property <NvCard> settings-nv;
-    // The Controllers page: pairing a controller (its steps, the buttons to hold, an error).
+    // Controllers: pairing a controller (its steps, the buttons to hold, an error).
     in property <PairCard> settings-pair;
     // PS5 Launcher OS's first-start setup: its stepper, title, text and buttons. Its rows and
     // cards are the Settings ones above.
@@ -1213,8 +1212,8 @@ export component AppWindow inherits Window {
         }
 
         // ------------------------------------------------------------ SETTINGS
-        if root.overlay == 2: SettingsPage {
-            cats: root.settings-cats; cat: root.settings-cat; zone: root.zone; idx: root.idx;
+        if root.overlay == 2: SettingsSheet {
+            title: root.settings-title; zone: root.zone; idx: root.idx;
             rows: root.settings; edit-index: root.edit-index; edit-text <=> root.edit-text;
             scroll-y <=> root.settings-y; query <=> root.settings-query; find-editing: root.settings-find-editing;
             hits: root.settings-hits; about: root.settings-about; version: root.app-version; mode: root.settings-mode;
