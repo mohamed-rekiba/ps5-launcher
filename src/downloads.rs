@@ -457,7 +457,7 @@ fn required_space(bytes: &[u8], folder: &Path) -> Result<u64> {
     Ok(required)
 }
 
-fn available_space(folder: &Path) -> Result<u64> {
+pub(crate) fn available_space(folder: &Path) -> Result<u64> {
     use std::os::unix::ffi::OsStrExt;
     let path = std::ffi::CString::new(folder.as_os_str().as_bytes())?;
     let mut stat = std::mem::MaybeUninit::<libc::statvfs>::uninit();

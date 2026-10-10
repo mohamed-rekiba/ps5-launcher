@@ -3,6 +3,7 @@
 
 use crate::app::*;
 use crate::audio::{self, Sound};
+use crate::osupdate::HELPER;
 use crate::system::{self, Can, Choice, Guard, JobEnd, Mode, PowerAction, PowerCaps, WaitState, Work};
 use crate::PowerRow;
 use std::process::Command;
@@ -10,8 +11,6 @@ use std::time::{Duration, Instant};
 
 /// Installed when Plasma is there to switch to ("Switch to desktop").
 const DESKTOP_SESSION: &str = "/usr/share/wayland-sessions/plasma.desktop";
-/// Root helper of PS5 Launcher OS (packaging/os/); it does not exist yet.
-const HELPER: &str = "/usr/libexec/ps5-launcher/helper";
 /// systemd sends SIGTERM to the session within its stop timeout (90 s by default). A launcher
 /// still running after this did not go down, so its resume intent goes: a crash later must not
 /// resume downloads.
@@ -119,11 +118,36 @@ impl App {
     }
 
     fn power_caps(&self) -> PowerCaps {
-        // Phase 6 (system pages) fills in update_staged from `bootc status`.
         PowerCaps { can_sleep: self.power.can_sleep, has_desktop: can_switch_to_desktop(
                 std::path::Path::new(DESKTOP_SESSION).exists(),
                 std::path::Path::new(HELPER).exists(),
-            ), update_staged: false }
+            ), update_staged: self.sys.os.status.as_ref().is_some_and(|s| s.staged.is_some()) }
+    }
+
+    /// Ask bootc whether an OS update waits for the next restart; the Restart row of the Power
+    /// menu and the Quick Menu follows ("Update and restart").
+    pub fn check_staged(&self) {
+        if Mode::current() != Mode::Os {
+            return;
+        }
+        std::thread::spawn(|| {
+            let status = crate::system_ui::load_os();
+            post(move |app| {
+                let status = match status {
+                    Ok(status) => status,
+                    Err(e) => return crate::log!("bootc status: {e}"),
+                };
+                let before = app.power.rows.clone();
+                app.sys.os.status = Some(status);
+                if app.overlay == Overlay::Power {
+                    app.push_power_rows();
+                    let idx = keep_selection(&before, &app.power.rows, app.idx.max(0) as usize);
+                    app.set_focus(Z_POWER, idx as i32);
+                } else if app.overlay == Overlay::Quick {
+                    app.push_quick();
+                }
+            });
+        });
     }
 
     /// PS button held, or the top bar's power button: open the Power menu from anywhere.
@@ -136,6 +160,7 @@ impl App {
         self.push_power_rows();
         self.push_overlay(Overlay::Power, Z_POWER, 0);
         self.check_sleep();
+        self.check_staged();
     }
 
     /// Before a menu opens over the screen: stop editing text there.

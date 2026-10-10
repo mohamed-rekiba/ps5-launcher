@@ -31,7 +31,7 @@ pub enum Layout {
 pub fn layout_for(field: Field) -> Layout {
     match field {
         Field::Library | Field::SettingsFind => Layout::Search,
-        Field::Row(_, SId::Rawg) => Layout::Password,
+        Field::Row(_, SId::Rawg | SId::WifiPassword) => Layout::Password,
         Field::Row(_, SId::Dirs | SId::InstallDir | SId::DownloadDir | SId::Emulator | SId::ShadEmulator) => Layout::Path,
         Field::Row(..) => Layout::Text,
     }
@@ -647,7 +647,12 @@ impl App {
             Field::SettingsFind => ("Search settings".to_string(), "Setting name"),
             Field::Row(i, id) => {
                 let label = self.settings_rows.get(i).map(|r| r.label.to_string()).unwrap_or_default();
-                (label, if id == SId::Rawg { "API key" } else { "" })
+                let placeholder = match id {
+                    SId::Rawg => "API key",
+                    SId::WifiPassword => "Wi-Fi password",
+                    _ => "",
+                };
+                (label, placeholder)
             }
         };
         let field = crate::OskField {
@@ -707,6 +712,7 @@ mod tests {
         assert_eq!(layout_for(Field::Library), Layout::Search);
         assert_eq!(layout_for(Field::SettingsFind), Layout::Search);
         assert_eq!(layout_for(Field::Row(3, SId::Rawg)), Layout::Password);
+        assert_eq!(layout_for(Field::Row(4, SId::WifiPassword)), Layout::Password);
         for id in [SId::Dirs, SId::InstallDir, SId::DownloadDir, SId::Emulator, SId::ShadEmulator] {
             assert_eq!(layout_for(Field::Row(0, id)), Layout::Path, "{id:?}");
         }

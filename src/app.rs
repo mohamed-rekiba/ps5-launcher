@@ -282,6 +282,8 @@ pub struct App {
     pub status_count: usize,
     pub power: crate::power_ui::PowerUi,
     pub quick: crate::quick_ui::QuickUi,
+    /// The System pages of Settings (Session and OS mode).
+    pub sys: crate::system_ui::SystemUi,
     pub osk: crate::osk_ui::OskUi,
     /// The last input came from a controller (not a key or a click): text fields open the
     /// on-screen keyboard.
@@ -442,6 +444,7 @@ pub fn run(ui: AppWindow, monitors: Vec<Monitor>, target_monitor: Option<Monitor
         compat_checked: 0.0,
         power: Default::default(),
         quick: Default::default(),
+        sys: Default::default(),
         osk: Default::default(),
         last_input_pad: false,
     };
@@ -2770,8 +2773,9 @@ impl App {
         let ui = self.ui();
         ui.set_edit_index(-1);
         ui.invoke_focus_root();
-        if let Some(t) = text {
-            self.settings_commit_text(i as usize, t);
+        match text {
+            Some(t) => self.settings_commit_text(i as usize, t),
+            None => self.net_password_cancelled(),
         }
         self.build_settings();
         self.push_settings();

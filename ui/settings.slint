@@ -80,6 +80,25 @@ component SettingRows inherits VerticalLayout {
                         Text { text: s.value; font-size: (19px * S.k); color: Theme.text; vertical-alignment: center; }
                         Image { source: Icons.chevr; colorize: f ? Theme.text : Theme.text3; width: (22px * S.k); height: (22px * S.k); y: (7px * S.k); }
                     }
+                    // A Wi-Fi network: a lock when it is secured, and its signal.
+                    if s.lock: Image {
+                        source: Icons.lock;
+                        colorize: Theme.text3;
+                        width: (18px * S.k);
+                        height: (18px * S.k);
+                        y: (9px * S.k);
+                    }
+                    if s.bars > 0: Rectangle {
+                        width: (30px * S.k);
+                        for b[j] in [1, 2, 3, 4]: Rectangle {
+                            x: (j * 8px * S.k);
+                            width: (5px * S.k);
+                            height: ((6px + j * 5px) * S.k);
+                            y: (27px * S.k) - self.height;
+                            border-radius: (1.5px * S.k);
+                            background: b <= s.bars ? Theme.text : #ffffff26;
+                        }
+                    }
                     if s.kind == 4 && s.value != "": Text {
                         text: s.value;
                         font-size: (17px * S.k);
@@ -124,6 +143,60 @@ component SettingRows inherits VerticalLayout {
     }
 }
 
+// The NVIDIA image's Secure Boot key waits for the blue MOK screen at the next start: its password
+// in large digits, numbered, because the screen may ask for single digits; then the steps.
+component KeySteps inherits VerticalLayout {
+    in property <[string]> digits;
+    in property <length> text-w;
+    padding-bottom: (28px * S.k);
+    Rectangle {
+        border-radius: (14px * S.k);
+        background: #ffffff0b;
+        border-width: 1px;
+        border-color: Theme.warn;
+        VerticalLayout {
+            padding: (28px * S.k);
+            spacing: (14px * S.k);
+            Text { text: "Enroll the NVIDIA driver's key"; font-size: (24px * S.k); font-weight: 600; color: Theme.text; }
+            Text {
+                text: "Secure Boot loads the new NVIDIA driver only after its key is enrolled. You do this once, on a blue screen when the PC starts. That screen needs a USB keyboard: a controller does not work there.";
+                width: root.text-w;
+                wrap: word-wrap;
+                font-size: (17px * S.k);
+                color: Theme.text2;
+            }
+            HorizontalLayout {
+                alignment: start;
+                spacing: (12px * S.k);
+                padding-top: (6px * S.k);
+                padding-bottom: (6px * S.k);
+                for d[i] in root.digits: VerticalLayout {
+                    spacing: (6px * S.k);
+                    Rectangle {
+                        width: (72px * S.k);
+                        height: (92px * S.k);
+                        border-radius: (12px * S.k);
+                        background: #ffffff16;
+                        Text { text: d; font-size: (58px * S.k); font-weight: 600; font-family: "DejaVu Sans Mono"; color: Theme.text; }
+                    }
+                    Text { text: i + 1; font-size: (15px * S.k); color: Theme.text3; horizontal-alignment: center; }
+                }
+            }
+            for step[i] in [
+                "Plug in a USB keyboard, then restart the PC from the Power menu.",
+                "A blue screen says \"Perform MOK management\". Press any key within 10 seconds. If you miss it, restart again.",
+                "Choose \"Enroll MOK\", then \"Continue\", then \"Yes\".",
+                "Type the password above and press Enter. If the screen asks for single digits, the numbers under the digits tell you which one.",
+                "Choose \"Reboot\". Back here, choose Download update again.",
+            ]: HorizontalLayout {
+                spacing: (12px * S.k);
+                Text { text: (i + 1) + "."; width: (24px * S.k); font-size: (17px * S.k); font-weight: 600; color: Theme.text; }
+                Text { text: step; width: root.text-w - (36px * S.k); wrap: word-wrap; font-size: (17px * S.k); color: Theme.text; }
+            }
+        }
+    }
+}
+
 export component SettingsPage inherits Rectangle {
     in property <[SettingsCat]> cats;
     in property <int> cat;
@@ -140,6 +213,8 @@ export component SettingsPage inherits Rectangle {
     in property <[SettingsHit]> hits;
     // The About card under the rows (System and About pages): version, mode, Slint.
     in property <bool> about;
+    // The Updates page (OS): the Secure Boot key's password, a digit each, over its steps.
+    in property <[string]> key;
     in property <string> version;
     in property <string> mode;
     in property <bool> pad;
@@ -200,6 +275,7 @@ export component SettingsPage inherits Rectangle {
                     width: page.width;
                     height: self.preferred-height;
                     padding-bottom: (24px * S.k);
+                    if root.key.length > 0: KeySteps { digits: root.key; text-w: page.width - (56px * S.k); }
                     SettingRows {
                         rows: root.rows;
                         selected: root.zone == Zone.settings ? root.idx : -1;

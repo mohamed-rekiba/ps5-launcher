@@ -1,7 +1,8 @@
 //! Sound outputs from PipeWire's `wpctl status`, for the Sound page and the Quick Menu (Phase 6 of
-//! docs/plans/ps5-launcher-os.md). Only parsing lives here. The launcher's own interface sounds
-//! are in audio.rs.
-#![allow(dead_code)] // nothing calls it until the Sound page (Phase 6)
+//! docs/plans/ps5-launcher-os.md). Parsing and the command lines live here; `system::call` runs
+//! them. The launcher's own interface sounds are in audio.rs.
+
+use crate::system::Call;
 
 /// An audio output ("sink"): speakers, HDMI, headphones.
 #[derive(Clone, PartialEq, Debug)]
@@ -54,9 +55,80 @@ fn parse_sink(line: &str) -> Option<Output> {
     })
 }
 
+/// Volume steps from 0 to 100%: 5% each.
+const STEPS: i32 = 20;
+
+/// The volume after one step up (`dir` > 0) or down: on the 5% grid, from 0 to 100%. A volume
+/// above 100% (set elsewhere) steps down from 100%.
+pub fn next_volume(volume: f32, dir: i32) -> f32 {
+    let step = (volume.clamp(0.0, 1.0) * STEPS as f32).round() as i32 + dir.signum();
+    step.clamp(0, STEPS) as f32 / STEPS as f32
+}
+
+/// "65%".
+pub fn percent(volume: f32) -> String {
+    format!("{}%", (volume * 100.0).round() as i32)
+}
+
+/// The output sound goes to now.
+pub fn default_output(outputs: &[Output]) -> Option<&Output> {
+    outputs.iter().find(|o| o.default)
+}
+
+pub fn status_call() -> Call {
+    Call::new("wpctl", &["status"], 10)
+}
+
+pub fn set_default_call(id: u32) -> Call {
+    Call::new("wpctl", &["set-default", &id.to_string()], 10)
+}
+
+/// Set the volume to `volume` (0.0 to 1.0), as `next_volume` computes it.
+pub fn set_volume_call(id: u32, volume: f32) -> Call {
+    Call::new("wpctl", &["set-volume", &id.to_string(), &format!("{:.2}", volume.clamp(0.0, 1.0))], 10)
+}
+
+pub fn toggle_mute_call(id: u32) -> Call {
+    Call::new("wpctl", &["set-mute", &id.to_string(), "toggle"], 10)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn volume_steps_by_five_percent() {
+        assert_eq!(percent(next_volume(0.65, 1)), "70%");
+        assert_eq!(percent(next_volume(0.65, -1)), "60%");
+        // An odd volume set elsewhere lands on the grid.
+        assert_eq!(percent(next_volume(0.42, 1)), "45%");
+        assert_eq!(percent(next_volume(0.43, -1)), "40%");
+    }
+
+    #[test]
+    fn volume_stays_between_zero_and_a_hundred_percent() {
+        assert_eq!(next_volume(1.0, 1), 1.0);
+        assert_eq!(next_volume(0.98, 1), 1.0);
+        assert_eq!(next_volume(0.0, -1), 0.0);
+        assert_eq!(percent(next_volume(1.5, -1)), "95%");
+        assert_eq!(next_volume(1.5, 1), 1.0);
+    }
+
+    #[test]
+    fn volume_command_lines() {
+        assert_eq!(set_volume_call(58, 0.7).args, ["set-volume", "58", "0.70"]);
+        assert_eq!(set_volume_call(58, 1.4).args, ["set-volume", "58", "1.00"]);
+        assert_eq!(set_default_call(51).args, ["set-default", "51"]);
+        assert_eq!(toggle_mute_call(51).args, ["set-mute", "51", "toggle"]);
+        assert_eq!(status_call().program, "wpctl");
+    }
+
+    #[test]
+    fn the_default_output() {
+        let outputs = parse_outputs(include_str!("testdata/fedora44-vm-wpctl-status.txt"));
+        assert_eq!(default_output(&outputs).map(|o| o.id), Some(50));
+        assert_eq!(default_output(&[]), None);
+    }
 
     #[test]
     fn the_output_from_real_output() {

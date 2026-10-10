@@ -74,6 +74,9 @@ export global Icons {
     out property <image> backspace: @image-url("../assets/icons/backspace.svg");
     out property <image> eye: @image-url("../assets/icons/eye.svg");
     out property <image> eyeoff: @image-url("../assets/icons/eye-off.svg");
+    out property <image> wifi: @image-url("../assets/icons/wifi.svg");
+    out property <image> sound: @image-url("../assets/icons/sound.svg");
+    out property <image> lock: @image-url("../assets/icons/lock.svg");
     out property <image> none;
 
     public pure function get(name: string) -> image {
@@ -86,7 +89,8 @@ export global Icons {
             : name == "logout" ? logout : name == "desktop" ? desktop
             : name == "pad" ? pad : name == "download" ? download
             : name == "chip" ? chip : name == "palette" ? palette : name == "tune" ? tune
-            : name == "shift" ? shift : name == "backspace" ? backspace : name == "eye" ? eye : name == "eyeoff" ? eyeoff : none;
+            : name == "shift" ? shift : name == "backspace" ? backspace : name == "eye" ? eye : name == "eyeoff" ? eyeoff
+            : name == "wifi" ? wifi : name == "sound" ? sound : name == "lock" ? lock : none;
     }
 }
 
@@ -214,6 +218,8 @@ export struct SettingData {
     value-kind: int,  // 0 dim, 1 good, 2 bad, 3 call to action
     group-first: bool, // rows of a section share one card
     group-last: bool,
+    bars: int,        // a Wi-Fi network's signal, 1 to 4 bars; 0 none
+    lock: bool,       // a secured Wi-Fi network
 }
 
 // kind 0 info, 1 ok, 2 error. image: a picture for the icon tile (app or game icon), if any.
@@ -226,8 +232,9 @@ export struct MenuItem { label: string, icon: string }
 // A Power menu row. sep: a thin divider above it. danger: the icon is red (focus stays white).
 export struct PowerRow { label: string, icon: string, danger: bool, sep: bool }
 // A Quick Menu card. status: one line on the right. more: a chevron (it opens something);
-// open: the chevron points down and the card's list shows below it.
-export struct QuickCard { label: string, status: string, icon: string, danger: bool, sep: bool, more: bool, open: bool }
+// open: the chevron points down and the card's list shows below it. adjust: Left and Right change
+// the status (the volume), shown with arrows on both sides of it.
+export struct QuickCard { label: string, status: string, icon: string, danger: bool, sep: bool, more: bool, open: bool, adjust: bool }
 // A category of the Settings rail. system: in the System group; sep: the divider above it.
 // dot: something waits there (an update).
 export struct SettingsCat { label: string, icon: string, dot: bool, system: bool, sep: bool }

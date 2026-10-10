@@ -1,7 +1,10 @@
 //! Drives and partitions from `lsblk --json`, for the Storage page (Phase 6 of
-//! docs/plans/ps5-launcher-os.md). Only parsing lives here; `system::run_output` runs lsblk with
-//! `LSBLK_ARGS`.
-#![allow(dead_code)] // nothing calls it until the Storage page (Phase 6)
+//! docs/plans/ps5-launcher-os.md). Parsing lives here; `system::call` runs `lsblk_call`.
+//!
+//! Formatting a drive is not here: it needs its own root-helper task with its own polkit action
+//! (and a second confirmation, and a refusal of the system disk), so it comes as a separate step.
+
+use std::path::{Path, PathBuf};
 
 /// The lsblk arguments `parse_drives` expects.
 pub const LSBLK_ARGS: [&str; 4] = ["--json", "-b", "-o", "NAME,PATH,SIZE,TYPE,FSTYPE,MOUNTPOINT,RM,HOTPLUG,LABEL,MODEL"];
@@ -94,9 +97,95 @@ pub fn parse_drives(json: &str) -> Result<Vec<Drive>, String> {
         .collect())
 }
 
+pub fn lsblk_call() -> crate::system::Call {
+    crate::system::Call::new("lsblk", &LSBLK_ARGS, 10)
+}
+
+/// The partitions the Storage page lists: those with a file system, without swap and the boot
+/// partitions, which only the OS uses.
+pub fn listed(p: &Partition) -> bool {
+    p.fstype.as_deref().is_some_and(|f| f != "swap") && !matches!(p.mountpoint.as_deref(), Some("/boot" | "/boot/efi" | "[SWAP]"))
+}
+
+/// The folder "Use for games" adds to the game folders: `Games` on the partition.
+pub fn games_dir(mountpoint: &str) -> PathBuf {
+    Path::new(mountpoint).join("Games")
+}
+
+/// Whether "Use for games" is offered for a partition: mounted, not on the system disk (the game
+/// folders there are in the home folder already), and not a game folder yet. `in_use` tells
+/// whether a folder is in the game folders.
+pub fn offers_games(drive: &Drive, p: &Partition, in_use: &dyn Fn(&Path) -> bool) -> bool {
+    match p.mountpoint.as_deref() {
+        Some(mp) if !drive.system && mp.starts_with('/') => !in_use(&games_dir(mp)),
+        _ => false,
+    }
+}
+
+/// "SANDISK ULTRA · 64.0 GB · USB": a drive's header on the Storage page.
+pub fn drive_title(drive: &Drive) -> String {
+    let mut parts = vec![drive.name.to_uppercase(), gigabytes(drive.bytes)];
+    if drive.system {
+        parts.push("SYSTEM".into());
+    } else if drive.removable {
+        parts.push("USB".into());
+    }
+    parts.join(" · ")
+}
+
+/// Sizes as drive makers print them: "64.0 GB", "1.0 TB".
+pub fn gigabytes(bytes: u64) -> String {
+    let gb = bytes as f64 / 1e9;
+    if gb >= 1000.0 { format!("{:.1} TB", gb / 1000.0) } else { format!("{gb:.1} GB") }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn part(fstype: Option<&str>, mountpoint: Option<&str>) -> Partition {
+        Partition { path: "/dev/sda1".into(), bytes: 1, fstype: fstype.map(String::from), label: None, mountpoint: mountpoint.map(String::from) }
+    }
+
+    #[test]
+    fn the_page_lists_partitions_with_a_file_system() {
+        let drives = parse_drives(include_str!("testdata/fedora44-vm-lsblk.json")).unwrap();
+        let listed: Vec<_> = drives[0].partitions.iter().filter(|p| listed(p)).map(|p| p.path.as_str()).collect();
+        assert_eq!(listed, ["/dev/vda4"], "the BIOS boot, EFI and boot partitions are left out");
+        assert!(!listed_part(Some("swap"), None));
+        assert!(listed_part(Some("exfat"), None), "an unmounted stick still shows");
+    }
+
+    fn listed_part(fstype: Option<&str>, mountpoint: Option<&str>) -> bool {
+        listed(&part(fstype, mountpoint))
+    }
+
+    #[test]
+    fn use_for_games_adds_a_games_folder() {
+        assert_eq!(games_dir("/run/media/player/GAMES"), PathBuf::from("/run/media/player/GAMES/Games"));
+    }
+
+    #[test]
+    fn use_for_games_needs_a_mounted_partition_off_the_system_disk() {
+        let mut drive = parse_drives(include_str!("testdata/fedora44-vm-lsblk.json")).unwrap().remove(0);
+        let none = |_: &Path| false;
+        let root = drive.partitions[3].clone();
+        assert!(!offers_games(&drive, &root, &none), "the system disk");
+        drive.system = false;
+        assert!(offers_games(&drive, &root, &none));
+        assert!(!offers_games(&drive, &part(Some("exfat"), None), &none), "not mounted");
+        let used = |p: &Path| p == Path::new("/sysroot/Games");
+        assert!(!offers_games(&drive, &root, &used), "a game folder already");
+    }
+
+    #[test]
+    fn drive_titles() {
+        let drives = parse_drives(include_str!("testdata/fedora44-vm-lsblk.json")).unwrap();
+        assert_eq!(drive_title(&drives[0]), "VDA · 10.7 GB · SYSTEM");
+        let usb = Drive { path: "/dev/sda".into(), name: "SanDisk Ultra".into(), bytes: 64_023_257_088, removable: true, system: false, partitions: vec![] };
+        assert_eq!(drive_title(&usb), "SANDISK ULTRA · 64.0 GB · USB");
+        assert_eq!(gigabytes(2_000_398_934_016), "2.0 TB");
+    }
 
     /// Captured on Fedora 44 (util-linux 2.41.5) in a container, cut to one empty nbd device and
     /// the real disks.

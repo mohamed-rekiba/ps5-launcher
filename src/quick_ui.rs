@@ -22,6 +22,8 @@ pub struct QuickUi {
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub enum Card {
     CloseGame,
+    /// The volume of the output in use (Session and OS mode, with PipeWire).
+    Sound,
     Controllers,
     Downloads,
     Power(Row),
@@ -38,13 +40,17 @@ pub enum Ps {
 }
 
 /// The cards for the Power menu's `power` rows. Close game leads while a game runs; it has its own
-/// card, so it is not repeated with the power rows.
-pub fn cards(game: bool, power: &[Row]) -> Vec<Card> {
+/// card, so it is not repeated with the power rows. `sound`: there is an output whose volume the
+/// Sound card sets.
+pub fn cards(game: bool, sound: bool, power: &[Row]) -> Vec<Card> {
     let mut out = Vec::new();
     if game {
         out.push(Card::CloseGame);
     }
-    // Sound and Wi-Fi cards go here, with their system backends (wpctl, nmcli) in Phase 6.
+    if sound {
+        out.push(Card::Sound);
+    }
+    // A Wi-Fi card goes here (Phase 6); the Network page in Settings has the networks for now.
     out.extend([Card::Controllers, Card::Downloads]);
     out.extend(power.iter().filter(|r| **r != Row::Action(PowerAction::CloseGame)).map(|r| Card::Power(*r)));
     out
@@ -61,6 +67,11 @@ pub fn seps(cards: &[Card]) -> Vec<bool> {
         }
         _ => false,
     }).collect()
+}
+
+/// The Sound card's status: "65%", or "Muted".
+pub fn sound_status(output: &crate::sound::Output) -> String {
+    if output.muted { "Muted".into() } else { crate::sound::percent(output.volume) }
 }
 
 /// "2 connected".
@@ -130,6 +141,10 @@ impl App {
         self.push_quick();
         self.push_overlay(Overlay::Quick, Z_QUICK, 0);
         self.check_sleep();
+        self.check_staged();
+        if crate::system::Mode::current() != crate::system::Mode::Desktop {
+            self.sound_load(false);
+        }
     }
 
     /// Close the Quick Menu and anything opened over it.
@@ -144,7 +159,8 @@ impl App {
     pub fn push_quick(&mut self) {
         let focused = (self.overlay == Overlay::Quick).then(|| self.quick.cards.get(self.idx as usize).copied()).flatten();
         let work = self.power_work();
-        let list = cards(work.game.is_some(), &self.power_rows());
+        let output = crate::sound::default_output(&self.sys.outputs).cloned();
+        let list = cards(work.game.is_some(), output.is_some(), &self.power_rows());
         let jobs = self.downloads.snapshot();
         let waiting = jobs.iter().filter(|j| matches!(j.state, State::Paused | State::Ready)).count();
         let eta = jobs.iter().find(|j| j.state.active()).map(|j| j.eta.as_str()).unwrap_or("");
@@ -153,6 +169,14 @@ impl App {
                 let status = self.live.first().map(|s| format!("{} · {}", s.name, util::fmt_clock(util::now_secs() - s.since))).unwrap_or_default();
                 QuickCard { label: "Close game".into(), status: status.into(), icon: "close".into(), danger: true, sep, ..Default::default() }
             }
+            Card::Sound => QuickCard {
+                label: "Sound".into(),
+                status: output.as_ref().map(sound_status).unwrap_or_default().into(),
+                icon: "sound".into(),
+                sep,
+                adjust: true,
+                ..Default::default()
+            },
             Card::Controllers => QuickCard {
                 label: "Controllers".into(),
                 status: controllers_status(crate::gamepad::count()).into(),
@@ -199,6 +223,9 @@ impl App {
             Act::Up if self.idx > 0 => self.move_focus(Z_QUICK, self.idx - 1),
             Act::Down if self.idx + 1 < n => self.move_focus(Z_QUICK, self.idx + 1),
             Act::Back => self.back(),
+            Act::Left | Act::Right if self.quick.cards.get(self.idx as usize) == Some(&Card::Sound) => {
+                self.sound_step(if a == Act::Left { -1 } else { 1 });
+            }
             Act::Confirm => match self.quick.cards.get(self.idx as usize).copied() {
                 // The Power menu's flow: the same guard, loss dialog and countdown.
                 Some(Card::CloseGame) => self.choose_power_row(Row::Action(PowerAction::CloseGame)),
@@ -212,7 +239,8 @@ impl App {
                     self.close_quick();
                     self.open_downloads(None);
                 }
-                None => {}
+                // Left and Right set it.
+                Some(Card::Sound) | None => {}
             },
             _ => {}
         }
@@ -228,29 +256,44 @@ mod tests {
     #[test]
     fn close_game_leads_while_a_game_runs_and_is_not_repeated() {
         let power = [Row::Action(CloseGame), Row::Action(Sleep), Row::Action(Restart { update: false }), Row::Action(PowerOff)];
-        assert_eq!(cards(true, &power), [
+        assert_eq!(cards(true, false, &power), [
             Card::CloseGame, Card::Controllers, Card::Downloads,
             Card::Power(Row::Action(Sleep)), Card::Power(Row::Action(Restart { update: false })), Card::Power(Row::Action(PowerOff)),
         ]);
         let power = [Row::Action(Restart { update: true }), Row::Action(PowerOff)];
-        assert_eq!(cards(false, &power), [
+        assert_eq!(cards(false, false, &power), [
             Card::Controllers, Card::Downloads, Card::Power(Row::Action(Restart { update: true })), Card::Power(Row::Action(PowerOff)),
         ]);
     }
 
     #[test]
+    fn the_sound_card_follows_close_game_when_there_is_an_output() {
+        let power = [Row::Action(PowerOff)];
+        assert_eq!(cards(true, true, &power), [Card::CloseGame, Card::Sound, Card::Controllers, Card::Downloads, Card::Power(Row::Action(PowerOff))]);
+        assert_eq!(cards(false, true, &power)[0], Card::Sound);
+        assert_eq!(seps(&cards(false, true, &power)), [false, false, false, true]);
+    }
+
+    #[test]
+    fn the_sound_card_shows_the_volume() {
+        let out = |volume, muted| crate::sound::Output { id: 1, name: "TV".into(), volume, muted, default: true };
+        assert_eq!(sound_status(&out(0.65, false)), "65%");
+        assert_eq!(sound_status(&out(0.65, true)), "Muted");
+    }
+
+    #[test]
     fn cancel_power_off_comes_with_the_power_cards() {
         let power = [Row::CancelWait, Row::Action(Restart { update: false }), Row::Action(PowerOff)];
-        assert_eq!(cards(false, &power)[2..], [Card::Power(Row::CancelWait), Card::Power(Row::Action(Restart { update: false })), Card::Power(Row::Action(PowerOff))]);
+        assert_eq!(cards(false, false, &power)[2..], [Card::Power(Row::CancelWait), Card::Power(Row::Action(Restart { update: false })), Card::Power(Row::Action(PowerOff))]);
     }
 
     #[test]
     fn dividers_set_the_power_cards_apart() {
-        let c = cards(true, &[Row::Action(CloseGame), Row::Action(Sleep), Row::Action(PowerOff), Row::Action(LogOut), Row::Action(SwitchToDesktop)]);
+        let c = cards(true, false, &[Row::Action(CloseGame), Row::Action(Sleep), Row::Action(PowerOff), Row::Action(LogOut), Row::Action(SwitchToDesktop)]);
         assert_eq!(seps(&c), [false, false, false, true, false, true, false]);
-        let c = cards(false, &[Row::CancelWait, Row::Action(PowerOff)]);
+        let c = cards(false, false, &[Row::CancelWait, Row::Action(PowerOff)]);
         assert_eq!(seps(&c), [false, false, true, true]);
-        assert_eq!(seps(&cards(false, &[])), [false, false]);
+        assert_eq!(seps(&cards(false, false, &[])), [false, false]);
     }
 
     #[test]

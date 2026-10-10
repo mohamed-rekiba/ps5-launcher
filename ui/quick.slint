@@ -79,6 +79,13 @@ export component QuickMenu inherits Rectangle {
                             vertical-alignment: center;
                             horizontal-stretch: 1;
                         }
+                        if card.adjust: Image {
+                            source: Icons.chevl;
+                            colorize: f ? #0a0d18 : Theme.text3;
+                            width: (20px * S.k);
+                            height: (20px * S.k);
+                            y: (25px * S.k);
+                        }
                         Text {
                             text: card.status;
                             font-size: (16px * S.k);
@@ -87,6 +94,13 @@ export component QuickMenu inherits Rectangle {
                             horizontal-alignment: right;
                             overflow: elide;
                             max-width: (300px * S.k);
+                        }
+                        if card.adjust: Image {
+                            source: Icons.chevr;
+                            colorize: f ? #0a0d18 : Theme.text3;
+                            width: (20px * S.k);
+                            height: (20px * S.k);
+                            y: (25px * S.k);
                         }
                         if card.more: Image {
                             source: card.open ? Icons.chevd : Icons.chevr;

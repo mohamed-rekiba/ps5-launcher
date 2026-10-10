@@ -46,6 +46,7 @@ mod sessions;
 mod settings;
 mod storage;
 mod system;
+mod system_ui;
 mod util;
 
 slint::include_modules!();

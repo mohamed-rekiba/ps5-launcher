@@ -103,6 +103,86 @@ pub fn run_output(cmd: &mut std::process::Command) -> Result<String, String> {
     Err(format!("{name} failed ({}): {}", out.status, stderr.trim()))
 }
 
+/// A system tool's command line, as the backends (network, sound, storage, osupdate) build it,
+/// so tests can check every argument. It runs under coreutils' `timeout`: a tool can wait
+/// forever (bluetoothctl did on Fedora 44), so every call gets `secs` seconds.
+#[derive(Clone, PartialEq, Eq, Debug)]
+pub struct Call {
+    pub program: &'static str,
+    pub args: Vec<String>,
+    pub secs: u32,
+}
+
+/// `timeout`'s exit code when the time ran out.
+const TIMED_OUT: i32 = 124;
+
+impl Call {
+    pub fn new(program: &'static str, args: &[&str], secs: u32) -> Call {
+        Call { program, args: args.iter().map(|a| a.to_string()).collect(), secs }
+    }
+
+    /// The command: SIGTERM after `secs`, SIGKILL 5 seconds later if the tool ignores it.
+    pub fn command(&self) -> std::process::Command {
+        let mut cmd = std::process::Command::new("timeout");
+        cmd.args(["-k", "5", &self.secs.to_string(), self.program]).args(&self.args);
+        cmd
+    }
+
+    /// The command line for errors and the log. A password never shows.
+    pub fn shown(&self) -> String {
+        let mut words = vec![self.program.to_string()];
+        let mut hide = false;
+        for arg in &self.args {
+            words.push(if hide { "••••".to_string() } else { arg.clone() });
+            hide = arg == "password";
+        }
+        words.join(" ")
+    }
+}
+
+/// How a call ended. `code` is None when a signal stopped it.
+#[derive(Clone, PartialEq, Eq, Debug)]
+pub struct Ran {
+    pub code: Option<i32>,
+    pub stdout: String,
+    pub stderr: String,
+}
+
+impl Ran {
+    /// The error for a call that did not exit with 0: the tool's own message.
+    pub fn error(&self, call: &Call) -> String {
+        let said = if self.stderr.trim().is_empty() { self.stdout.trim() } else { self.stderr.trim() };
+        let code = self.code.map(|c| format!("exit {c}")).unwrap_or_else(|| "stopped".into());
+        format!("{} failed ({code}): {said}", call.shown())
+    }
+}
+
+/// A finished call, or an error when its time ran out.
+fn finished(call: &Call, ran: Ran) -> Result<Ran, String> {
+    if ran.code == Some(TIMED_OUT) {
+        return Err(format!("{} did not answer within {} s", call.shown(), call.secs));
+    }
+    Ok(ran)
+}
+
+/// Run `call` and wait for it, at most its time. Any exit code is Ok; an error means the tool
+/// could not start or did not finish. It blocks, so call it off the UI thread.
+pub fn call_status(call: &Call) -> Result<Ran, String> {
+    let out = call.command().output().map_err(|e| format!("could not run {}: {e}", call.shown()))?;
+    let ran = Ran {
+        code: out.status.code(),
+        stdout: String::from_utf8_lossy(&out.stdout).into_owned(),
+        stderr: String::from_utf8_lossy(&out.stderr).into_owned(),
+    };
+    finished(call, ran)
+}
+
+/// `run_output` with the call's time limit: what the tool printed, when it exited with 0.
+pub fn call(call: &Call) -> Result<String, String> {
+    let ran = call_status(call)?;
+    if ran.code == Some(0) { Ok(ran.stdout) } else { Err(ran.error(call)) }
+}
+
 /// A row of the Power menu.
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub enum PowerAction {
@@ -371,6 +451,54 @@ mod tests {
         let failed = run_output(Command::new("sh").args(["-c", "echo half; echo refused >&2; exit 3"])).unwrap_err();
         assert!(failed.contains('3') && failed.contains("refused"), "{failed}");
         assert!(run_output(&mut Command::new("ps5-launcher-no-such-program")).is_err());
+    }
+
+    #[test]
+    fn a_call_runs_under_timeout() {
+        let call = Call::new("nmcli", &["radio", "wifi"], 10);
+        let cmd = call.command();
+        assert_eq!(cmd.get_program(), "timeout");
+        let args: Vec<_> = cmd.get_args().map(|a| a.to_str().unwrap()).collect();
+        assert_eq!(args, ["-k", "5", "10", "nmcli", "radio", "wifi"]);
+    }
+
+    #[test]
+    fn a_password_never_shows() {
+        let call = Call::new("nmcli", &["device", "wifi", "connect", "Home", "password", "hunter22"], 60);
+        assert_eq!(call.shown(), "nmcli device wifi connect Home password ••••");
+        let ran = Ran { code: Some(4), stdout: String::new(), stderr: "Error: Secrets were required.\n".into() };
+        let error = ran.error(&call);
+        assert!(!error.contains("hunter22"), "{error}");
+        assert_eq!(error, "nmcli device wifi connect Home password •••• failed (exit 4): Error: Secrets were required.");
+    }
+
+    #[test]
+    fn an_error_carries_what_the_tool_said() {
+        let call = Call::new("helper", &["update"], 60);
+        let said_on_stdout = Ran { code: Some(3), stdout: "key-required\n".into(), stderr: "  ".into() };
+        assert_eq!(said_on_stdout.error(&call), "helper update failed (exit 3): key-required");
+        let killed = Ran { code: None, stdout: String::new(), stderr: String::new() };
+        assert_eq!(killed.error(&call), "helper update failed (stopped): ");
+    }
+
+    #[test]
+    fn running_out_of_time_is_an_error() {
+        let call = Call::new("bluetoothctl", &["list"], 10);
+        let ran = |code| Ran { code: Some(code), stdout: String::new(), stderr: String::new() };
+        assert_eq!(finished(&call, ran(124)), Err("bluetoothctl list did not answer within 10 s".into()));
+        assert_eq!(finished(&call, ran(3)), Ok(ran(3)));
+    }
+
+    // macOS has no `timeout`.
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn calls_run_and_stop_in_time() {
+        assert_eq!(call(&Call::new("sh", &["-c", "echo hi"], 5)), Ok("hi\n".into()));
+        let failed = call(&Call::new("sh", &["-c", "echo refused >&2; exit 3"], 5)).unwrap_err();
+        assert!(failed.contains("exit 3") && failed.contains("refused"), "{failed}");
+        assert_eq!(call_status(&Call::new("sh", &["-c", "exit 4"], 5)).unwrap().code, Some(4));
+        let slow = call(&Call::new("sleep", &["5"], 1)).unwrap_err();
+        assert!(slow.contains("did not answer within 1 s"), "{slow}");
     }
 
     fn end(id: &str, state: JobEnd) -> (String, String, JobEnd) {

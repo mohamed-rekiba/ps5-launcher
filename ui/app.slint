@@ -264,6 +264,8 @@ export component AppWindow inherits Window {
     // The page shows the About card (System and About pages), and the mode it names.
     in property <bool> settings-about;
     in property <string> settings-mode;
+    // The Updates page (OS): the digits of the Secure Boot key's password, with its steps.
+    in property <[string]> settings-key;
 
     in property <image> viewer-image;
     in property <string> viewer-count;
@@ -1204,6 +1206,7 @@ export component AppWindow inherits Window {
             rows: root.settings; edit-index: root.edit-index; edit-text <=> root.edit-text;
             scroll-y <=> root.settings-y; query <=> root.settings-query; find-editing: root.settings-find-editing;
             hits: root.settings-hits; about: root.settings-about; version: root.app-version; mode: root.settings-mode;
+            key: root.settings-key;
             pad: root.pad-hints; osk: root.osk-open; caret: root.edit-caret;
             click(zone, i) => { root.click(zone, i); }
             edit-done(text, accepted) => { root.edit-done(text, accepted); }

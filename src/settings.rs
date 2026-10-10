@@ -48,6 +48,25 @@ pub enum SId {
     Refresh,
     // System (Desktop mode)
     OpenSystemSettings,
+    // Network: the indices are into `SystemUi`'s lists.
+    WifiOn,
+    Wired,
+    Network(usize),
+    /// The password of the network being joined; only while it is typed.
+    WifiPassword,
+    WifiScan,
+    SavedNetwork(usize),
+    // Sound
+    Volume,
+    Mute,
+    Output(usize),
+    // Storage: a drive, and a partition of it.
+    Drive(usize),
+    Partition(usize, usize),
+    // Updates (OS)
+    OsStatus,
+    OsDownload,
+    OsRollback,
     // About (Session and OS mode)
     RestartLauncher,
 }
@@ -65,6 +84,13 @@ pub enum Cat {
     Advanced,
     /// Desktop mode: the desktop's own settings app.
     System,
+    /// Session and OS mode, each when its tool works: nmcli, wpctl, lsblk.
+    Network,
+    Sound,
+    Storage,
+    /// OS mode: the system image's updates (bootc and the root helper). The launcher's own
+    /// update stays under Updates.
+    OsUpdates,
     /// Session and OS mode: version, mode, Restart launcher.
     About,
 }
@@ -80,6 +106,11 @@ impl Cat {
             Cat::Updates => "Updates",
             Cat::Advanced => "Advanced",
             Cat::System => "System",
+            Cat::Network => "Network",
+            Cat::Sound => "Sound",
+            Cat::Storage => "Storage",
+            // Under the SYSTEM heading, so not mixed up with the launcher's Updates.
+            Cat::OsUpdates => "Updates",
             Cat::About => "About",
         }
     }
@@ -91,25 +122,45 @@ impl Cat {
             Cat::Downloads => "download",
             Cat::Emulators => "chip",
             Cat::Appearance => "palette",
-            Cat::Updates => "update",
+            Cat::Updates | Cat::OsUpdates => "update",
             Cat::Advanced => "tune",
             Cat::System => "desktop",
+            Cat::Network => "wifi",
+            Cat::Sound => "sound",
+            Cat::Storage => "disk",
             Cat::About => "info",
         }
     }
 
     /// In the System group, below the divider.
     pub fn system(self) -> bool {
-        matches!(self, Cat::System | Cat::About)
+        matches!(self, Cat::System | Cat::Network | Cat::Sound | Cat::Storage | Cat::OsUpdates | Cat::About)
     }
 }
 
-/// The rail's categories in `mode`.
-pub fn categories(mode: Mode) -> Vec<Cat> {
+/// The system tools that answered on this PC, for the System group's pages.
+#[derive(Clone, Copy, Default, PartialEq, Eq, Debug)]
+pub struct Tools {
+    pub network: bool,
+    pub sound: bool,
+    pub storage: bool,
+    /// bootc and the root helper (PS5 Launcher OS only).
+    pub os_updates: bool,
+}
+
+/// The rail's categories in `mode`, with the System pages whose tools work.
+pub fn categories(mode: Mode, tools: Tools) -> Vec<Cat> {
     let mut cats = vec![Cat::Games, Cat::Playing, Cat::Downloads, Cat::Emulators, Cat::Appearance, Cat::Updates, Cat::Advanced];
-    // Network, Controllers, Sound, Display, Storage, Updates, Time and File sharing join the
-    // System group in Phase 6, each when its backend exists (docs/plans/ps5-launcher-os.md).
-    cats.push(if mode == Mode::Desktop { Cat::System } else { Cat::About });
+    if mode == Mode::Desktop {
+        // The desktop owns the system's settings.
+        cats.push(Cat::System);
+        return cats;
+    }
+    // Controllers, Display, Time and File sharing join in their own steps of Phase 6
+    // (docs/plans/ps5-launcher-os.md).
+    let pages = [(Cat::Network, tools.network), (Cat::Sound, tools.sound), (Cat::Storage, tools.storage), (Cat::OsUpdates, tools.os_updates && mode == Mode::Os)];
+    cats.extend(pages.into_iter().filter(|(_, found)| *found).map(|(cat, _)| cat));
+    cats.push(Cat::About);
     cats
 }
 
@@ -126,6 +177,10 @@ pub fn category(id: SId) -> Option<Cat> {
         AppUpdate => Cat::Updates,
         Rawg | RawgRemove | Refresh => Cat::Advanced,
         OpenSystemSettings => Cat::System,
+        WifiOn | Wired | Network(_) | WifiPassword | WifiScan | SavedNetwork(_) => Cat::Network,
+        Volume | Mute | Output(_) => Cat::Sound,
+        Drive(_) | Partition(..) => Cat::Storage,
+        OsStatus | OsDownload | OsRollback => Cat::OsUpdates,
         RestartLauncher => Cat::About,
     })
 }
@@ -199,7 +254,7 @@ pub fn mode_label(mode: Mode) -> &'static str {
     }
 }
 
-fn row(kind: i32, label: &str) -> SettingData {
+pub(crate) fn row(kind: i32, label: &str) -> SettingData {
     SettingData { kind, label: label.into(), ..Default::default() }
 }
 
@@ -211,6 +266,8 @@ fn plural(n: usize, one: &str) -> String {
 const RAIL_FOLDED: f32 = 116.0;
 const PAGE_TOP: f32 = 170.0;
 const PAGE_BOTTOM: f32 = 110.0;
+/// The Secure Boot key's steps on the Updates page, with the space under them.
+const KEY_CARD: f32 = 600.0;
 
 /// The rail and the page: which category is open, every row of every category (for search), and
 /// the search field.
@@ -480,6 +537,7 @@ impl App {
             r.hint = "Network, Bluetooth, sound, displays and power".into();
             add(&mut rows, SId::OpenSystemSettings, r);
         }
+        rows.extend(self.system_rows(&self.settings_nav.cats));
         if self.settings_nav.cats.contains(&Cat::About) {
             let mut r = row(4, "Restart launcher");
             r.hint = "Starts PS5 Launcher again, for when something looks stuck".into();
@@ -545,6 +603,7 @@ impl App {
         ui.set_settings_cat(nav.cat as i32);
         ui.set_settings_hits(model(hits));
         ui.set_settings_about(matches!(cat, Cat::System | Cat::About));
+        ui.set_settings_key(model(if cat == Cat::OsUpdates { self.os_key_digits() } else { Vec::new() }));
         ui.set_settings_mode(mode_label(Mode::current()).into());
         ui.set_settings(model(self.settings_rows.clone()));
         ui.set_edit_index(self.edit_index);
@@ -558,8 +617,10 @@ impl App {
         // character (15 px text).
         let hint_w = (w - RAIL_FOLDED - 72.0 - 96.0).min(1100.0) - 36.0;
         let per_line = (hint_w / 8.0).max(20.0) as usize;
-        let mut y = 0.0;
-        let mut target = 0.0;
+        // The key's steps on the Updates page come before the rows.
+        let cat = self.settings_nav.cats.get(self.settings_nav.cat).copied();
+        let mut y = if cat == Some(Cat::OsUpdates) && self.sys.os.key.is_some() { KEY_CARD } else { 0.0 };
+        let mut target = y;
         for (i, r) in self.settings_rows.iter().enumerate() {
             if i as i32 == self.idx && self.zone == Z_SETTINGS {
                 target = y;
@@ -578,7 +639,7 @@ impl App {
         self.ui().set_settings_y(-(target - view * 0.4).clamp(0.0, max) * self.scale);
     }
 
-    fn save_cfg(&mut self, f: impl FnOnce(&mut crate::config::Config)) {
+    pub(crate) fn save_cfg(&mut self, f: impl FnOnce(&mut crate::config::Config)) {
         let mut c = self.cfg.lock().unwrap();
         f(&mut c);
         c.save();
@@ -621,6 +682,7 @@ impl App {
                 self.save_cfg(|c| c.monitor = next.clone());
                 self.move_to_monitor(&next);
             }
+            SId::WifiOn | SId::Mute | SId::Volume => return self.sys_change(id, dir),
             SId::SeedCompleted => {
                 let on = dir > 0;
                 if let Err(error) = self.downloads.set_seed_after_download(on) {
@@ -656,7 +718,7 @@ impl App {
     pub fn settings_activate(&mut self, i: usize) {
         let Some(id) = self.settings_ids.get(i).copied() else { return };
         match id {
-            SId::Emulator | SId::ShadEmulator | SId::Dirs | SId::Extra | SId::Rawg | SId::DownloadDir | SId::InstallDir => {
+            SId::Emulator | SId::ShadEmulator | SId::Dirs | SId::Extra | SId::Rawg | SId::DownloadDir | SId::InstallDir | SId::WifiPassword => {
                 let cfg = self.cfg.lock().unwrap().clone();
                 let text = match id {
                     SId::Emulator => cfg.emulator,
@@ -677,11 +739,13 @@ impl App {
                 ui.set_edit_text(text.into());
                 ui.set_edit_index(i as i32);
             }
-            SId::Fullscreen | SId::Amd | SId::ReturnOnExit | SId::Sounds | SId::AutoUpdate | SId::SeedCompleted => {
+            SId::Fullscreen | SId::Amd | SId::ReturnOnExit | SId::Sounds | SId::AutoUpdate | SId::SeedCompleted | SId::WifiOn | SId::Mute => {
                 let on = self.settings_rows[i].on;
                 self.settings_change(i, if on { -1 } else { 1 });
             }
             SId::Resolution | SId::Present | SId::VideoOut | SId::Display => self.settings_change(i, 1),
+            SId::Volume | SId::Wired | SId::Drive(_) => {}
+            SId::Network(_) | SId::WifiScan | SId::SavedNetwork(_) | SId::Output(_) | SId::Partition(..) | SId::OsStatus | SId::OsDownload | SId::OsRollback => self.sys_activate(id),
             SId::RawgRemove => {
                 self.save_cfg(|c| c.rawg_key.clear());
                 self.rawg_status.clear();
@@ -796,6 +860,8 @@ impl App {
                 self.toast("Installed games rescanned", &format!("{n} game{} found.", if n == 1 { "" } else { "s" }), 1);
             }
             SId::Extra => self.save_cfg(|c| c.extra_args = t),
+            // Spaces at either end can be part of a Wi-Fi password.
+            SId::WifiPassword => self.net_password(text),
             SId::DownloadDir => {
                 if t.is_empty() || !util::expand_home(&t).is_absolute() {
                     self.toast("Invalid download folder", "Use an absolute path or ~/Downloads/PS5.", 2);
@@ -865,7 +931,7 @@ impl App {
         let mode = Mode::current();
         let desktop = std::env::var("XDG_CURRENT_DESKTOP").ok();
         self.settings_nav = SettingsNav {
-            cats: categories(mode),
+            cats: categories(mode, self.sys.tools),
             system_app: if mode == Mode::Desktop { system_settings_command(desktop.as_deref(), cfg!(target_os = "macos"), &installed) } else { None },
             ..Default::default()
         };
@@ -876,6 +942,7 @@ impl App {
         ui.set_settings_y(0.0);
         self.push_overlay(Overlay::Settings, Z_SETTINGS_RAIL, 0);
         self.push_settings();
+        self.sys_probe();
     }
 
     pub fn act_settings(&mut self, a: Act) {
@@ -980,6 +1047,9 @@ impl App {
             Some(i) if into_page => self.move_focus(Z_SETTINGS, i as i32),
             _ => self.move_focus(Z_SETTINGS_RAIL, self.settings_nav.cat as i32),
         }
+        if let Some(cat) = self.settings_nav.cats.get(self.settings_nav.cat).copied() {
+            self.sys_page_opened(cat);
+        }
     }
 
     /// The search field takes the keyboard.
@@ -1066,11 +1136,26 @@ mod tests {
     #[test]
     fn desktop_mode_has_system_and_the_others_have_about() {
         let launcher = [Cat::Games, Cat::Playing, Cat::Downloads, Cat::Emulators, Cat::Appearance, Cat::Updates, Cat::Advanced];
-        assert_eq!(categories(Mode::Desktop), [&launcher[..], &[Cat::System]].concat());
-        assert_eq!(categories(Mode::Session), [&launcher[..], &[Cat::About]].concat());
-        assert_eq!(categories(Mode::Os), [&launcher[..], &[Cat::About]].concat());
+        let none = Tools::default();
+        assert_eq!(categories(Mode::Desktop, none), [&launcher[..], &[Cat::System]].concat());
+        assert_eq!(categories(Mode::Session, none), [&launcher[..], &[Cat::About]].concat());
+        assert_eq!(categories(Mode::Os, none), [&launcher[..], &[Cat::About]].concat());
         assert!(Cat::System.system() && Cat::About.system());
         assert!(launcher.iter().all(|c| !c.system()));
+    }
+
+    #[test]
+    fn system_pages_show_in_session_and_os_mode_when_their_tool_works() {
+        let all = Tools { network: true, sound: true, storage: true, os_updates: true };
+        let system = |mode| categories(mode, all).into_iter().filter(|c| c.system()).collect::<Vec<_>>();
+        assert_eq!(system(Mode::Desktop), [Cat::System], "the desktop owns these");
+        assert_eq!(system(Mode::Session), [Cat::Network, Cat::Sound, Cat::Storage, Cat::About], "OS updates need the OS");
+        assert_eq!(system(Mode::Os), [Cat::Network, Cat::Sound, Cat::Storage, Cat::OsUpdates, Cat::About]);
+        let sound_only = Tools { sound: true, ..Tools::default() };
+        let cats = categories(Mode::Os, sound_only);
+        assert_eq!(cats[cats.len() - 2..], [Cat::Sound, Cat::About]);
+        assert!([Cat::Network, Cat::Sound, Cat::Storage, Cat::OsUpdates].iter().all(|c| c.system()));
+        assert_eq!(Cat::OsUpdates.label(), "Updates");
     }
 
     #[test]
@@ -1086,6 +1171,10 @@ mod tests {
             (Cat::Updates, &[AppUpdate]),
             (Cat::Advanced, &[Rawg, RawgRemove, Refresh]),
             (Cat::System, &[OpenSystemSettings]),
+            (Cat::Network, &[WifiOn, Wired, Network(0), WifiPassword, WifiScan, SavedNetwork(1)]),
+            (Cat::Sound, &[Volume, Mute, Output(2)]),
+            (Cat::Storage, &[Drive(0), Partition(0, 3)]),
+            (Cat::OsUpdates, &[OsStatus, OsDownload, OsRollback]),
             (Cat::About, &[RestartLauncher]),
         ] {
             for id in ids {
