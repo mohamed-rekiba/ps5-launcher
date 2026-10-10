@@ -41,6 +41,7 @@ mod quick_ui;
 mod psn;
 mod sessions;
 mod settings;
+mod storage;
 mod system;
 mod util;
 
