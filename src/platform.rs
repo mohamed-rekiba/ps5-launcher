@@ -25,6 +25,15 @@ impl Platform {
         }
     }
 
+    /// The addon id of the emulator the old launch path runs for this console (until phase 3 of
+    /// docs/plans/data-driven-emulators.md resolves it through the registry).
+    pub fn emulator_id(self) -> &'static str {
+        match self {
+            Platform::Ps5 => "kyty",
+            Platform::Ps4 => "shadps4",
+        }
+    }
+
     /// From a title ID: PPSA… is a PS5 game, CUSA… a PS4 game.
     pub fn of_title_id(tid: &str) -> Option<Platform> {
         if tid.starts_with("PPSA") {

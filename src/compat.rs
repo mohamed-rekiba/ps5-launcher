@@ -537,8 +537,8 @@ mod tests {
     fn your_result_wins_on_this_pc() {
         let json = br#"{"PPSA1":{"status":"InGame","platforms":{"windows":{"status":"InGame"}}}}"#;
         let mut mine = crate::results::Results::default();
-        mine.rate("PPSA1", "One", Status::Logo, "b", 1.0, "");
-        mine.rate("PPSA9", "Nine", Status::InGame, "b", 1.0, "");
+        mine.rate("PPSA1", "One", Status::Logo, "kyty", "b", 1.0, "");
+        mine.rate("PPSA9", "Nine", Status::InGame, "kyty", "b", 1.0, "");
         let db = with_mine(parse(json).unwrap(), &mine);
         let e = &db["PPSA1"];
         assert!(e.mine && e.on_linux);

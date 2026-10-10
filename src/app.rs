@@ -1107,14 +1107,14 @@ impl App {
         }.map(|p| p.to_string_lossy().into_owned()).unwrap_or_default();
         let probe = self.emulator_probe(l);
         std::thread::spawn(move || {
-            let kyty = probe.version();
+            let (emulator, version) = (probe.emulator(), probe.version());
             post(move |app| {
                 let Some(status) = status else {
-                    app.my_results.skip(&tid, &kyty);
+                    app.my_results.skip(&tid, emulator, &version);
                     app.my_results.save();
                     return;
                 };
-                app.my_results.rate(&tid, &name, status, &kyty, util::now_secs(), &log);
+                app.my_results.rate(&tid, &name, status, emulator, &version, util::now_secs(), &log);
                 app.my_results.save();
                 app.compat = crate::compat::with_mine(std::mem::take(&mut app.compat), &app.my_results);
                 app.build_genres();
@@ -1136,10 +1136,10 @@ impl App {
         let probe = self.emulator_probe(l);
         let id = game_id.to_string();
         std::thread::spawn(move || {
-            let kyty = probe.version();
+            let (emulator, version) = (probe.emulator(), probe.version());
             post(move |app| {
                 let free = matches!(app.overlay, Overlay::None | Overlay::Hub) && app.live.is_empty() && !app.boot.active;
-                if free && app.my_results.should_ask(&tid, &kyty) {
+                if free && app.my_results.should_ask(&tid, emulator, &version) {
                     if let Some(l) = app.locals.iter().position(|g| g.l.id == id) {
                         app.open_rating(l, true);
                     }
@@ -1172,7 +1172,7 @@ impl App {
             if let (Some(status), Some(saved)) = (r.status(), self.my_results.games.get_mut(tid)) {
                 saved.shared = now;
                 let game_version = self.locals.iter().find(|g| &g.l.title_id == tid).map(|g| g.l.version.clone()).unwrap_or_default();
-                reports.push((r.name.clone(), tid.clone(), r.kyty.clone(), game_version, status, log));
+                reports.push((r.name.clone(), tid.clone(), r.emulator_version.clone(), game_version, status, log));
             }
         }
         self.my_results.save();
@@ -2934,6 +2934,11 @@ struct EmulatorProbe {
 }
 
 impl EmulatorProbe {
+    /// The emulator's addon id.
+    fn emulator(&self) -> &'static str {
+        self.platform.emulator_id()
+    }
+
     /// KytyPS5's build for PS5 games, shadPS4's release for PS4 games.
     fn version(&self) -> String {
         match self.platform {
