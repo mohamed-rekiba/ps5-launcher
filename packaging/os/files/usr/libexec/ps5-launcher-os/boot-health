@@ -40,7 +40,9 @@ drm_dir=/sys/class/drm
 run_user=/run/user
 boot_id_file=/proc/sys/kernel/random/boot_id
 launcher_exe=/usr/bin/ps5-launcher
-# Seconds: the whole check, the healthy stretch it needs, the wait for the shared lock.
+# Seconds: everything (the unit's RuntimeMaxSec is 180), the checks, the healthy stretch they
+# need, the wait for the shared lock.
+limit=170
 budget=140
 stable=10
 lock_wait=20
@@ -51,6 +53,9 @@ export PATH
 umask 022
 
 log() { echo "ps5-boot-health: $*"; }
+started=$(date +%s)
+# Seconds left before $limit, so the unit's deadline never stops a rollback half-way.
+left() { echo $((limit - ($(date +%s) - started))); }
 now_iso() { date -u +%Y-%m-%dT%H:%M:%SZ; }
 valid_digest() { [[ ${1:-} =~ ^sha256:[0-9a-f]{64}$ ]]; }
 
@@ -75,7 +80,11 @@ field() { # FILE FIELD
 
 # bootc's status, as JSON, into $status. Empty when bootc fails or prints something else.
 read_status() {
-    status=$(timeout -k 5 30 bootc status --json --format-version=1 2>/dev/null |
+    local t
+    t=$(left)
+    [ "$t" -gt 30 ] && t=30
+    [ "$t" -gt 0 ] || { status=""; return; }
+    status=$(timeout -k 2 "$t" bootc status --json --format-version=1 2>/dev/null |
         sed -n '/{/,$p' | sed '1s/^[^{]*//')
     if ! jq -e '.apiVersion == "org.containers.bootc/v1" and .kind == "BootcHost"' <<<"$status" >/dev/null 2>&1; then
         status=""
@@ -255,7 +264,12 @@ uid=$(id -u "$user" 2>/dev/null) || uid=""
 booted="" last_good=""
 
 exec 9>>"$lock_file"
-take_lock() { flock -w "$lock_wait" 9; }
+take_lock() {
+    local t
+    t=$(left)
+    [ "$t" -gt "$lock_wait" ] && t=$lock_wait
+    [ "$t" -gt 0 ] && flock -w "$t" 9
+}
 
 # 1. Under the lock: read the state, and record the attempt before checking anything.
 if ! take_lock; then
@@ -366,8 +380,15 @@ jq -n --arg f "$booted" --arg d "$last_good" --arg b "$boot_id" --arg t "$(now_i
     { log "cannot record the recovery: no rollback"; record_attempt "$booted" unhealthy "$problems" "none: cannot record"; exit 0; }
 tx_failed=$booted tx_dest=$last_good
 record_attempt "$booted" unhealthy "$problems" "rollback to $last_good"
+# bootc rollback needs a few seconds; never start it without time to confirm it.
+rollback_time=$(($(left) - 15))
+[ "$rollback_time" -gt 60 ] && rollback_time=60
+if [ "$rollback_time" -lt 10 ]; then
+    notice rollback-failed "$problems" "no time left for bootc rollback; the PC stays on this system" "$tx_failed" "$tx_dest"
+    exit 0
+fi
 log "rolling back to $last_good"
-if ! timeout -k 10 60 bootc rollback; then
+if ! timeout -k 5 "$rollback_time" bootc rollback; then
     notice rollback-failed "$problems" "bootc rollback failed; the PC stays on this system" "$tx_failed" "$tx_dest"
     exit 0
 fi
