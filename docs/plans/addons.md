@@ -3,6 +3,10 @@
 Status: **approved**. The owner wrote the plan below; the advisor (Codex) reviewed it and settled the
 open points. The advisor's fixes and decisions follow the plan and win where they differ.
 
+Progress: the revised Phase 1 (below) is **done** for emulators, slices 1 to 5, in
+`src/emulators/`. Not done yet: themes, the Settings actions in the UI, the on/off and choice
+preferences (Phase 2), media size limits and SVG loading, and the "Show the folder" route.
+
 ## Decisions
 1. Emulators and themes are addons: one folder per addon, each with its own YAML file. The launcher finds them by scanning folders.
 2. YAML, parsed strictly into typed Rust structs: unknown fields and duplicate keys rejected, YAML aliases and tags blocked. serde_norway.
@@ -119,15 +123,19 @@ splits into one document per addon. The add/replace/disable override file and th
 fallback go away. The embedded data stays only as the source of the default copies.
 
 1. **The document contract:** strict parsing, the schema drift test, adapter and placeholder
-   checks; KytyPS5 and shadPS4 match today's behaviour.
+   checks; KytyPS5 and shadPS4 match today's behaviour. **Done** (`document.rs`, `bundle.rs`,
+   `assets/addons/emulators/`).
 2. **Discovery:** an injected addon root; a scan in a fixed order; ID conflicts, containment, and
-   one broken addon rejected on its own.
+   one broken addon rejected on its own. **Done** (`discovery.rs`).
 3. **The default lifecycle:** an injected default source and file operations; folder digests,
-   the first copy, edits, deletions, collisions and interrupted copies.
+   the first copy, edits, deletions, collisions and interrupted copies. **Done**
+   (`lifecycle.rs`). A default's revision is the digest of its shipped files. Proposals go to
+   `proposals/emulators/<id>/<revision>/`, outside the scanned folder.
 4. **The registry:** injected preferences; the choice order, an unavailable default, and a
-   second PS4 emulator from a test folder.
+   second PS4 emulator from a test folder. **Done** (`registry.rs`, `testdata/addons/`).
 5. **Startup:** reconcile, scan, an immutable snapshot and one combined list of problems. The
-   launcher still launches through the existing code.
+   launcher still launches through the existing code. **Done** (`startup.rs`; `main` logs the
+   problems).
 
 Showing the second emulator in the UI and launching it stay with the later phases. Themes come
 after the emulator phases.
