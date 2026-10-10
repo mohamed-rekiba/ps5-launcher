@@ -1,31 +1,135 @@
 {
   "$schema": "https://json-schema.org/draft/2020-12/schema",
-  "title": "Manifest",
-  "description": "The embedded manifest (assets/emulators.yaml).",
+  "title": "Emulator",
+  "description": "One emulator addon: the whole of emulators/<id>/emulator.yaml.",
   "type": "object",
   "properties": {
-    "defaults": {
-      "description": "The emulator that runs each console's games when a game has no choice of its own.",
-      "$ref": "#/$defs/Defaults"
+    "compatibility": {
+      "$ref": "#/$defs/CompatibilityParser"
     },
-    "emulators": {
+    "consoles": {
+      "description": "The consoles whose games it runs.",
       "type": "array",
       "items": {
-        "$ref": "#/$defs/Emulator"
+        "$ref": "#/$defs/Console"
       }
     },
+    "content": {
+      "$ref": "#/$defs/Content"
+    },
+    "controls": {
+      "description": "A file in the addon's folder with the keyboard and controller reference.",
+      "anyOf": [
+        {
+          "$ref": "#/$defs/RelPath"
+        },
+        {
+          "type": "null"
+        }
+      ]
+    },
+    "custom_build": {
+      "$ref": "#/$defs/CustomBuild"
+    },
+    "display_name": {
+      "description": "The name the launcher shows.",
+      "type": "string"
+    },
+    "enabled": {
+      "description": "A disabled emulator keeps its settings but runs no games.",
+      "type": "boolean"
+    },
+    "icon": {
+      "description": "An image file in the addon's folder.",
+      "anyOf": [
+        {
+          "$ref": "#/$defs/RelPath"
+        },
+        {
+          "type": "null"
+        }
+      ]
+    },
+    "id": {
+      "description": "The same as the addon's folder name.",
+      "$ref": "#/$defs/EmulatorId"
+    },
+    "install": {
+      "description": "How a managed build is installed. Required with a `github_latest` release.",
+      "anyOf": [
+        {
+          "$ref": "#/$defs/Installer"
+        },
+        {
+          "type": "null"
+        }
+      ]
+    },
+    "launch": {
+      "$ref": "#/$defs/Launch"
+    },
+    "macos": {
+      "anyOf": [
+        {
+          "$ref": "#/$defs/Macos"
+        },
+        {
+          "type": "null"
+        }
+      ]
+    },
+    "min_launcher_version": {
+      "description": "The oldest launcher that can use this addon. An older one leaves it untouched and\nunavailable.",
+      "anyOf": [
+        {
+          "$ref": "#/$defs/LauncherVersion"
+        },
+        {
+          "type": "null"
+        }
+      ]
+    },
+    "release": {
+      "$ref": "#/$defs/ReleaseSource"
+    },
     "schema_version": {
-      "description": "The format's version. This launcher reads version 1.",
+      "description": "The format's version; it selects the meaning of the rest. This launcher reads version 1.",
       "type": "integer",
       "format": "uint32",
       "minimum": 0
+    },
+    "session": {
+      "$ref": "#/$defs/Session"
+    },
+    "settings": {
+      "$ref": "#/$defs/Settings"
+    },
+    "update": {
+      "description": "Automatic updates. Required with a `github_latest` release.",
+      "anyOf": [
+        {
+          "$ref": "#/$defs/Update"
+        },
+        {
+          "type": "null"
+        }
+      ]
     }
   },
   "additionalProperties": false,
   "required": [
     "schema_version",
-    "defaults",
-    "emulators"
+    "id",
+    "display_name",
+    "consoles",
+    "enabled",
+    "release",
+    "custom_build",
+    "launch",
+    "settings",
+    "compatibility",
+    "content",
+    "session"
   ],
   "$defs": {
     "ArchiveMerge": {
@@ -470,33 +574,6 @@
         "relative"
       ]
     },
-    "Defaults": {
-      "description": "The default emulator for each console.",
-      "type": "object",
-      "properties": {
-        "ps4": {
-          "anyOf": [
-            {
-              "$ref": "#/$defs/EmulatorId"
-            },
-            {
-              "type": "null"
-            }
-          ]
-        },
-        "ps5": {
-          "anyOf": [
-            {
-              "$ref": "#/$defs/EmulatorId"
-            },
-            {
-              "type": "null"
-            }
-          ]
-        }
-      },
-      "additionalProperties": false
-    },
     "Defer": {
       "oneOf": [
         {
@@ -557,97 +634,6 @@
           "type": "string",
           "const": "error"
         }
-      ]
-    },
-    "Emulator": {
-      "description": "One emulator.",
-      "type": "object",
-      "properties": {
-        "compatibility": {
-          "$ref": "#/$defs/CompatibilityParser"
-        },
-        "consoles": {
-          "description": "The consoles whose games it runs.",
-          "type": "array",
-          "items": {
-            "$ref": "#/$defs/Console"
-          }
-        },
-        "content": {
-          "$ref": "#/$defs/Content"
-        },
-        "custom_build": {
-          "$ref": "#/$defs/CustomBuild"
-        },
-        "display_name": {
-          "description": "The name the launcher shows.",
-          "type": "string"
-        },
-        "enabled": {
-          "description": "A disabled emulator keeps its settings but runs no games.",
-          "type": "boolean"
-        },
-        "id": {
-          "$ref": "#/$defs/EmulatorId"
-        },
-        "install": {
-          "description": "How a managed build is installed. Required with a `github_latest` release.",
-          "anyOf": [
-            {
-              "$ref": "#/$defs/Installer"
-            },
-            {
-              "type": "null"
-            }
-          ]
-        },
-        "launch": {
-          "$ref": "#/$defs/Launch"
-        },
-        "macos": {
-          "anyOf": [
-            {
-              "$ref": "#/$defs/Macos"
-            },
-            {
-              "type": "null"
-            }
-          ]
-        },
-        "release": {
-          "$ref": "#/$defs/ReleaseSource"
-        },
-        "session": {
-          "$ref": "#/$defs/Session"
-        },
-        "settings": {
-          "$ref": "#/$defs/Settings"
-        },
-        "update": {
-          "description": "Automatic updates. Required with a `github_latest` release.",
-          "anyOf": [
-            {
-              "$ref": "#/$defs/Update"
-            },
-            {
-              "type": "null"
-            }
-          ]
-        }
-      },
-      "additionalProperties": false,
-      "required": [
-        "id",
-        "display_name",
-        "consoles",
-        "enabled",
-        "release",
-        "custom_build",
-        "launch",
-        "settings",
-        "compatibility",
-        "content",
-        "session"
       ]
     },
     "EmulatorId": {
@@ -986,6 +972,10 @@
       "enum": [
         "executable_parent"
       ]
+    },
+    "LauncherVersion": {
+      "type": "string",
+      "pattern": "^(0|[1-9][0-9]*)\\.(0|[1-9][0-9]*)\\.(0|[1-9][0-9]*)$"
     },
     "MacCustomSupport": {
       "oneOf": [

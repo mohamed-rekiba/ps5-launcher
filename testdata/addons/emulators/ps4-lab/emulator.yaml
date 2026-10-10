@@ -1,0 +1,26 @@
+# A second PS4 emulator for the tests (docs/plans/data-driven-emulators.md, §8): a custom
+# executable only. It describes no real emulator's command line.
+schema_version: 1
+id: ps4-lab
+display_name: PS4 Lab
+consoles: [ps4]
+enabled: true
+release: {kind: manual}
+custom_build: {allowed: true, empty_path: error, discovery: none, version: custom_build_label}
+launch:
+  cwd: executable_parent
+  inherit_environment: true
+  env: {}
+  env_remove: []
+  arguments:
+    - {kind: literal, text: --game}
+    - {kind: value, from: game.path, type: path}
+settings: {backend: external, definitions: [], composite_rows: [], rows: [custom_executable]}
+compatibility: {parser: none}
+content: {metadata: ps4_param_sfo, layout: {kind: plain_folder}}
+session:
+  process_names: [ps4-lab]
+  include_custom_basename: true
+  game_flags: {linux: [--game], macos: [--game]}
+  error_parser: none
+  controls_profile: none

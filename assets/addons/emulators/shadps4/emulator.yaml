@@ -1,0 +1,135 @@
+# yaml-language-server: $schema=../emulator.schema.json
+#
+# shadPS4, one emulator addon. The launcher copies this folder into its data folder
+# (~/.local/share/ps5-launcher/emulators/shadps4/) on first start and reads only that copy: edit
+# the copy, not this file. See docs/plans/addons.md.
+#
+# Every value here matches what the launcher's code does today (src/shad.rs, src/sessions.rs,
+# src/compat.rs, src/pkgx.rs); the tests in src/emulators compare them.
+
+schema_version: 1
+
+id: shadps4
+display_name: shadPS4
+consoles: [ps4]
+enabled: true
+
+release:
+  kind: github_latest
+  repo: shadps4-emu/shadPS4
+  asset_selection: first_match
+  targets:
+    - os: linux
+      host_arch: legacy_any
+      name_prefix: shadps4-linux
+      name_suffixes: [.zip]
+      case_sensitive: true
+    # macOS takes the Linux build too (it does not run there).
+    - os: macos
+      host_arch: legacy_any
+      name_prefix: shadps4-linux
+      name_suffixes: [.zip]
+      case_sensitive: true
+      support: legacy_attempt_only
+  allowed_hosts:
+    - api.github.com
+    - github.com
+    - release-assets.githubusercontent.com
+    - objects.githubusercontent.com
+  integrity:
+    kind: github_asset_sha256
+    required: false
+
+install:
+  kind: zip_appimage
+  root: {base: launcher_data, relative: shadps4}
+  versions: versions
+  current: current
+  state: state.json
+  zip_member_suffix: .AppImage
+  member_selection: first_match
+  extracted_name: shadps4.AppImage
+  executable:
+    linux: squashfs-root/AppRun
+    macos: squashfs-root/AppRun
+  shared_data:
+    kind: external
+    root: {base: xdg_data, relative: shadPS4}
+  probe:
+    kind: shad_help_banner
+    args: [--help]
+    timeout_seconds: 10
+    cwd: inherit
+    stdout_contains: shadPS4
+
+custom_build:
+  allowed: true
+  empty_path: managed
+  discovery: none
+  version: custom_build_label
+
+launch:
+  cwd: executable_parent
+  inherit_environment: true
+  env: {}
+  env_remove: []
+  arguments:
+    - {kind: literal, text: -g}
+    - {kind: value, from: game.path, type: path}
+    - {kind: literal, text: -f}
+    - {kind: value, from: playing.fullscreen, type: bool_string}
+
+settings:
+  backend: external
+  definitions: []
+  composite_rows: []
+  rows: [update, custom_executable, rollback]
+
+compatibility:
+  parser: shad_json_v1
+  url: https://github.com/shadps4-compatibility/shadps4-game-compatibility/releases/latest/download/compatibility_data.json
+  list_page: https://github.com/shadps4-compatibility/shadps4-game-compatibility/issues
+  cache: compatibility-shadps4.json
+  refresh_seconds: 21600
+  selection: legacy_linux_else_best
+  report:
+    kind: shad_issue_v1
+    url: https://github.com/shadps4-compatibility/shadps4-game-compatibility/issues/new?template=game_compatibility.yml
+  allowed_hosts:
+    - github.com
+    - release-assets.githubusercontent.com
+    - objects.githubusercontent.com
+
+content:
+  metadata: ps4_param_sfo
+  layout:
+    kind: shad_ps4
+    patch_suffix: -patch
+    addons_root: {base: xdg_data, relative: shadPS4/addcont}
+
+session:
+  process_names: [kyty_emulator, kyty_emulator.exe, shadps4]
+  include_custom_basename: false
+  game_flags:
+    linux: [--game, -g]
+    macos: [--game]
+  error_parser: kyty_error_block
+  controls_profile: shad_keyboard_v1
+
+update:
+  policy: legacy_shad_v1
+  check_seconds: 21600
+  poll_seconds: 1800
+  automatic_default: true
+  compare: tag_equality
+  display_version: strip_v_then_dot
+  install_priority: 1
+  defer: any_live_game_except_install_then_launch
+  keep_versions: 2
+  rollback: swap_current_previous_and_skip_departed
+
+macos:
+  managed_support: legacy_linux_asset_attempt
+  custom_support: executable_check
+  modify_quarantine: false
+  environment_changes: {}

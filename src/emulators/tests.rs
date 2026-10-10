@@ -1,12 +1,14 @@
-//! The registry's tests: the embedded manifest against today's code, the user's override, and
-//! resolution.
+//! The emulator addons' tests: the default documents against today's code, one document's
+//! checks, and resolution.
 
+use super::bundle::{DefaultSource, Embedded};
+use super::document::{self, Version, MAX_ITEMS};
 use super::manifest::*;
-use super::registry::{Origin, Registry, ResolveError, EMBEDDED, MAX_ITEMS};
-use std::path::{Path, PathBuf};
+use super::registry::{Registry, ResolveError};
+use std::path::PathBuf;
 
 fn embedded() -> Registry {
-    Registry::embedded().unwrap_or_else(|e| panic!("{e}"))
+    Registry::embedded().unwrap_or_else(|(id, e)| panic!("{id}: {e:?}"))
 }
 
 fn kyty() -> Emulator {
@@ -34,15 +36,45 @@ fn path_of(root: &DataRoot) -> PathBuf {
     base.join(root.relative.as_str())
 }
 
-// ------------------------------------------------------------------ the embedded manifest
+// ------------------------------------------------------------------ the default addons
 
 #[test]
-fn the_embedded_manifest_loads_and_is_within_the_limits() {
+fn the_default_documents_load_and_are_within_the_limits() {
     let r = embedded();
-    assert!(EMBEDDED.len() <= super::yaml::MAX_BYTES);
+    for addon in Embedded.emulators() {
+        assert!(addon.document().unwrap().len() <= super::yaml::MAX_BYTES, "{}", addon.id);
+    }
     let ids: Vec<&str> = r.emulators().iter().map(|e| e.id.as_str()).collect();
     assert_eq!(ids, ["kyty", "shadps4"]);
-    assert!(r.emulators().iter().all(|e| e.enabled));
+    assert!(r.emulators().iter().all(|e| e.enabled && e.min_launcher_version.is_none()));
+}
+
+#[test]
+fn the_bundle_holds_every_file_of_the_default_folders() {
+    let assets = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("assets/addons/emulators");
+    let mut folders: Vec<String> = std::fs::read_dir(&assets).unwrap().flatten().filter(|e| e.path().is_dir()).map(|e| e.file_name().to_string_lossy().into_owned()).collect();
+    folders.sort();
+    let shipped = Embedded.emulators();
+    assert_eq!(shipped.iter().map(|a| a.id.as_str()).collect::<Vec<_>>(), folders);
+    for addon in shipped {
+        let mut files: Vec<String> = std::fs::read_dir(assets.join(&addon.id)).unwrap().flatten().map(|e| e.file_name().to_string_lossy().into_owned()).collect();
+        files.sort();
+        assert_eq!(addon.files.iter().map(|(p, _)| p.clone()).collect::<Vec<_>>(), files, "{}", addon.id);
+        for (path, bytes) in &addon.files {
+            assert_eq!(&std::fs::read(assets.join(&addon.id).join(path)).unwrap(), bytes, "{}/{path}", addon.id);
+        }
+    }
+}
+
+#[test]
+fn the_console_defaults_name_default_addons_for_their_console() {
+    let r = embedded();
+    let defaults = Embedded.console_defaults();
+    for console in Console::ALL {
+        let id = defaults.get(console).unwrap();
+        assert!(r.get(id.as_str()).unwrap().consoles.contains(&console), "{id} for {console:?}");
+    }
+    assert_eq!((defaults.ps5.unwrap().as_str(), defaults.ps4.unwrap().as_str()), ("kyty", "shadps4"));
 }
 
 #[test]
@@ -239,55 +271,23 @@ fn the_asset_selectors_pick_these() {
     assert_eq!(github(&s).select(Os::Linux, "x86_64", &["Shadps4-linux-sdl-0.12.0.zip"]), None, "case-sensitive");
 }
 
-// ------------------------------------------------------------------ the user's override
+// ------------------------------------------------------------------ one document
 
-/// The plan's third-emulator fixture (§8), complete.
-const PS4_LAB: &str = "\
-id: ps4-lab
-display_name: PS4 Lab
-consoles: [ps4]
-enabled: true
-release: {kind: manual}
-custom_build: {allowed: true, empty_path: error, discovery: none, version: custom_build_label}
-launch:
-  cwd: executable_parent
-  inherit_environment: true
-  env: {}
-  env_remove: []
-  arguments:
-    - {kind: literal, text: --game}
-    - {kind: value, from: game.path, type: path}
-settings: {backend: external, definitions: [], composite_rows: [], rows: [custom_executable]}
-compatibility: {parser: none}
-content: {metadata: ps4_param_sfo, layout: {kind: plain_folder}}
-session:
-  process_names: [ps4-lab]
-  include_custom_basename: true
-  game_flags: {linux: [--game], macos: [--game]}
-  error_parser: none
-  controls_profile: none
-";
+/// The plan's third-emulator fixture (§8), complete, as an addon document.
+const PS4_LAB: &str = include_str!("../../testdata/addons/emulators/ps4-lab/emulator.yaml");
 
-/// A definition as an operation's `definition`, indented to fit.
-fn op(kind: &str, definition: &str) -> String {
-    let body: String = definition.lines().map(|l| format!("      {l}\n")).collect();
-    format!("  - op: {kind}\n    definition:\n{body}")
-}
-
-/// kyty's definition from the embedded manifest, with `edit` applied to its text.
+/// kyty's document as it ships, with `edit` applied to its text.
 fn kyty_text(edit: impl Fn(String) -> String) -> String {
-    let start = EMBEDDED.find("  - id: kyty\n").unwrap();
-    let end = EMBEDDED.find("  - id: shadps4\n").unwrap();
-    let text: String = EMBEDDED[start..end].lines().map(|l| l.get(4..).unwrap_or("").to_string() + "\n").collect();
-    edit(format!("id: kyty\n{}", text.split_once('\n').unwrap().1))
+    edit(Embedded.emulators()[0].document().unwrap().to_string())
 }
 
-fn file(operations: &str) -> String {
-    format!("schema_version: 1\noperations:\n{operations}")
+fn parse_at(text: &str, launcher: &str) -> Result<Emulator, String> {
+    let launcher = Version::parse(launcher).unwrap();
+    document::parse(text, launcher).map_err(|issues| issues.iter().map(ToString::to_string).collect::<Vec<_>>().join("\n"))
 }
 
-fn apply(text: &str) -> Result<Registry, String> {
-    embedded().with_override(text, Origin::User("emulators.yaml".into())).map_err(|e| e.to_string())
+fn apply(text: &str) -> Result<Emulator, String> {
+    parse_at(text, env!("CARGO_PKG_VERSION"))
 }
 
 fn refused(text: &str, expected: &str) {
@@ -298,122 +298,90 @@ fn refused(text: &str, expected: &str) {
 }
 
 #[test]
-fn an_override_adds_an_emulator() {
-    let r = apply(&file(&op("add", PS4_LAB))).unwrap();
-    assert_eq!(r.emulators().len(), 3);
-    let lab = r.get("ps4-lab").unwrap();
+fn the_test_emulator_reads() {
+    let lab = apply(PS4_LAB).unwrap();
+    assert_eq!((lab.id.as_str(), lab.consoles.as_slice()), ("ps4-lab", &[Console::Ps4][..]));
     assert_eq!(lab.release, ReleaseSource::Manual {});
     assert_eq!(lab.compatibility, CompatibilityParser::None {});
-    assert_eq!(r.resolve(Console::Ps4, Some("ps4-lab")).unwrap().id.as_str(), "ps4-lab");
-    assert_eq!(r.resolve(Console::Ps4, None).unwrap().id.as_str(), "shadps4", "other PS4 games keep the default");
-}
-
-#[test]
-fn an_override_replaces_a_definition() {
-    let text = kyty_text(|t| t.replace("display_name: KytyPS5", "display_name: KytyPS5 nightly"));
-    let r = apply(&file(&op("replace", &text))).unwrap();
-    assert_eq!(r.get("kyty").unwrap().display_name, "KytyPS5 nightly");
-    assert_eq!(r.emulators().len(), 2);
-    // Unchanged, the definition is the embedded one.
-    assert_eq!(apply(&file(&op("replace", &kyty_text(|t| t)))).unwrap(), embedded());
-}
-
-#[test]
-fn an_override_disables_an_emulator_and_moves_the_default() {
-    let text = format!("schema_version: 1\ndefaults: {{ps4: ps4-lab}}\noperations:\n{}  - {{op: disable, id: shadps4}}\n", op("add", PS4_LAB));
-    let r = apply(&text).unwrap();
-    assert!(!r.get("shadps4").unwrap().enabled, "kept, with its settings, but off");
-    assert_eq!(r.resolve(Console::Ps4, None).unwrap().id.as_str(), "ps4-lab");
-    assert_eq!(r.resolve(Console::Ps4, Some("shadps4")), Err(ResolveError::Disabled(EmulatorId::try_from("shadps4".to_string()).unwrap())));
-    assert_eq!(r.resolve(Console::Ps5, None).unwrap().id.as_str(), "kyty", "the other console keeps its default");
-}
-
-#[test]
-fn defaults_alone_change_the_default() {
-    let text = format!("schema_version: 1\ndefaults:\n  ps4: ps4-lab\noperations:\n{}", op("add", PS4_LAB));
-    assert_eq!(apply(&text).unwrap().resolve(Console::Ps4, None).unwrap().id.as_str(), "ps4-lab");
-    assert_eq!(apply("schema_version: 1\n").unwrap(), embedded(), "an empty override changes nothing");
-}
-
-#[test]
-fn disabling_the_default_without_a_new_one_is_refused() {
-    refused(&file("  - {op: disable, id: kyty}\n"), "defaults.ps5: \"kyty\" is disabled; set another default for PS5 games");
-}
-
-#[test]
-fn a_default_for_the_wrong_console_is_refused() {
-    refused("schema_version: 1\ndefaults: {ps5: shadps4}\n", "defaults.ps5: \"shadps4\" does not run PS5 games");
-    refused("schema_version: 1\ndefaults: {ps5: nothing}\n", "there is no emulator \"nothing\"");
+    assert_eq!(apply(&kyty_text(|t| t)).unwrap(), kyty(), "unchanged, it reads as the default");
 }
 
 #[test]
 fn an_unknown_field_is_refused() {
-    refused("schema_version: 1\noperation: []\n", "unknown field `operation`");
-    refused(&file(&op("add", &PS4_LAB.replace("enabled: true", "enabled: true\nenabld: true"))), "unknown field `enabld`");
-    refused(&file(&op("add", &PS4_LAB.replace("{kind: manual}", "{kind: manual, repo: a/b}"))), "unknown field `repo`");
+    refused(&kyty_text(|t| t.replace("enabled: true", "enabled: true\nenabld: true")), "unknown field `enabld`");
+    refused(&PS4_LAB.replace("{kind: manual}", "{kind: manual, repo: a/b}"), "unknown field `repo`");
+    refused(&kyty_text(|t| t.replace("id: kyty\n", "id: kyty\ndefaults: {ps5: kyty}\n")), "unknown field `defaults`");
 }
 
 #[test]
 fn a_duplicate_key_is_refused() {
-    let lab = PS4_LAB.replace("  env: {}\n", "  env:\n    A: one\n    A: two\n");
-    refused(&file(&op("add", &lab)), "duplicate entry with key \"A\"");
-}
-
-#[test]
-fn a_duplicate_id_is_refused() {
-    refused(&file(&format!("{}{}", op("add", PS4_LAB), op("add", PS4_LAB))), "operations[1]: a second operation for \"ps4-lab\"");
-    let twice = EMBEDDED.replace("  - id: shadps4\n", "  - id: kyty\n");
-    let e = super::registry::parse_manifest(&twice, Origin::Embedded).unwrap_err().to_string();
-    assert!(e.contains("emulators[1].id: \"kyty\" is used twice"), "{e}");
-}
-
-#[test]
-fn replacing_a_missing_emulator_is_refused() {
-    refused(&file(&op("replace", PS4_LAB)), "operations[0]: there is no emulator \"ps4-lab\"");
-    refused(&file("  - {op: disable, id: nothing}\n"), "operations[0]: there is no emulator \"nothing\"");
-}
-
-#[test]
-fn adding_an_existing_emulator_is_refused() {
-    refused(&file(&op("add", &kyty_text(|t| t))), "cannot add \"kyty\": it exists (use replace)");
+    refused(&PS4_LAB.replace("  env: {}\n", "  env:\n    A: one\n    A: two\n"), "duplicate entry with key \"A\"");
 }
 
 #[test]
 fn a_bad_host_is_refused() {
-    refused(&file(&op("replace", &kyty_text(|t| t.replace("- objects.githubusercontent.com", "- \"*.githubusercontent.com\"")))), "is not a host name");
-    refused(&file(&op("replace", &kyty_text(|t| t.replace("[kytyps5.github.io, github.com]", "[github.com]")))), "compatibility.url: the host kytyps5.github.io is not in allowed_hosts");
-    refused(&file(&op("replace", &kyty_text(|t| t.replace("https://kytyps5.github.io/data/", "http://kytyps5.github.io/data/")))), "is not an https URL");
-    refused(&file(&op("replace", &kyty_text(|t| t.replace("https://kytyps5.github.io/data/", "https://user@kytyps5.github.io:8443/data/")))), "no user name, password or port");
+    refused(&kyty_text(|t| t.replace("- objects.githubusercontent.com", "- \"*.githubusercontent.com\"")), "is not a host name");
+    refused(&kyty_text(|t| t.replace("[kytyps5.github.io, github.com]", "[github.com]")), "compatibility.url: the host kytyps5.github.io is not in allowed_hosts");
+    refused(&kyty_text(|t| t.replace("https://kytyps5.github.io/data/", "http://kytyps5.github.io/data/")), "is not an https URL");
+    refused(&kyty_text(|t| t.replace("https://kytyps5.github.io/data/", "https://user@kytyps5.github.io:8443/data/")), "no user name, password or port");
 }
 
 #[test]
 fn a_placeholder_of_the_wrong_type_is_refused() {
     let text = kyty_text(|t| t.replace("{kind: value, from: settings.video_out, type: enum}", "{kind: value, from: settings.video_out, type: bool_string}"));
-    refused(&file(&op("replace", &text)), "operations[0].definition.launch.arguments[9]: settings.video_out is an enum; bool_string is incompatible");
-    let text = kyty_text(|t| t.replace("condition: settings.amd_cpu", "condition: settings.width"));
-    refused(&file(&op("replace", &text)), "settings.width is a u32; a condition must be a bool");
-    let text = kyty_text(|t| t.replace("from: settings.extra_args", "from: settings.nothing"));
-    refused(&file(&op("replace", &text)), "there is no setting \"nothing\"");
-    refused(&file(&op("add", &PS4_LAB.replace("from: game.path", "from: game.name"))), "unknown value \"game.name\"");
+    refused(&text, "launch.arguments[9]: settings.video_out is an enum; bool_string is incompatible");
+    refused(&kyty_text(|t| t.replace("condition: settings.amd_cpu", "condition: settings.width")), "settings.width is a u32; a condition must be a bool");
+    refused(&kyty_text(|t| t.replace("from: settings.extra_args", "from: settings.nothing")), "there is no setting \"nothing\"");
+    refused(&PS4_LAB.replace("from: game.path", "from: game.name"), "unknown value \"game.name\"");
 }
 
 #[test]
 fn a_default_outside_its_choices_or_range_is_refused() {
-    refused(&file(&op("replace", &kyty_text(|t| t.replace("default: Title", "default: Hd")))), "\"Hd\" is not one of the choices");
-    refused(&file(&op("replace", &kyty_text(|t| t.replace("default: 1920, min: 0", "default: 1920, min: 2000")))), "1920 is outside 2000..=4294967295");
-    refused(&file(&op("replace", &kyty_text(|t| t.replace("[3840, 2160]", "[3840, 2160], [7680, 4320]").replace("max: 4294967295}\n    - {type: u32, key: height", "max: 4000}\n    - {type: u32, key: height")))), "7680 × 4320 is outside the settings' ranges");
+    refused(&kyty_text(|t| t.replace("default: Title", "default: Hd")), "\"Hd\" is not one of the choices");
+    refused(&kyty_text(|t| t.replace("default: 1920, min: 0", "default: 1920, min: 2000")), "1920 is outside 2000..=4294967295");
+    let text = kyty_text(|t| t.replace("[3840, 2160]", "[3840, 2160], [7680, 4320]").replace("max: 4294967295}\n    - {type: u32, key: height", "max: 4000}\n    - {type: u32, key: height"));
+    refused(&text, "7680 × 4320 is outside the settings' ranges");
 }
 
 #[test]
 fn a_row_must_name_something() {
-    refused(&file(&op("replace", &kyty_text(|t| t.replace("present_mode, amd_cpu", "present_mode, amd")))), "there is no setting or composite row \"amd\"");
-    refused(&file(&op("add", &PS4_LAB.replace("rows: [custom_executable]", "rows: [custom_executable, rollback]"))), "\"rollback\" needs a managed build");
+    refused(&kyty_text(|t| t.replace("present_mode, amd_cpu", "present_mode, amd")), "there is no setting or composite row \"amd\"");
+    refused(&PS4_LAB.replace("rows: [custom_executable]", "rows: [custom_executable, rollback]"), "\"rollback\" needs a managed build");
 }
 
 #[test]
 fn another_schema_version_is_refused_before_anything_else() {
     refused("schema_version: 2\nsomething_new: true\n", "schema_version: version 2 is not supported; this launcher reads version 1");
-    refused("operations: []\n", "schema_version: missing");
+    refused("id: kyty\n", "schema_version: missing");
+}
+
+#[test]
+fn an_addon_for_a_newer_launcher_is_refused_before_its_fields_are_read() {
+    let newer = PS4_LAB.replace("schema_version: 1\n", "schema_version: 1\nmin_launcher_version: 1.14.10\nsomething_new: true\n");
+    assert_eq!(parse_at(&newer, "1.14.9").unwrap_err(), "min_launcher_version: the addon needs launcher 1.14.10 or newer; this is 1.14.9");
+    assert!(parse_at(&newer, "1.14.10").unwrap_err().contains("unknown field `something_new`"), "the version passes, then the field fails");
+}
+
+#[test]
+fn min_launcher_version_compares_as_a_semantic_version() {
+    let with = |min: &str| PS4_LAB.replace("schema_version: 1\n", &format!("schema_version: 1\nmin_launcher_version: {min}\n"));
+    for (min, launcher) in [("1.14.3", "1.14.3"), ("1.9.0", "1.14.3"), ("0.0.0", "1.14.3"), ("1.14.0", "1.15.0-beta.1"), ("1.14.3", "1.14.3+build.7")] {
+        assert!(parse_at(&with(min), launcher).is_ok(), "{min} on {launcher}");
+    }
+    assert_eq!(parse_at(&with("1.15.0"), "1.15.0-beta.1").unwrap_err(), "min_launcher_version: the addon needs launcher 1.15.0 or newer; this is 1.15.0 (a pre-release)");
+    assert!(parse_at(&with("2.0.0"), "1.99.99").is_err());
+    for bad in ["1.14", "v1.14.0", "1.14.0-beta", "01.14.0", "1.14.0.1", "\"\""] {
+        assert!(parse_at(&with(bad), "1.14.3").unwrap_err().contains("is not a version like 1.14.0"), "{bad}");
+    }
+    assert!(parse_at(&with("1.14"), "1.14.3").unwrap_err().starts_with("min_launcher_version: "));
+}
+
+#[test]
+fn resource_paths_are_relative_paths() {
+    refused(&PS4_LAB.replace("enabled: true\n", "enabled: true\nicon: ../icon.svg\n"), "is not a relative path");
+    refused(&PS4_LAB.replace("enabled: true\n", "enabled: true\ncontrols: /etc/passwd\n"), "is not a relative path");
+    let lab = apply(&PS4_LAB.replace("enabled: true\n", "enabled: true\nicon: media/icon.svg\ncontrols: controls.yaml\n")).unwrap();
+    assert_eq!((lab.icon.unwrap().as_str(), lab.controls.unwrap().as_str()), ("media/icon.svg", "controls.yaml"));
 }
 
 #[test]
@@ -429,8 +397,8 @@ fn an_alias_bomb_is_refused() {
 
 #[test]
 fn a_tag_is_refused() {
-    refused("schema_version: 1\noperations: !!python/object:os.system []\n", "tags (!tag) are not allowed");
-    refused(&file(&op("add", &PS4_LAB.replace("display_name: PS4 Lab", "display_name: !str PS4 Lab"))), "tags (!tag) are not allowed");
+    refused("schema_version: 1\nid: !!python/object:os.system x\n", "tags (!tag) are not allowed");
+    refused(&PS4_LAB.replace("display_name: PS4 Lab", "display_name: !str PS4 Lab"), "tags (!tag) are not allowed");
 }
 
 #[test]
@@ -442,73 +410,32 @@ fn a_file_that_is_too_large_is_refused() {
 #[test]
 fn too_many_items_are_refused() {
     let many: String = (0..=MAX_ITEMS).map(|i| format!("    - {{kind: literal, text: --a{i}}}\n")).collect();
-    let text = kyty_text(|t| t.replace("  arguments:\n", &format!("  arguments:\n{many}")));
-    refused(&file(&op("replace", &text)), "the limit is 64");
+    refused(&kyty_text(|t| t.replace("  arguments:\n", &format!("  arguments:\n{many}"))), "the limit is 64");
 }
 
 #[test]
 fn the_norway_problem_cannot_change_a_value() {
     // `no` stays text in a text field; a switch must be true or false.
     let lab = PS4_LAB.replace("display_name: PS4 Lab", "display_name: no").replace("  env: {}\n", "  env: {NO: no, YES: yes}\n");
-    let r = apply(&file(&op("add", &lab))).unwrap();
-    let e = r.get("ps4-lab").unwrap();
+    let e = apply(&lab).unwrap();
     assert_eq!(e.display_name, "no");
     assert_eq!(e.launch.env.values().collect::<Vec<_>>(), ["no", "yes"]);
-    refused(&file(&op("add", &PS4_LAB.replace("enabled: true", "enabled: yes"))), "enabled");
-    refused(&file(&op("add", &PS4_LAB.replace("include_custom_basename: true", "include_custom_basename: on"))), "include_custom_basename");
+    refused(&PS4_LAB.replace("enabled: true", "enabled: yes"), "enabled");
+    refused(&PS4_LAB.replace("include_custom_basename: true", "include_custom_basename: on"), "include_custom_basename");
 }
 
 #[test]
 fn a_nul_character_is_refused() {
-    refused(&file(&op("add", &PS4_LAB.replace("text: --game", "text: \"--ga\\0me\""))), "contains a NUL character");
-}
-
-// ------------------------------------------------------------------ loading the user's file
-
-#[test]
-fn without_a_user_file_the_registry_is_the_embedded_one() {
-    let dir = tempfile::tempdir().unwrap();
-    let loaded = Registry::load_with(&dir.path().join("emulators.yaml")).unwrap();
-    assert_eq!((loaded.registry, loaded.user_error), (embedded(), None));
+    refused(&PS4_LAB.replace("text: --game", "text: \"--ga\\0me\""), "contains a NUL character");
 }
 
 #[test]
-fn a_bad_user_file_falls_back_to_the_embedded_one_with_the_reason() {
-    let dir = tempfile::tempdir().unwrap();
-    let path = dir.path().join("emulators.yaml");
-    std::fs::write(&path, file(&format!("{}  - {{op: disable, id: nothing}}\n", op("add", PS4_LAB)))).unwrap();
-    let loaded = Registry::load_with(&path).unwrap();
-    assert_eq!(loaded.registry, embedded(), "nothing of the file applies, not even the valid add");
-    let e = loaded.user_error.unwrap();
-    assert_eq!(e.origin, Origin::User(path.clone()));
-    assert_eq!(e.issues.len(), 1);
-    assert_eq!(e.to_string(), format!("{}:\noperations[1]: there is no emulator \"nothing\"", path.display()));
-    assert!(std::fs::read_to_string(&path).unwrap().contains("nothing"), "the file stays as it is");
+fn every_problem_in_a_document_is_listed() {
+    let text = kyty_text(|t| t.replace("default: Title", "default: Hd").replace("present_mode, amd_cpu", "present_mode, amd"));
+    let e = apply(&text).unwrap_err();
+    assert_eq!(e.lines().count(), 2, "{e}");
 }
 
-#[test]
-fn a_good_user_file_applies() {
-    let dir = tempfile::tempdir().unwrap();
-    let path = dir.path().join("emulators.yaml");
-    std::fs::write(&path, file(&op("add", PS4_LAB))).unwrap();
-    let loaded = Registry::load_with(&path).unwrap();
-    assert!(loaded.user_error.is_none());
-    assert!(loaded.registry.get("ps4-lab").is_some());
-}
-
-#[test]
-fn an_unreadable_or_oversized_user_file_falls_back() {
-    let dir = tempfile::tempdir().unwrap();
-    let path = dir.path().join("emulators.yaml");
-    std::fs::write(&path, vec![b'#'; super::yaml::MAX_BYTES + 1]).unwrap();
-    let loaded = Registry::load_with(&path).unwrap();
-    assert!(loaded.user_error.unwrap().to_string().contains("the limit is 256 KiB"));
-    std::fs::write(&path, [0xff, 0xfe, 0x00]).unwrap();
-    assert!(Registry::load_with(&path).unwrap().user_error.unwrap().to_string().contains("not UTF-8"));
-    let folder = dir.path().join("folder.yaml");
-    std::fs::create_dir(&folder).unwrap();
-    assert!(Registry::load_with(Path::new(&folder)).unwrap().user_error.is_some());
-}
 
 // ------------------------------------------------------------------ resolution
 

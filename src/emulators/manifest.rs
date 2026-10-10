@@ -1,10 +1,10 @@
-//! The manifest's types: what assets/emulators.yaml and the user's override may contain.
+//! The types of an emulator addon's document (emulators/<id>/emulator.yaml).
 //!
 //! Every struct refuses unknown fields, and every closed set of words is an enum, so a typo is
 //! an error, not a silent default. The names of the compiled adapters (`ReleaseSource`,
 //! `Installer`, `VersionStrategy`, …) are the ones in docs/plans/data-driven-emulators.md.
-//! `schemars` turns these types into assets/emulators.schema.json (see `schema.rs`); the doc
-//! comments become the schema's descriptions, which editors show.
+//! `schemars` turns these types into assets/addons/emulators/emulator.schema.json (see
+//! `schema.rs`); the doc comments become the schema's descriptions, which editors show.
 
 use schemars::{json_schema, JsonSchema, Schema, SchemaGenerator};
 use serde::Deserialize;
@@ -143,22 +143,22 @@ impl HttpsUrl {
     }
 }
 
-// ------------------------------------------------------------------ the manifest
+checked_text!(
+    /// A launcher version, "major.minor.patch" (like 1.14.0), compared as a semantic version.
+    LauncherVersion,
+    "^(0|[1-9][0-9]*)\\.(0|[1-9][0-9]*)\\.(0|[1-9][0-9]*)$",
+    |s| {
+        let part = |p: &str| !p.is_empty() && p.len() <= 9 && p.chars().all(|c| c.is_ascii_digit()) && (p == "0" || !p.starts_with('0'));
+        let parts: Vec<&str> = s.split('.').collect();
+        if parts.len() == 3 && parts.iter().all(|p| part(p)) { Ok(()) } else { Err(format!("{s:?} is not a version like 1.14.0")) }
+    }
+);
 
-/// The embedded manifest (assets/emulators.yaml).
-#[derive(Clone, Debug, PartialEq, Deserialize, JsonSchema)]
-#[serde(deny_unknown_fields)]
-pub struct Manifest {
-    /// The format's version. This launcher reads version 1.
-    pub schema_version: u32,
-    /// The emulator that runs each console's games when a game has no choice of its own.
-    pub defaults: Defaults,
-    pub emulators: Vec<Emulator>,
-}
+// ------------------------------------------------------------------ console defaults
 
-/// The default emulator for each console.
-#[derive(Clone, Debug, Default, PartialEq, Deserialize, JsonSchema)]
-#[serde(deny_unknown_fields)]
+/// The emulator for each console's games when neither the game nor the user chose one. The
+/// launcher's bundle holds them (bundle.rs), not the addon documents.
+#[derive(Clone, Debug, Default, PartialEq)]
 pub struct Defaults {
     pub ps5: Option<EmulatorId>,
     pub ps4: Option<EmulatorId>,
@@ -224,10 +224,16 @@ pub enum Os {
     Macos,
 }
 
-/// One emulator.
+/// One emulator addon: the whole of emulators/<id>/emulator.yaml.
 #[derive(Clone, Debug, PartialEq, Deserialize, JsonSchema)]
 #[serde(deny_unknown_fields)]
 pub struct Emulator {
+    /// The format's version; it selects the meaning of the rest. This launcher reads version 1.
+    pub schema_version: u32,
+    /// The oldest launcher that can use this addon. An older one leaves it untouched and
+    /// unavailable.
+    pub min_launcher_version: Option<LauncherVersion>,
+    /// The same as the addon's folder name.
     pub id: EmulatorId,
     /// The name the launcher shows.
     pub display_name: String,
@@ -235,6 +241,10 @@ pub struct Emulator {
     pub consoles: Vec<Console>,
     /// A disabled emulator keeps its settings but runs no games.
     pub enabled: bool,
+    /// An image file in the addon's folder.
+    pub icon: Option<RelPath>,
+    /// A file in the addon's folder with the keyboard and controller reference.
+    pub controls: Option<RelPath>,
     pub release: ReleaseSource,
     /// How a managed build is installed. Required with a `github_latest` release.
     pub install: Option<Installer>,
@@ -1109,53 +1119,4 @@ pub enum Rosetta {
 pub enum MoltenVk {
     /// The release ships MoltenVK.
     Bundled,
-}
-
-// ------------------------------------------------------------------ the user's override
-
-/// The user's file (~/.config/ps5-launcher/emulators.yaml): changes to the embedded manifest.
-/// The whole file applies, or none of it.
-#[derive(Clone, Debug, PartialEq, Deserialize, JsonSchema)]
-#[serde(deny_unknown_fields)]
-pub struct Override {
-    pub schema_version: u32,
-    /// Replaces the named consoles' defaults.
-    pub defaults: Option<Defaults>,
-    #[serde(default)]
-    pub operations: Vec<Operation>,
-}
-
-/// One change. `add` and `replace` carry a `definition`; `disable` names an `id`.
-///
-/// A struct, not a tagged enum: serde buffers a tagged enum's content, and errors inside a
-/// buffered definition lose their path ("operations" instead of "operations[0].definition.enabled").
-#[derive(Clone, Debug, PartialEq, Deserialize, JsonSchema)]
-#[serde(deny_unknown_fields)]
-pub struct Operation {
-    pub op: OperationKind,
-    pub id: Option<EmulatorId>,
-    pub definition: Option<Box<Emulator>>,
-}
-
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Deserialize, JsonSchema)]
-#[serde(rename_all = "snake_case")]
-pub enum OperationKind {
-    /// A new emulator; its id must be new.
-    Add,
-    /// A whole new definition for an existing emulator. Its installs and settings stay.
-    Replace,
-    /// The emulator stays defined, with its settings, but runs no games.
-    Disable,
-}
-
-impl Operation {
-    /// The emulator it changes, or why the operation is malformed.
-    pub fn target(&self) -> Result<&EmulatorId, &'static str> {
-        match (self.op, &self.id, &self.definition) {
-            (OperationKind::Add | OperationKind::Replace, None, Some(d)) => Ok(&d.id),
-            (OperationKind::Add | OperationKind::Replace, _, _) => Err("add and replace take a definition, and no id"),
-            (OperationKind::Disable, Some(id), None) => Ok(id),
-            (OperationKind::Disable, _, _) => Err("disable takes an id, and no definition"),
-        }
-    }
 }
