@@ -26,7 +26,7 @@ chmod 0600 /etc/ssh/sshd_config.d/10-ps5-launcher-os-test.conf
 %end
 
 # Runs after the release kickstart's %pre (they run in file order), so this source wins: the
-# candidate by digest, following the test's upgrade tag.
+# candidate by digest, following the tag the test moves (FOLLOW_TAG in install-test.sh).
 %pre --erroronfail --log=/tmp/ps5-launcher-os-test-pre.log
 echo "bootc --source-imgref=registry:@SOURCE@ --target-imgref=@TARGET@" > /tmp/ps5-launcher-os-source.ks
 %end

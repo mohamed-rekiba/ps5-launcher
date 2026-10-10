@@ -2,7 +2,7 @@
 # CI only. Checks a booted PS5 Launcher OS, as root, and prints one "ok" or "FAIL" line for
 # each check, then "RESULT: PASS" or "RESULT: FAIL". It exits non-zero on any failure.
 #
-#   check-system main|nvidia [--session]
+#   check-system main|nvidia [--session] [--enforced]
 #
 # main or nvidia: the image that must be running. --session also checks the login: SDDM logs the
 # user in to the PS5 Launcher session, and either the launcher runs, or (in a VM without a GPU)
@@ -15,10 +15,25 @@
 # recovery recorded), and on a --session run that ended in Plasma, say "launcher not healthy
 # (Plasma fallback)".
 #
+# Every run also checks the image signature policy and ps5-signature-policy.service: it ran, and
+# its state is not "failed". --enforced (the install test, which installs our repository from the
+# registry) also requires that bootc stores the enforcement: `bootc status --json` shows
+# "signature": "containerPolicy" in .spec.image (bootc 1.16.13: crates/lib/src/spec.rs 73-83,
+# ImageSignature with rename_all = "camelCase"; docs/src/host-v1.schema.json 425-447). The boot
+# test's qcow2 follows a local image, so there the state is "not-our-image".
+#
 # The boot test image runs it from ps5-boottest-report.service; the install test runs it over SSH.
 set -u
 want=${1:?main or nvidia}
-session=${2:-}
+session=""
+enforced=""
+for arg in "${@:2}"; do
+    case $arg in
+    --session) session=--session ;;
+    --enforced) enforced=--enforced ;;
+    *) echo "unknown option: $arg" >&2; exit 2 ;;
+    esac
+done
 failures=0
 
 ok() { echo "ok   $*"; }
@@ -136,6 +151,35 @@ check "logind suspends on the power key" \
 check "the journal is kept on disk" test -d /var/log/journal
 # bootupd joins the image's GRUB drop-ins into grub.cfg at install time.
 check "the GRUB menu shows for 5 seconds" grep -q "BEGIN 13_ps5-launcher-os.cfg" /boot/grub2/grub.cfg
+
+# The image signature policy, and the unit that makes bootc enforce it (it runs for up to 35 min
+# after the start: up to 2 min for a network, then bootc switch).
+key=/usr/share/ps5-launcher/signing/cosign.pub
+check "the image signing key is installed" test -s "$key"
+check "the containers policy rejects by default" \
+    test "$(jq -c .default /etc/containers/policy.json 2>/dev/null)" = '[{"type":"reject"}]'
+check "  and requires the signing key for one repository" \
+    sh -c "jq -e --arg k '$key' '[.transports.docker[][] | .keyPath == \$k and .type == \"sigstoreSigned\"] == [true]' /etc/containers/policy.json"
+check "sigstore attachments are on for it" grep -q "use-sigstore-attachments: true" /etc/containers/registries.d/ps5-launcher.yaml
+for _ in $(seq 420); do
+    case $(systemctl show -p ActiveState --value ps5-signature-policy.service) in
+    activating | active | deactivating) sleep 5 ;;
+    *) break ;;
+    esac
+done
+sigstate=/var/lib/ps5-launcher-os/signature-policy.json
+check "ps5-signature-policy.service ran and finished" \
+    sh -c "systemctl show -p ExecMainStartTimestampMonotonic --value ps5-signature-policy.service | grep -qv '^0$' &&
+        ! systemctl is-active ps5-signature-policy.service"
+check "  its state is readable by the launcher" test "$(stat -c %a "$sigstate" 2>/dev/null)" = 644
+check "  and is not failed" sh -c "jq -e '.version == 1 and .state != \"failed\"' '$sigstate'"
+spec_signature=$(bootc status --json --format-version=1 2>/dev/null | sed -n '/{/,$p' | jq -r '.spec.image.signature // "none"')
+if [ "$enforced" = --enforced ]; then
+    check "  it says enforced" test "$(jq -r .state "$sigstate" 2>/dev/null)" = enforced
+    check "  and bootc stores the enforcement (spec signature containerPolicy)" test "$spec_signature" = containerPolicy
+    check "  and the unit exited 0" test "$(systemctl show -p ExecMainStatus --value ps5-signature-policy.service)" = 0
+fi
+echo "     signature policy: $(jq -c '{state, reason, image}' "$sigstate" 2>/dev/null); bootc spec signature: $spec_signature"
 
 # The boot health check (ps5-boot-health.service) runs for up to 180 s after the start.
 health=/var/lib/ps5-launcher-os/health

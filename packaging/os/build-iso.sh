@@ -3,8 +3,10 @@
 # packaging/os/ps5-launcher-os.ks. Runs in a Fedora container (it needs lorax's mkksiso, and
 # Fedora's signing key from /etc/pki/rpm-gpg):
 #   docker run --rm --privileged -v "$PWD:/src" -w /src -e IMAGE=ghcr.io/OWNER/ps5-launcher-fedora \
-#       quay.io/fedora/fedora:44 packaging/os/build-iso.sh ps5-launcher-fedora-x86_64.iso [EXTRA.ks]
-# IMAGE: the image name without tag. EXTRA.ks is appended to the kickstart (the unattended
+#       -e MAIN_DIGEST=sha256:... -e NVIDIA_DIGEST=sha256:... quay.io/fedora/fedora:44 packaging/os/build-iso.sh ps5-launcher-fedora-x86_64.iso [EXTRA.ks]
+# IMAGE: the image name without tag. MAIN_DIGEST, NVIDIA_DIGEST: the sha256:... digests the ISO
+# installs (the release ISO: the promoted digests, checked against the signing key first; the
+# installer itself checks no signature, so the ISO never installs a tag). EXTRA.ks is appended to the kickstart (the unattended
 # install test uses it; releases do not). SECUREBOOT_CERT_FILE: the certificate of the key the
 # NVIDIA image's modules are signed with. ISO_CACHE: where Fedora's ISO is kept between runs.
 # KERNEL_ARGS: more installer kernel arguments (the install test sends the installer to the serial
@@ -28,6 +30,14 @@ if ! [[ $image =~ ^[a-z0-9][a-z0-9./_-]*$ ]]; then
     echo "Invalid image name: $image" >&2
     exit 1
 fi
+main_digest=${MAIN_DIGEST:-}
+nvidia_digest=${NVIDIA_DIGEST:-}
+for digest in "$main_digest" "$nvidia_digest"; do
+    if ! [[ $digest =~ ^sha256:[0-9a-f]{64}$ ]]; then
+        echo "MAIN_DIGEST and NVIDIA_DIGEST must be sha256:<64 hex>, got '$digest'" >&2
+        exit 1
+    fi
+done
 if [ ! -f "$cert" ]; then
     echo "No Secure Boot certificate at $cert: see packaging/os/secureboot/README.md" >&2
     exit 1
@@ -53,7 +63,12 @@ echo "$want  $cache/$iso" | sha256sum -c -
 files=$(mktemp -d)
 cp "$cert" "$files/ps5-launcher-os-secureboot.der"
 ks=$(mktemp -d)/ps5-launcher-os.ks
-sed "s|@IMAGE@|$image|" packaging/os/ps5-launcher-os.ks > "$ks"
+sed -e "s|@IMAGE@|$image|" -e "s|@MAIN_DIGEST@|$main_digest|" -e "s|@NVIDIA_DIGEST@|$nvidia_digest|" \
+    packaging/os/ps5-launcher-os.ks > "$ks"
+if grep -q '@[A-Z_]*@' "$ks"; then
+    echo "the kickstart still has a placeholder: $(grep -o '@[A-Z_]*@' "$ks" | head -1)" >&2
+    exit 1
+fi
 if [ -n "$extra" ]; then
     cat "$extra" >> "$ks"
 fi
