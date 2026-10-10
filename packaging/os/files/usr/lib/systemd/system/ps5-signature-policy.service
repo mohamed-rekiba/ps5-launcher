@@ -5,15 +5,16 @@ Documentation=file:/usr/libexec/ps5-launcher-os/signature-policy
 # graphical start: Type=exec does not hold multi-user.target back, and the script waits for the
 # network itself (an After=network-online.target would hold the login screen back on a PC
 # without a network). Not in recovery mode.
-After=local-fs.target
+After=local-fs.target ps5-boot-health.service
 ConditionKernelCommandLine=!systemd.unit=ps5-recovery.target
 
 [Service]
 Type=exec
 ExecStart=/usr/libexec/ps5-launcher-os/signature-policy
 Restart=no
-# The script waits up to 130 s for a network and 60 s for the lock; bootc switch gets 1800 s.
-RuntimeMaxSec=2100
+# The script waits up to 130 s for a network, 190 s for the boot health check and 60 s for the
+# lock; bootc switch gets 1800 s.
+RuntimeMaxSec=2300
 
 [Install]
 WantedBy=multi-user.target

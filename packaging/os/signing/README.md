@@ -84,7 +84,8 @@ repository.
    Keep `cosign.pub` with the backup.
 
 4. Create the environment `os-fedora-signing` (repository Settings → Environments → New
-   environment). Under *Deployment branches and tags*, choose *Selected branches and tags* and
+   environment), **before** you add its secrets, and before the workflow first runs: GitHub
+   creates an environment the first time a workflow names it, with no rules at all. Under *Deployment branches and tags*, choose *Selected branches and tags* and
    add only `main`. Add no required reviewers: every scheduled run signs its candidates. Protect
    the `main` branch itself (Settings → Rules), so only reviewed changes reach it.
 

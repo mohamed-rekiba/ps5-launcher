@@ -123,7 +123,8 @@ On the PC:
   starts with an unverified origin. `ps5-signature-policy.service`
   ([`signature-policy`](files/usr/libexec/ps5-launcher-os/signature-policy)) runs at every start,
   beside the graphical start, and acts only on a fresh install (nothing staged, no rollback
-  deployment) that follows our repository: it waits up to 2 minutes for a network, then runs
+  deployment) that follows our repository: it waits up to 2 minutes for a network and up to
+  190 s for the boot health check to finish (which waits only 20 s for the shared lock), then runs
   `bootc switch --enforce-container-sigpolicy` to the tag it follows (main), or to the booted
   digest (NVIDIA, which follows digests). That stages the same image (or a newer signed one on
   main), enforced from the next restart on. Without a network it fails, and the next start tries

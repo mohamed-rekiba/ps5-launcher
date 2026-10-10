@@ -19,10 +19,12 @@ sed -e "s|^os_release=/usr/lib/ps5-launcher/os-release$|os_release=$work/os-rele
     -e "s|^state=/var/lib/ps5-launcher-os/signature-policy.json$|state=$work/state/signature-policy.json|" \
     -e "s|^lock_file=/run/ps5-launcher-os.lock$|lock_file=$work/lock|" \
     -e "s|^lock_wait=60$|lock_wait=1|" \
+    -e "s|^health_wait=190$|health_wait=4|" \
     -e "s|^PATH=/usr/sbin:/usr/bin$|PATH=$work/bin:/usr/sbin:/usr/bin:/bin|" \
     "$here/files/usr/libexec/ps5-launcher-os/signature-policy" > "$work/signature-policy"
 chmod +x "$work/signature-policy"
-for fixed in "^os_release=$work/" "^state=$work/" "^lock_file=$work/" "^lock_wait=1$" "^PATH=$work/bin:"; do
+for fixed in "^os_release=$work/" "^state=$work/" "^lock_file=$work/" "^lock_wait=1$" "^health_wait=4$" \
+    "^PATH=$work/bin:"; do
     grep -q "$fixed" "$work/signature-policy" || { echo "FAIL the fixed line $fixed was not found"; exit 1; }
 done
 repo=ghcr.io/owner/ps5-launcher-fedora
@@ -42,7 +44,9 @@ switch)
 esac
 FAKE
 printf '#!/bin/sh\nexit 0\n' > "$work/bin/nm-online"
-chmod +x "$work/bin/bootc" "$work/bin/nm-online"
+# systemctl: the boot health check is active while $work/health-active exists.
+printf '#!/bin/sh\n[ -e "%s/health-active" ]\n' "$work" > "$work/bin/systemctl"
+chmod +x "$work/bin/bootc" "$work/bin/nm-online" "$work/bin/systemctl"
 
 status() { # IMAGE TRANSPORT SIGNATURE STAGED ROLLBACK (signature "" = none; staged/rollback true|false)
     jq -n --arg i "$1" --arg t "$2" --arg s "$3" --argjson st "$4" --argjson rb "$5" --arg d "$booted" '{
@@ -110,6 +114,22 @@ check "  with bootc's reason" grep -q "A signature was required" "$work/state/si
 rm "$work/switch-fails"
 check "the next start tries again, and enforces" run 0
 check "  enforced" test "$(state)" = enforced
+
+status "$repo:main" registry "" false false
+touch "$work/health-active"
+(sleep 2 && rm "$work/health-active") &
+start=$(date +%s)
+check "the switch waits for the boot health check to end" run 0
+check "  then switches" grep -qx "switch --enforce-container-sigpolicy $repo:main" "$work/bootc.log"
+check "  after it ended" test $(($(date +%s) - start)) -ge 2
+wait
+touch "$work/health-active"
+start=$(date +%s)
+status "$repo:main" registry "" false false
+check "a boot health check that does not end is waited for only a while" run 0
+check "  then the switch runs anyway" test -s "$work/bootc.log"
+check "  after the wait" test $(($(date +%s) - start)) -ge 4
+rm "$work/health-active"
 
 status "$repo:main" registry "" false false
 flock "$work/lock" sleep 3 &

@@ -40,6 +40,7 @@ os_release=/usr/lib/ps5-launcher/os-release
 state=/var/lib/ps5-launcher-os/signature-policy.json
 lock_file=/run/ps5-launcher-os.lock
 lock_wait=60
+health_wait=190
 deadline=1800
 PATH=/usr/sbin:/usr/bin
 export PATH
@@ -105,6 +106,13 @@ esac
 
 # Up to 2 minutes for a network, before the lock; bootc says what is wrong when there is none.
 timeout -k 5 130 nm-online -q -t 120 || log "no network yet"
+# The boot health check decides first: it waits only 20 s for the shared lock and records no
+# attempt without it, and bootc switch holds the lock for minutes. A fresh install has nothing to
+# roll back to, so waiting loses nothing. Its unit's hard limit is 180 s.
+for _ in $(seq "$health_wait"); do
+    systemctl is-active --quiet ps5-boot-health.service || break
+    sleep 1
+done
 exec 9>>"$lock_file"
 if ! flock -w "$lock_wait" 9; then
     record failed "another system task held the lock; the next start tries again" "$image"
