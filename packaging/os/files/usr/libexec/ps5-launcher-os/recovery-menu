@@ -43,7 +43,8 @@ header() {
 
 # Runs the helper with its output on screen. Sets $code.
 run_helper() {
-    say "Running: helper $*" "(a download can take several minutes)"
+    say "Running: helper $*"
+    [ "$1" != switch ] || say "(the download can take several minutes)"
     "$helper" "$@" 2>&1 | tee "$out_file"
     code=${PIPESTATUS[0]}
 }

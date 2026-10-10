@@ -175,8 +175,9 @@ The launcher opens its own Power menu on the power key, in the OS only:
 
 ## The firewall
 
-firewalld runs, with Fedora's default zone: incoming connections are refused except SSH (the SSH
-server itself is off) and DHCPv6. No Samba service is open; file sharing comes later.
+firewalld runs, with Fedora's default zone `public`: incoming connections are refused except
+`ssh` (the SSH server itself is off), `mdns` and `dhcpv6-client`. No Samba service is open; file
+sharing comes later.
 
 ## Build it yourself
 
