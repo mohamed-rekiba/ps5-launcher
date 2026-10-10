@@ -278,8 +278,9 @@ Find the current base digest with
 
 ## The workflow and its gates
 
-`.github/workflows/os-fedora.yml` runs every day, after a launcher release (`workflow_call`), and
-by hand. It resolves its inputs once: the launcher release (the input `launcher_tag`, or the
+`.github/workflows/os-fedora.yml` runs after each launcher release (release.yml calls it with
+the new tag, `secrets: inherit`, and no promotion yet) and by hand. Its daily schedule is off
+until the keys exist (a TODO in the file). It resolves its inputs once: the launcher release (the input `launcher_tag`, or the
 latest release), and the current digest of `fedora-bootc:44`, so each daily build picks up
 Fedora's updates. Both go into the job summary and the image labels.
 
@@ -379,8 +380,8 @@ Then set it to `enabled` in a separate, reviewed change that cites that run's id
    `promote` on would promote right after the automated gates.
 5. **Branch protection on `main`:** the two environments trust `main`, so protect it (Settings →
    Rules): changes only through reviewed pull requests.
-6. **After a launcher release:** to build the image from release.yml, add a job there that calls
-   this workflow with `secrets: inherit` (not done yet).
+6. **After a launcher release:** release.yml's `os` job already calls this workflow. Once the
+   release guard is lifted, set its `promote` and `attach_iso` to true.
 7. Optional repository variables: `OS_IMAGE_OWNER` (a fork's registry name), `OS_VM_RUNNER` (a
    runner with KVM).
 
@@ -421,4 +422,4 @@ switches to the candidate by digest.
 - Recovery mode is reached only by editing the GRUB entry; there is no menu entry for it, and
   PCs installed before the GRUB drop-in keep the 1-second menu.
 - Old `testing-*` tags are not deleted from the registry.
-- release.yml does not call this workflow yet.
+- release.yml calls this workflow without promotion and the ISO: the release guard is still on.

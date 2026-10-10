@@ -58,5 +58,17 @@ jobs:
           GH_REPO: ${{ github.repository }}
         run: gh release edit "${{ needs.release-please.outputs.tag }}" --draft=false
 
-  # The OS image is not built here for now: os-fedora.yml joins this workflow (with
-  # `secrets: inherit`) once its keys exist.
+  # PS5 Launcher OS with the launcher release just published: os-fedora.yml builds, signs and
+  # tests the main and NVIDIA candidates, and keeps the test ISO as a run artifact. Promotion and
+  # the release ISO stay off: os-fedora.yml's release guard (OS_IMAGE_SIGNING) refuses them until
+  # signing has run end to end. TODO: pass promote and attach_iso as true once that guard is
+  # lifted; promotion then still waits for the os-fedora-release environment's approval.
+  os:
+    needs: [release-please, publish]
+    permissions:
+      contents: write   # attach_iso uploads to the release
+      packages: write   # the candidates go to ghcr.io
+    uses: ./.github/workflows/os-fedora.yml
+    with:
+      launcher_tag: ${{ needs.release-please.outputs.tag }}
+    secrets: inherit
