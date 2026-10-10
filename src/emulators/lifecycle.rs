@@ -37,7 +37,7 @@ use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use std::collections::BTreeMap;
 use std::fs::{self, File};
-use std::io::{self, Write};
+use std::io::{self, Read, Write};
 use std::os::unix::ffi::OsStrExt;
 use std::os::unix::fs::OpenOptionsExt;
 use std::os::unix::io::AsRawFd;
@@ -90,9 +90,17 @@ fn digest_at(root: &Path, path: &Path) -> io::Result<String> {
     digest_below(root, &parts)
 }
 
+/// The most bytes in one addon folder the launcher digests.
+pub const MAX_FOLDER_BYTES: u64 = 64 * 1024 * 1024;
+/// The most files and folders in one addon folder.
+pub const MAX_ENTRIES: usize = 4096;
+/// The deepest folder in an addon folder.
+pub const MAX_DEPTH: usize = 16;
+
 fn digest_dir(dir: &Dir) -> io::Result<String> {
     let mut found = Vec::new();
-    collect(dir, &[], &mut found)?;
+    let mut budget = Budget { entries: 0, bytes: 0 };
+    collect(dir, &[], 0, &mut budget, &mut found)?;
     found.sort();
     let mut h = Sha256::new();
     for (rel, content) in found {
@@ -101,13 +109,40 @@ fn digest_dir(dir: &Dir) -> io::Result<String> {
     Ok(format!("{:x}", h.finalize()))
 }
 
-fn collect(dir: &Dir, prefix: &[u8], found: &mut Vec<(Vec<u8>, Vec<u8>)>) -> io::Result<()> {
+/// What a digest has used so far of its limits.
+struct Budget {
+    entries: usize,
+    bytes: u64,
+}
+
+fn collect(dir: &Dir, prefix: &[u8], depth: usize, budget: &mut Budget, found: &mut Vec<(Vec<u8>, Vec<u8>)>) -> io::Result<()> {
+    if depth > MAX_DEPTH {
+        return Err(io::Error::other(format!("the folder is more than {MAX_DEPTH} levels deep")));
+    }
     for (name, kind) in dir.entries()? {
+        budget.entries += 1;
+        if budget.entries > MAX_ENTRIES {
+            return Err(io::Error::other(format!("the folder holds more than {MAX_ENTRIES} files and folders")));
+        }
         let rel = if prefix.is_empty() { name.as_bytes().to_vec() } else { [prefix, b"/", name.as_bytes()].concat() };
         let shown = String::from_utf8_lossy(&rel).into_owned();
         match kind {
-            Kind::Dir => collect(&dir.dir(&name).map_err(|e| safefs::named(&shown, e))?, &rel, found)?,
-            Kind::File => found.push((rel, dir.read(&name, u64::MAX).map_err(|e| safefs::named(&shown, e))?)),
+            Kind::Dir => collect(&dir.dir(&name).map_err(|e| safefs::named(&shown, e))?, &rel, depth + 1, budget, found)?,
+            Kind::File => {
+                // The size is known before a byte is read: fstat in `file`.
+                let file = dir.file(&name, safefs::MAX_FILE).map_err(|e| safefs::named(&shown, e))?;
+                let len = file.metadata()?.len();
+                budget.bytes += len;
+                if budget.bytes > MAX_FOLDER_BYTES {
+                    return Err(io::Error::other(format!("the folder holds more than {} KiB", MAX_FOLDER_BYTES / 1024)));
+                }
+                let mut content = Vec::new();
+                file.take(len.saturating_add(1)).read_to_end(&mut content)?;
+                if content.len() as u64 > len {
+                    return Err(io::Error::other(format!("{shown} grew while it was read")));
+                }
+                found.push((rel, content));
+            }
             Kind::Link => return Err(safefs::named(&shown, Refused::Link)),
             Kind::Other => return Err(io::Error::other(format!("{shown} is not a file or a folder"))),
         }

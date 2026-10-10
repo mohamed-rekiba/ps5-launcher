@@ -310,6 +310,16 @@ mod tests {
     }
 
     #[test]
+    fn a_resource_has_a_size_limit() {
+        let r = root();
+        let folder = add(r.path(), "ps4-lab", "ps4-lab");
+        fs::File::create(folder.join("icon.svg")).unwrap().set_len(16 * 1024 * 1024 + 1).unwrap();
+        fs::write(folder.join("controls.yaml"), "{}").unwrap();
+        with_resources(&folder, "icon.svg", "controls.yaml");
+        assert_eq!(rejected(&scan(r.path(), now())), [("ps4-lab".to_string(), "icon: icon.svg is 16385 KiB; the limit is 16384 KiB".to_string())]);
+    }
+
+    #[test]
     fn a_folder_without_a_readable_document_is_rejected() {
         let r = root();
         fs::create_dir_all(r.path().join("emulators/empty")).unwrap();

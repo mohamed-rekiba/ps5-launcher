@@ -8,7 +8,7 @@ use std::cell::Cell;
 use std::collections::BTreeSet;
 use std::fs;
 use std::io;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::time::Duration;
 
 // The digests of the test defaults below, from outside the code under test:
@@ -712,6 +712,49 @@ fn a_fifo_in_an_addon_does_not_stall_the_digest() {
     // SAFETY: a valid C string; the result is checked.
     assert_eq!(unsafe { libc::mkfifo(fifo.as_ptr(), 0o644) }, 0);
     assert!(digest_folder(r.path()).unwrap_err().to_string().contains("pipe"));
+}
+
+// ------------------------------------------------------------------ size limits
+
+/// A file of `len` bytes that takes no space (sparse).
+fn big(path: &Path, len: u64) {
+    fs::File::create(path).unwrap().set_len(len).unwrap();
+}
+
+#[test]
+fn the_digest_has_limits() {
+    let r = root();
+    big(&r.path().join("huge.png"), 16 * 1024 * 1024 + 1);
+    assert_eq!(digest_folder(r.path()).unwrap_err().to_string(), "huge.png is 16385 KiB; the limit is 16384 KiB");
+
+    let r = root();
+    for i in 0..5 {
+        big(&r.path().join(format!("part{i}.png")), 15 * 1024 * 1024);
+    }
+    assert_eq!(digest_folder(r.path()).unwrap_err().to_string(), "the folder holds more than 65536 KiB");
+
+    let r = root();
+    for i in 0..=4096 {
+        fs::write(r.path().join(i.to_string()), "").unwrap();
+    }
+    assert_eq!(digest_folder(r.path()).unwrap_err().to_string(), "the folder holds more than 4096 files and folders");
+
+    let r = root();
+    let deep: PathBuf = (0..17).map(|i| i.to_string()).collect();
+    fs::create_dir_all(r.path().join(&deep)).unwrap();
+    assert_eq!(digest_folder(r.path()).unwrap_err().to_string(), "the folder is more than 16 levels deep");
+}
+
+#[test]
+fn a_huge_file_in_a_copy_counts_as_a_change_and_does_not_hang_the_start() {
+    let r = root();
+    run(r.path(), &[kyty_v1()]);
+    big(&r.path().join("emulators/kyty/media/video.mp4"), 1 << 40);
+    let start = std::time::Instant::now();
+    let problems = run(r.path(), &[kyty_v2()]);
+    assert!(start.elapsed() < Duration::from_secs(5));
+    assert_eq!(problems.len(), 1, "offered, never replaced: {problems:?}");
+    assert_eq!(read(r.path(), "emulators/kyty/emulator.yaml"), "kyty v1\n");
 }
 
 #[test]
