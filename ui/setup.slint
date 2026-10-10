@@ -2,9 +2,9 @@
 // like the PS5's own: the steps on top, the step's title and text, then the System page's own rows
 // and cards (the same components as Settings), and the buttons at the bottom, the main one last.
 
-import { S, Theme, Zone, SettingData, NvCard, PairCard, SetupView } from "theme.slint";
+import { S, Theme, Zone, SettingData, PairCard, SetupView } from "theme.slint";
 import { KeyCap } from "widgets.slint";
-import { SettingRows, KeySteps, NvidiaCard, PairSteps } from "settings.slint";
+import { SettingRows, PairSteps } from "settings.slint";
 import { PowerButton } from "power.slint";
 
 export component SetupPage inherits Rectangle {
@@ -16,9 +16,6 @@ export component SetupPage inherits Rectangle {
     in property <int> edit-index: -1;
     in-out property <string> edit-text;
     in-out property <length> scroll-y;
-    in property <[string]> key;
-    in property <string> key-last;
-    in property <NvCard> nv;
     in property <PairCard> pair;
     in property <bool> pad;
     in property <bool> osk;
@@ -99,9 +96,7 @@ export component SetupPage inherits Rectangle {
                     width: col.width;
                     height: self.preferred-height;
                     padding-bottom: (24px * S.k);
-                    if root.nv.show: NvidiaCard { card: root.nv; text-w: col.width - (56px * S.k); }
                     if root.pair.show: PairSteps { card: root.pair; text-w: col.width - (56px * S.k); }
-                    if root.key.length > 0: KeySteps { digits: root.key; text-w: col.width - (56px * S.k); last: root.key-last; }
                     SettingRows {
                         rows: root.rows;
                         selected: root.zone == Zone.settings ? root.idx : -1;

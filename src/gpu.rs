@@ -123,36 +123,10 @@ pub fn fallback_name(card: &Card) -> String {
         INTEL => "Intel",
         _ => "Unknown",
     };
-    format!("{vendor} graphics card ({:04x}:{:04x})", card.vendor, card.device)
-}
-
-/// Whether the NVIDIA driver supports an NVIDIA card, by its PCI device ID.
-#[derive(Clone, Copy, PartialEq, Eq, Debug)]
-pub enum Support {
-    /// Turing and newer: the NVIDIA image's open kernel modules support it.
-    Supported,
-    /// Maxwell, Pascal, Volta and older: no NVIDIA image for it.
-    Old,
-    /// Neither: a card newer than the list, or an ID the list does not have.
-    Unknown,
-}
-
-/// The first device ID of Turing. NVIDIA numbers its device IDs by generation: the newest
-/// before Turing are Volta's GV100 (0x1DB1 to 0x1DBA) and Pascal's GP108 (up to 0x1D5x) in the
-/// PCI ID repository (https://pci-ids.ucw.cz/read/PC/10de), and the first ID in NVIDIA's own list
-/// of Turing and newer cards is 0x1E02 (src/nvidia_ids.rs).
-const TURING_FIRST: u16 = 0x1E00;
-
-/// The answer for an NVIDIA card's device ID: on NVIDIA's list of the open kernel modules, older
-/// than Turing, or not known.
-pub fn nvidia_support(device: u16) -> Support {
-    if crate::nvidia_ids::OPEN_MODULES.binary_search(&device).is_ok() {
-        Support::Supported
-    } else if device < TURING_FIRST {
-        Support::Old
-    } else {
-        Support::Unknown
-    }
+    format!(
+        "{vendor} graphics card ({:04x}:{:04x})",
+        card.vendor, card.device
+    )
 }
 
 /// The Display page's driver line.
@@ -166,14 +140,6 @@ pub fn driver_text(card: &Card, nvidia_version: Option<&str>) -> String {
         None => "Driver: none loaded".into(),
     }
 }
-
-/// The PC's boot ID (`/proc/sys/kernel/random/boot_id`): it changes at every start, so the
-/// NVIDIA flow knows a restart happened.
-pub fn boot_id(path: &Path) -> String {
-    std::fs::read_to_string(path).map(|s| s.trim().to_string()).unwrap_or_default()
-}
-
-pub const BOOT_ID: &str = "/proc/sys/kernel/random/boot_id";
 
 #[cfg(test)]
 mod tests {
@@ -263,28 +229,6 @@ mod tests {
     }
 
     #[test]
-    fn turing_and_newer_get_the_driver_and_older_cards_do_not() {
-        assert_eq!(nvidia_support(0x1E04), Support::Supported, "RTX 2080 Ti (Turing)");
-        assert_eq!(nvidia_support(0x2182), Support::Supported, "GTX 1660 Ti (Turing, TU116)");
-        assert_eq!(nvidia_support(0x2484), Support::Supported, "RTX 3070 (Ampere)");
-        assert_eq!(nvidia_support(0x2684), Support::Supported, "RTX 4090 (Ada)");
-        assert_eq!(nvidia_support(0x2B85), Support::Supported, "RTX 5090 (Blackwell)");
-        assert_eq!(nvidia_support(0x1C03), Support::Old, "GTX 1060 (Pascal)");
-        assert_eq!(nvidia_support(0x1DB4), Support::Old, "Tesla V100 (Volta)");
-        assert_eq!(nvidia_support(0x13C2), Support::Old, "GTX 970 (Maxwell)");
-        assert_eq!(nvidia_support(0x1180), Support::Old, "GTX 680 (Kepler)");
-        assert_eq!(nvidia_support(0x1E00), Support::Unknown, "in Turing's range, not on the list");
-        assert_eq!(nvidia_support(0x3FFF), Support::Unknown, "newer than the list");
-    }
-
-    #[test]
-    fn the_id_list_is_sorted_and_starts_at_turing() {
-        let ids = crate::nvidia_ids::OPEN_MODULES;
-        assert!(ids.windows(2).all(|w| w[0] < w[1]), "sorted, no duplicates");
-        assert!(ids[0] >= TURING_FIRST);
-    }
-
-    #[test]
     fn the_driver_line() {
         let mut card = Card { vendor: AMD, device: 0x73df, slot: None, driver: Some("amdgpu".into()) };
         assert_eq!(driver_text(&card, None), "Driver: open-source (amdgpu)");
@@ -295,14 +239,5 @@ mod tests {
         assert_eq!(driver_text(&card, None), "Driver: NVIDIA");
         card.driver = None;
         assert_eq!(driver_text(&card, None), "Driver: none loaded");
-    }
-
-    #[test]
-    fn the_boot_id() {
-        let dir = tempfile::tempdir().unwrap();
-        let path = dir.path().join("boot_id");
-        assert_eq!(boot_id(&path), "");
-        std::fs::write(&path, "1b2c\n").unwrap();
-        assert_eq!(boot_id(&path), "1b2c");
     }
 }

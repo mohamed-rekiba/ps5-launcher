@@ -324,11 +324,17 @@ Download artifacts from the run's page (Summary → Artifacts), or with
 
 One-time setup:
 
-- The secret `RELEASE_PLEASE_TOKEN`: a fine-grained personal access token for this repository
-  only, with Contents, Pull requests and Workflows set to "Read and write". A tag pushed with the
-  workflow's own token starts no workflow, so Release Please must push its tag with this token.
-  Without it, release.yml fails with a pointer here. With it, checks also run on the release
-  pull request.
+- Create a GitHub App under Settings → Developer settings → GitHub Apps. Give it repository
+  permissions **Contents, Issues, Pull requests and Workflows: Read and write**; Metadata stays
+  Read-only. No organization or account permissions are needed. Disable webhooks: the workflow
+  creates tokens directly and the app does not receive events.
+- Install the app on **only this repository**. Store its numeric App ID in repository variable
+  `RELEASE_APP_ID`, and the full downloaded PEM private key in repository secret
+  `RELEASE_APP_PRIVATE_KEY`. This is the GitHub App's key, separate from the cosign image key.
+- `release.yml` uses the SHA-pinned official `actions/create-github-app-token` action to mint a
+  token scoped to this repository and these permissions, then passes it to Release Please.
+  The token expires after one hour and is revoked at job completion. Release PRs can trigger CI,
+  and release tags can trigger Package and OS. The old `RELEASE_PLEASE_TOKEN` is no longer used.
 - Protect the `v*` tags (Settings → Rules → Rulesets → New tag ruleset, target `v*`): restrict
   creation, update and deletion, because a tag starts a release and the OS image signing.
 

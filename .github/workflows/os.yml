@@ -7,65 +7,8 @@ name: OS
 # tags: installed Bazzite PCs still follow them. packaging/os/README.md describes the
 # images, the gates and the owner's setup.
 #
-# Images: ghcr.io/<owner>/ps5-launcher-fedora
-#   :main, :nvidia                  release tags; installed PCs follow these
-#   :main-YYYYMMDD, :nvidia-YYYYMMDD  dated release tags
-#   :testing-main-<run id>, :testing-nvidia-<run id>   candidates of one run
-#   :testing-upgrade-<run id>       CI only: the install test's upgrade target (signed)
-#   :testing-unsigned-<run id>, :testing-wrongkey-<run id>   CI only: the same image unsigned,
-#                                   and signed with a throwaway key; the VM must refuse both
-#   :testing-follow-<run id>        CI only: the tag the install test's VM follows; it moves
-#
-# Image signing (packaging/os/signing/README.md): every candidate is signed with cosign and the
-# key OS_IMAGE_SIGNING_KEY (an environment secret of os-fedora-signing), as a legacy sigstore
-# attachment (the tag sha256-<digest>.sig in the same repository) with cosign's "simple signing"
-# payload. That is the format containers/image reads, so bootc and the image's
-# /etc/containers/policy.json check it on every pull. The public key is
-# packaging/os/signing/cosign.pub.
-#
-# Each run:
-# 1. prepare: resolves the inputs once: the launcher release (the tag the run is for, or the
-#    latest when started from a branch), the
-#    digest of fedora-bootc:44 (so daily builds pick up Fedora's updates), the image name, the
-#    Secure Boot certificate and the image signing public key.
-# 2. main: checks the launcher tarball's checksum, builds its rpm, builds the main image, checks
-#    it, and pushes the candidate.
-# 3. nvidia: builds the NVIDIA image FROM that exact candidate digest, signed with the
-#    SECUREBOOT_KEY secret, checks it, checks that it shares every main layer, and pushes it.
-# 4. test-images (CI only): the install test's upgrade target, the same image unsigned, and one
-#    signed with a throwaway key made in the job.
-# 5. sign: signs the main, NVIDIA and upgrade digests (environment os-fedora-signing, which only
-#    the protected main branch and the protected v* tags may use), with the run id, attempt and
-#    commit as annotations, then
-#    verifies them against the committed public key.
-# 6. Gates, all on a runner with KVM (no KVM fails them):
-#    boot-test     a qcow2 of the main candidate boots, and its checks pass (session included)
-#    install-test  the netinstaller installs the candidate with no one at the keyboard; its first
-#                  start makes bootc enforce the signature policy. Then: bootc switch and bootc
-#                  upgrade to the unsigned and the wrong-key image are refused; the signed
-#                  upgrade, bootc rollback, and the switch to NVIDIA and back work. It also
-#                  makes the candidate-iso artifact for the hardware tests: an ISO that installs
-#                  this run's tested digests, its checksum, manifest.txt, and the test kit.
-# 7. release-guard: fails every run by hand with promote or attach_iso on while OS_IMAGE_SIGNING
-#    (below) is not "enabled"; on a release tag it only skips promote and iso until then.
-# 8. promote: checks both digests' signatures (cosign verify against the committed key, with this
-#    run's id, attempt and commit, and a Fedora 44 skopeo copy under the image's own policy), then
-#    copies the tested digests to the release tags and checks every tag's digest and signature.
-#    By hand only when asked (input promote) and only from main; by itself on a release tag once
-#    OS_IMAGE_SIGNING is enabled. Either way only after the environment
-#    os-fedora-release approves it: its reviewers confirm the hardware tests
-#    (packaging/os/hardware-test.md), which CI cannot run (Secure Boot, real GPUs). The approval
-#    must cite hardware results for this exact run id, attempt and pair of digests. Scheduled
-#    runs never promote.
-# 9. iso: after promotion, when asked (input attach_iso) or on a release tag, checks the promoted
-#    digests' signatures again and attaches ps5-launcher-fedora-x86_64.iso, which installs exactly those
-#    digests, to the launcher release.
-#
-# TODO: delete old testing-* tags (and their .sig tags) from the registry.
-
 on:
-  # TODO: bring back the nightly schedule (cron "45 4 * * *") once the signing environment and
-  # SECUREBOOT_KEY exist and one manual run is green. Without them every scheduled run fails.
+  # Restore the nightly schedule after image signing passes an end-to-end run.
   push:
     tags: ["v*"]
   # By hand, "Use workflow from" picks the launcher: a v* tag builds that release, and a branch
@@ -96,8 +39,16 @@ env:
   # The registry owner. A fork that sets the repository variable OS_IMAGE_OWNER to its own name
   # tests under that name; by default it is the repository's owner.
   IMAGE_OWNER: ${{ vars.OS_IMAGE_OWNER || github.repository_owner }}
-  FEDORA_BASE: quay.io/fedora/fedora-bootc:44
-  CERT: packaging/os/secureboot/public_key.der
+  # Defaults mirror packaging/os/config.sh; one release controls every Fedora container.
+  FEDORA_VERSION: ${{ vars.OS_FEDORA_VERSION || '44' }}
+  FEDORA_BASE: ${{ vars.OS_FEDORA_BASE_IMAGE || format('quay.io/fedora/fedora-bootc:{0}', vars.OS_FEDORA_VERSION || '44') }}
+  FEDORA_CONTAINER_IMAGE: ${{ format('quay.io/fedora/fedora:{0}', vars.OS_FEDORA_VERSION || '44') }}
+  FEDORA_ISO_VERSION: ${{ vars.OS_FEDORA_ISO_VERSION }}
+  FEDORA_GPG_FINGERPRINT: ${{ vars.OS_FEDORA_GPG_FINGERPRINT }}
+  OS_IMAGE_NAME: ${{ vars.OS_IMAGE_NAME || 'ps5-launcher-fedora' }}
+  VM_MEMORY_MB: ${{ vars.OS_VM_MEMORY_MB || '6144' }}
+  VM_CPUS: ${{ vars.OS_VM_CPUS || '4' }}
+  VM_DISK_GB: ${{ vars.OS_VM_DISK_GB || '30' }}
   SIGNING_PUBKEY: packaging/os/signing/cosign.pub
   RUN_ID: ${{ github.run_id }}
   # The public-release guard (job release-guard). It is in this file, not a repository variable,
@@ -116,7 +67,7 @@ jobs:
   # not a launcher release that installed PCs should get, so it skips the rest.
   wait:
     if: github.event_name == 'push'
-    runs-on: ubuntu-24.04
+    runs-on: ${{ vars.OS_RUNNER || 'ubuntu-24.04' }}
     timeout-minutes: 100
     outputs:
       build: ${{ steps.release.outputs.build }}
@@ -160,15 +111,16 @@ jobs:
     needs: wait
     # After wait on a tag push; by hand, wait is skipped.
     if: ${{ !cancelled() && (needs.wait.result == 'skipped' || needs.wait.outputs.build == 'true') }}
-    runs-on: ubuntu-24.04
+    runs-on: ${{ vars.OS_RUNNER || 'ubuntu-24.04' }}
     timeout-minutes: 10
     outputs:
       image: ${{ steps.resolve.outputs.image }}
       base: ${{ steps.resolve.outputs.base }}
       launcher_tag: ${{ steps.resolve.outputs.launcher_tag }}
-      cert_sha256: ${{ steps.resolve.outputs.cert_sha256 }}
       signing_sha256: ${{ steps.resolve.outputs.signing_sha256 }}
       date: ${{ steps.resolve.outputs.date }}
+      fedora_iso_version: ${{ steps.resolve.outputs.fedora_iso_version }}
+      fedora_gpg_fingerprint: ${{ steps.resolve.outputs.fedora_gpg_fingerprint }}
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
@@ -180,11 +132,8 @@ jobs:
           # empty, which means the latest release.
           LAUNCHER_TAG: ${{ startsWith(github.ref, 'refs/tags/') && github.ref_name || '' }}
         run: |
-          if [ ! -f "$CERT" ]; then
-            echo "::error::No Secure Boot certificate at $CERT. The owner makes it once: see packaging/os/secureboot/README.md"
-            exit 1
-          fi
-          cert_sha256=$(sha256sum "$CERT" | cut -d' ' -f1)
+          source packaging/os/config.sh
+          os_config_validate_iso
           if [ ! -f "$SIGNING_PUBKEY" ]; then
             echo "::error::No image signing public key at $SIGNING_PUBKEY. The owner makes it once: see packaging/os/signing/README.md"
             exit 1
@@ -192,14 +141,18 @@ jobs:
           openssl pkey -pubin -in "$SIGNING_PUBKEY" -noout
           signing_sha256=$(sha256sum "$SIGNING_PUBKEY" | cut -d' ' -f1)
           owner=${IMAGE_OWNER,,}
-          image=ghcr.io/$owner/ps5-launcher-fedora
+          image=ghcr.io/$owner/$OS_IMAGE_NAME
           if ! [[ $owner =~ ^[a-z0-9][a-z0-9-]*$ ]]; then
             echo "::error::Invalid image owner: $owner"
             exit 1
           fi
           # The base: one digest for the whole run, recorded in the image's label.
           digest=sha256:$(skopeo inspect --raw "docker://$FEDORA_BASE" | sha256sum | cut -d' ' -f1)
-          base=${FEDORA_BASE%:*}@$digest
+          base_repository=${FEDORA_BASE%@*}
+          if [[ ${base_repository##*/} == *:* ]]; then
+            base_repository=${base_repository%:*}
+          fi
+          base=$base_repository@$digest
           # The launcher: the input, or the latest release, resolved once.
           tag=${LAUNCHER_TAG:-$(gh release view --repo "$GITHUB_REPOSITORY" --json tagName --jq .tagName)}
           if ! [[ $tag =~ ^v[0-9]+\.[0-9]+\.[0-9]+([-+.][0-9A-Za-z.-]+)?$ ]]; then
@@ -208,9 +161,10 @@ jobs:
           fi
           {
             echo "image=$image"
+            echo "fedora_iso_version=$FEDORA_ISO_VERSION"
+            echo "fedora_gpg_fingerprint=$FEDORA_GPG_FINGERPRINT"
             echo "base=$base"
             echo "launcher_tag=$tag"
-            echo "cert_sha256=$cert_sha256"
             echo "signing_sha256=$signing_sha256"
             echo "date=$(date -u +%Y%m%d)"
           } | tee -a "$GITHUB_OUTPUT"
@@ -218,16 +172,18 @@ jobs:
             echo "### Inputs"
             echo "| | |"
             echo "|---|---|"
+            echo "| Fedora release | $FEDORA_VERSION |"
+            echo "| Installer revision | $FEDORA_ISO_VERSION |"
+            echo "| Fedora checksum key | $FEDORA_GPG_FINGERPRINT |"
             echo "| Image | \`$image\` |"
             echo "| Fedora base | \`$base\` (from \`$FEDORA_BASE\`) |"
             echo "| Launcher | \`$tag\` |"
-            echo "| Secure Boot certificate SHA-256 | \`$cert_sha256\` |"
             echo "| Image signing public key SHA-256 | \`$signing_sha256\` |"
           } >> "$GITHUB_STEP_SUMMARY"
 
   main:
     needs: prepare
-    runs-on: ubuntu-24.04
+    runs-on: ${{ vars.OS_RUNNER || 'ubuntu-24.04' }}
     timeout-minutes: 90
     outputs:
       digest: ${{ steps.push.outputs.digest }}
@@ -235,7 +191,6 @@ jobs:
       IMAGE: ${{ needs.prepare.outputs.image }}
       BASE: ${{ needs.prepare.outputs.base }}
       LAUNCHER_TAG: ${{ needs.prepare.outputs.launcher_tag }}
-      CERT_SHA256: ${{ needs.prepare.outputs.cert_sha256 }}
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
@@ -272,13 +227,13 @@ jobs:
         run: |
           rpm=$(ls dist/packages/ps5-launcher-*.x86_64.rpm)
           sudo env ENGINE=podman IMAGE=localhost/ps5-launcher-fedora IMAGE_REF="$IMAGE:main" \
-            BASE_IMAGE="$BASE" LAUNCHER_RPM="$rpm" LAUNCHER_VERSION="$VERSION" \
+            FEDORA_VERSION="$FEDORA_VERSION" BASE_IMAGE="$BASE" LAUNCHER_RPM="$rpm" LAUNCHER_VERSION="$VERSION" \
             packaging/os/build-image.sh main 2>&1 | tee build-main.log
 
       - name: Check the main image
         run: |
           sudo env ENGINE=podman packaging/os/check-image.sh main localhost/ps5-launcher-fedora:main \
-            "$IMAGE:main" "$CERT_SHA256" 2>&1 | tee check-main.log
+            "$IMAGE:main" 2>&1 | tee check-main.log
 
       - name: Push the candidate
         id: push
@@ -302,107 +257,9 @@ jobs:
           path: "*.log"
           if-no-files-found: ignore
 
-  nvidia:
-    needs: [prepare, main]
-    runs-on: ubuntu-24.04
-    timeout-minutes: 120
-    outputs:
-      digest: ${{ steps.push.outputs.digest }}
-    env:
-      IMAGE: ${{ needs.prepare.outputs.image }}
-      CERT_SHA256: ${{ needs.prepare.outputs.cert_sha256 }}
-      MAIN: ${{ needs.prepare.outputs.image }}@${{ needs.main.outputs.digest }}
-    steps:
-      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
-        with:
-          persist-credentials: false
-
-      - name: Free disk space
-        run: sudo rm -rf /usr/share/dotnet /usr/local/lib/android /opt/ghc /opt/hostedtoolcache/CodeQL
-
-      - name: Check the signing key against the certificate
-        env:
-          SECUREBOOT_KEY: ${{ secrets.SECUREBOOT_KEY }}
-        run: |
-          if [ -z "$SECUREBOOT_KEY" ]; then
-            echo "::error::The SECUREBOOT_KEY secret is not set: see packaging/os/secureboot/README.md"
-            exit 1
-          fi
-          key=$RUNNER_TEMP/secureboot/private_key.priv
-          mkdir -m 700 "$(dirname "$key")"
-          (umask 077 && printf '%s\n' "$SECUREBOOT_KEY" > "$key")
-          cert_pub=$(openssl x509 -inform DER -in "$CERT" -noout -pubkey | openssl pkey -pubin -outform DER | sha256sum)
-          key_pub=$(openssl pkey -in "$key" -pubout -outform DER | sha256sum)
-          if [ "$cert_pub" != "$key_pub" ]; then
-            echo "::error::SECUREBOOT_KEY does not belong to $CERT: see packaging/os/secureboot/README.md"
-            exit 1
-          fi
-          echo "The key matches $CERT"
-
-      - name: Build the NVIDIA image FROM the main candidate
-        run: |
-          echo "${{ github.token }}" | sudo podman login ghcr.io -u "${{ github.actor }}" --password-stdin
-          sudo podman pull "$MAIN"
-          sudo env ENGINE=podman IMAGE=localhost/ps5-launcher-fedora IMAGE_REF="$IMAGE:nvidia" \
-            MAIN_IMAGE="$MAIN" SECUREBOOT_KEY_FILE="$RUNNER_TEMP/secureboot/private_key.priv" \
-            packaging/os/build-image.sh nvidia 2>&1 | tee build-nvidia.log
-
-      - name: Delete the signing key
-        if: always()
-        run: |
-          if [ -d "$RUNNER_TEMP/secureboot" ]; then
-            find "$RUNNER_TEMP/secureboot" -type f -exec shred -u {} +
-            rm -rf "$RUNNER_TEMP/secureboot"
-          fi
-
-      - name: Check the NVIDIA image
-        run: |
-          sudo env ENGINE=podman packaging/os/check-image.sh nvidia localhost/ps5-launcher-fedora:nvidia \
-            "$IMAGE:nvidia" "$CERT_SHA256" "$MAIN" 2>&1 | tee check-nvidia.log
-
-      - name: Push the candidate
-        id: push
-        run: |
-          ref=$IMAGE:testing-nvidia-$RUN_ID
-          for try in 1 2 3; do
-            sudo podman push --digestfile digest localhost/ps5-launcher-fedora:nvidia "docker://$ref" && break
-            [ "$try" = 3 ] && exit 1
-            sleep 30
-          done
-          digest=$(cat digest)
-          echo "digest=$digest" >> "$GITHUB_OUTPUT"
-          echo "NVIDIA candidate: \`$ref\` = \`$digest\`" >> "$GITHUB_STEP_SUMMARY"
-
-      - name: Check that the NVIDIA image shares every main layer
-        env:
-          NVIDIA_DIGEST: ${{ steps.push.outputs.digest }}
-        run: |
-          # A switch from main downloads only the layers main does not have.
-          sudo skopeo inspect --raw "docker://$MAIN" | jq -r '.layers[].digest' > main-layers
-          sudo skopeo inspect --raw "docker://$IMAGE@$NVIDIA_DIGEST" | tee nvidia-manifest.json >/dev/null
-          jq -r '.layers[].digest' nvidia-manifest.json > nvidia-layers
-          n=$(wc -l < main-layers)
-          if ! head -n "$n" nvidia-layers | cmp -s - main-layers; then
-            echo "::error::The NVIDIA image does not start with the main image's layers"
-            exit 1
-          fi
-          extra=$(jq "[.layers[$n:][].size] | add" nvidia-manifest.json)
-          echo "The switch from main downloads $(numfmt --to=iec "$extra") (compressed) in $(( $(wc -l < nvidia-layers) - n )) layers" \
-            | tee -a "$GITHUB_STEP_SUMMARY"
-
-      - if: always()
-        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
-        with:
-          name: nvidia-logs
-          path: "*.log"
-          if-no-files-found: ignore
-
-  # CI only: the install test's images, all FROM the main candidate plus a marker file. The
-  # upgrade target is signed by the sign job; the unsigned one never is; the wrong-key one is
-  # signed here with a throwaway key made in this job. No secret is used.
   test-images:
     needs: [prepare, main]
-    runs-on: ubuntu-24.04
+    runs-on: ${{ vars.OS_RUNNER || 'ubuntu-24.04' }}
     timeout-minutes: 60
     outputs:
       upgrade: ${{ steps.push.outputs.upgrade }}
@@ -473,8 +330,8 @@ jobs:
   # (sign/sign.go:447-451). The annotations land in the payload's "optional" part; never use the
   # keys "creator" or "timestamp", which containers/image parses itself.
   sign:
-    needs: [prepare, main, nvidia, test-images]
-    runs-on: ubuntu-24.04
+    needs: [prepare, main, test-images]
+    runs-on: ${{ vars.OS_RUNNER || 'ubuntu-24.04' }}
     timeout-minutes: 15
     environment: os-fedora-signing
     outputs:
@@ -482,7 +339,6 @@ jobs:
     env:
       IMAGE: ${{ needs.prepare.outputs.image }}
       MAIN_DIGEST: ${{ needs.main.outputs.digest }}
-      NVIDIA_DIGEST: ${{ needs.nvidia.outputs.digest }}
       UPGRADE_DIGEST: ${{ needs.test-images.outputs.upgrade }}
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
@@ -510,7 +366,7 @@ jobs:
             exit 1
           fi
           echo "attempt=$GITHUB_RUN_ATTEMPT" >> "$GITHUB_OUTPUT"
-          for pair in "main:$MAIN_DIGEST" "nvidia:$NVIDIA_DIGEST" "upgrade:$UPGRADE_DIGEST"; do
+          for pair in "main:$MAIN_DIGEST" "upgrade:$UPGRADE_DIGEST"; do
             variant=${pair%%:*}
             digest=${pair#*:}
             [[ $digest =~ ^sha256:[0-9a-f]{64}$ ]] || { echo "::error::Not a digest: $digest"; exit 1; }
@@ -529,7 +385,7 @@ jobs:
   boot-test:
     needs: [prepare, main]
     # A self-hosted runner with KVM can take over with the repository variable OS_VM_RUNNER.
-    runs-on: ${{ vars.OS_VM_RUNNER || 'ubuntu-24.04' }}
+    runs-on: ${{ vars.OS_VM_RUNNER || vars.OS_RUNNER || 'ubuntu-24.04' }}
     timeout-minutes: 60
     env:
       MAIN: ${{ needs.prepare.outputs.image }}@${{ needs.main.outputs.digest }}
@@ -564,7 +420,7 @@ jobs:
           mkdir -p out
           sudo podman run --rm --privileged \
             -v /var/lib/containers/storage:/var/lib/containers/storage \
-            -v "$PWD/out:/out" quay.io/fedora/fedora:44 bash -euxc '
+            -v "$PWD/out:/out" "$FEDORA_CONTAINER_IMAGE" bash -euxc '
               dnf -y -q install image-builder
               image-builder build --bootc-ref localhost/ps5-launcher-fedora:boottest \
                 --bootc-default-fs ext4 --output-dir /out qcow2' 2>&1 | tee image-builder.log
@@ -577,7 +433,7 @@ jobs:
           disk=$(sudo find out -name '*.qcow2' | head -1)
           sudo chown "$(id -u)" "$disk"
           cp /usr/share/OVMF/OVMF_VARS_4M.fd vars.fd
-          qemu-system-x86_64 -enable-kvm -machine q35 -m 6G -smp 4 -cpu host \
+          qemu-system-x86_64 -enable-kvm -machine q35 -m "$VM_MEMORY_MB" -smp "$VM_CPUS" -cpu host \
             -drive if=pflash,format=raw,readonly=on,file=/usr/share/OVMF/OVMF_CODE_4M.fd \
             -drive if=pflash,format=raw,file=vars.fd \
             -drive file="$disk",if=virtio,format=qcow2 -device virtio-vga -display none \
@@ -613,25 +469,23 @@ jobs:
           if-no-files-found: ignore
 
   install-test:
-    needs: [prepare, main, nvidia, test-images, sign]
-    runs-on: ${{ vars.OS_VM_RUNNER || 'ubuntu-24.04' }}
+    needs: [prepare, main, test-images, sign]
+    runs-on: ${{ vars.OS_VM_RUNNER || vars.OS_RUNNER || 'ubuntu-24.04' }}
     timeout-minutes: 180
     env:
       IMAGE: ${{ needs.prepare.outputs.image }}
       MAIN_DIGEST: ${{ needs.main.outputs.digest }}
-      NVIDIA_DIGEST: ${{ needs.nvidia.outputs.digest }}
       UPGRADE_DIGEST: ${{ needs.test-images.outputs.upgrade }}
       UNSIGNED_DIGEST: ${{ needs.test-images.outputs.unsigned }}
       WRONGKEY_DIGEST: ${{ needs.test-images.outputs.wrongkey }}
-      MAIN_TAG: testing-main-${{ github.run_id }}
-      NVIDIA_TAG: testing-nvidia-${{ github.run_id }}
       UNSIGNED_TAG: testing-unsigned-${{ github.run_id }}
       WRONGKEY_TAG: testing-wrongkey-${{ github.run_id }}
       FOLLOW_TAG: testing-follow-${{ github.run_id }}
       BASE: ${{ needs.prepare.outputs.base }}
       LAUNCHER_TAG: ${{ needs.prepare.outputs.launcher_tag }}
-      CERT_SHA256: ${{ needs.prepare.outputs.cert_sha256 }}
       SIGNING_SHA256: ${{ needs.prepare.outputs.signing_sha256 }}
+      FEDORA_ISO_VERSION: ${{ needs.prepare.outputs.fedora_iso_version }}
+      FEDORA_GPG_FINGERPRINT: ${{ needs.prepare.outputs.fedora_gpg_fingerprint }}
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
@@ -654,14 +508,14 @@ jobs:
       - name: Check that the VM can pull the candidates
         run: |
           # The VM pulls without credentials, as installed PCs do.
-          for digest in "$MAIN_DIGEST" "$NVIDIA_DIGEST" "$UPGRADE_DIGEST" "$UNSIGNED_DIGEST" "$WRONGKEY_DIGEST"; do
+          for digest in "$MAIN_DIGEST" "$UPGRADE_DIGEST" "$UNSIGNED_DIGEST" "$WRONGKEY_DIGEST"; do
             if ! skopeo inspect --no-creds --raw "docker://$IMAGE@$digest" >/dev/null; then
               echo "::error::$IMAGE is not public. Make the package public in its GitHub settings (packaging/os/README.md)"
               exit 1
             fi
           done
 
-      - name: Install, check the signature gates, upgrade, roll back, switch to NVIDIA and back
+      - name: Install, check the signature gates, upgrade, roll back
         run: |
           sudo apt-get update -qq
           sudo apt-get install -y -qq qemu-system-x86 qemu-utils ovmf socat jq skopeo >/dev/null
@@ -671,17 +525,18 @@ jobs:
 
       # For the hardware tests before promotion (packaging/os/hardware-test.md): the installer
       # ISO, set to install this run's tested digests, never a tag (a rerun of this run id moves
-      # the testing tags). After the install the PC follows the release tag, main or nvidia.
+      # the testing tags). After the install the PC follows the release tag, main.
       - name: Build the candidate ISO and the hardware test kit
         run: |
-          for digest in "$MAIN_DIGEST" "$NVIDIA_DIGEST" "$UPGRADE_DIGEST"; do
+          for digest in "$MAIN_DIGEST" "$UPGRADE_DIGEST"; do
             [[ $digest =~ ^sha256:[0-9a-f]{64}$ ]] || { echo "::error::Not a digest: $digest"; exit 1; }
           done
-          # The kickstart installs this run's signed digest of the chosen image (main or nvidia).
+          # The kickstart installs this run's signed digest of the chosen image (main).
           iso=ps5-launcher-fedora-candidate-x86_64.iso
           docker run --rm --privileged -v "$PWD:/src" -w /src -e IMAGE="$IMAGE" \
-            -e MAIN_DIGEST="$MAIN_DIGEST" -e NVIDIA_DIGEST="$NVIDIA_DIGEST" -e ISO_CACHE=/src/install-test \
-            quay.io/fedora/fedora:44 packaging/os/build-iso.sh "$iso"
+            -e FEDORA_VERSION -e FEDORA_ISO_VERSION -e FEDORA_GPG_FINGERPRINT \
+            -e MAIN_DIGEST="$MAIN_DIGEST" -e ISO_CACHE=/src/install-test \
+            "$FEDORA_CONTAINER_IMAGE" packaging/os/build-iso.sh "$iso"
           kit=candidate-iso
           mkdir -p "$kit"
           sudo mv "$iso" "$kit/"
@@ -694,11 +549,12 @@ jobs:
             echo "COMMIT=$GITHUB_SHA"
             echo "IMAGE=$IMAGE"
             echo "MAIN_DIGEST=$MAIN_DIGEST"
-            echo "NVIDIA_DIGEST=$NVIDIA_DIGEST"
             echo "UPGRADE_DIGEST=$UPGRADE_DIGEST"
             echo "BASE_IMAGE=$BASE"
+            echo "FEDORA_VERSION=$FEDORA_VERSION"
+            echo "FEDORA_ISO_VERSION=$FEDORA_ISO_VERSION"
+            echo "FEDORA_GPG_FINGERPRINT=$FEDORA_GPG_FINGERPRINT"
             echo "LAUNCHER_VERSION=${LAUNCHER_TAG#v}"
-            echo "SECUREBOOT_CERT_SHA256=$CERT_SHA256"
             echo "SIGNING_PUBKEY_SHA256=$SIGNING_SHA256"
             echo "ISO_SHA256=$(cut -d' ' -f1 "$kit/$iso.sha256")"
           } > "$kit/manifest.txt"
@@ -711,7 +567,7 @@ jobs:
             cat "$kit/manifest.txt"
             echo '```'
             echo
-            echo "**Approve a promotion of this run only with hardware results that cite run $GITHUB_RUN_ID, attempt $GITHUB_RUN_ATTEMPT, main \`$MAIN_DIGEST\` and nvidia \`$NVIDIA_DIGEST\`.**"
+            echo "**Approve a promotion of this run only with hardware results that cite run $GITHUB_RUN_ID, attempt $GITHUB_RUN_ATTEMPT, main \`$MAIN_DIGEST\`.**"
           } >> "$GITHUB_STEP_SUMMARY"
 
       - if: always()
@@ -730,7 +586,7 @@ jobs:
           name: candidate-iso
           path: candidate-iso/
           if-no-files-found: error
-          retention-days: 14
+          retention-days: ${{ fromJSON(vars.OS_ARTIFACT_RETENTION_DAYS || '14') }}
 
   # The public-release guard: promotion and the release ISO publish what installed PCs trust, so
   # they wait until image signing has run end to end (OS_IMAGE_SIGNING at the top). It has no
@@ -742,7 +598,7 @@ jobs:
   release-guard:
     needs: prepare
     if: inputs.promote || inputs.attach_iso || github.event_name == 'push'
-    runs-on: ubuntu-24.04
+    runs-on: ${{ vars.OS_RUNNER || 'ubuntu-24.04' }}
     timeout-minutes: 5
     outputs:
       release: ${{ steps.guard.outputs.release }}
@@ -764,22 +620,21 @@ jobs:
           fi
 
   promote:
-    needs: [prepare, main, nvidia, sign, boot-test, install-test, release-guard]
+    needs: [prepare, main, sign, boot-test, install-test, release-guard]
     # By hand only from main; by itself only on a release tag (protected, like main).
     if: >-
       needs.release-guard.outputs.release == 'true' &&
       ((inputs.promote && github.ref == 'refs/heads/main') ||
        (github.event_name == 'push' && startsWith(github.ref, 'refs/tags/v')))
-    runs-on: ubuntu-24.04
+    runs-on: ${{ vars.OS_RUNNER || 'ubuntu-24.04' }}
     timeout-minutes: 60
     # The owner adds required reviewers to this environment. They approve only with hardware
-    # results (packaging/os/hardware-test.md) for this exact run id, attempt and digest pair.
+    # results (packaging/os/hardware-test.md) for this exact run id, attempt and digest.
     environment: os-fedora-release
     env:
       IMAGE: ${{ needs.prepare.outputs.image }}
       DATE: ${{ needs.prepare.outputs.date }}
       MAIN_DIGEST: ${{ needs.main.outputs.digest }}
-      NVIDIA_DIGEST: ${{ needs.nvidia.outputs.digest }}
       SIGN_ATTEMPT: ${{ needs.sign.outputs.attempt }}
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
@@ -802,43 +657,39 @@ jobs:
             echo "| | Digest |"
             echo "|---|---|"
             echo "| main | \`$MAIN_DIGEST\` |"
-            echo "| nvidia | \`$NVIDIA_DIGEST\` |"
             echo
-            echo "**The approval of this deployment must cite hardware results (packaging/os/hardware-test.md) for run $GITHUB_RUN_ID, attempt $GITHUB_RUN_ATTEMPT, and exactly these two digests.** Results for another run or another digest do not count."
+            echo "**The approval of this deployment must cite hardware results (packaging/os/hardware-test.md) for run $GITHUB_RUN_ID, attempt $GITHUB_RUN_ATTEMPT, and this digest.** Results for another run or another digest do not count."
           } >> "$GITHUB_STEP_SUMMARY"
-      - name: Check both signatures, with cosign and with the image's own policy
+      - name: Check the signature, with cosign and with the image's own policy
         run: |
           # 1. cosign: the committed key, this exact digest, and this run's provenance (run id,
           #    the sign job's attempt, commit, variant), from the signature's annotations.
-          for pair in "main:$MAIN_DIGEST" "nvidia:$NVIDIA_DIGEST"; do
-            variant=${pair%%:*}
-            digest=${pair#*:}
-            [[ $digest =~ ^sha256:[0-9a-f]{64}$ ]] || { echo "::error::Not a digest: $digest"; exit 1; }
-            cosign verify --key "$SIGNING_PUBKEY" --insecure-ignore-tlog --new-bundle-format=false \
-              -a "io.github.ps5-launcher.run-id=$RUN_ID" -a "io.github.ps5-launcher.run-attempt=$SIGN_ATTEMPT" \
-              -a "io.github.ps5-launcher.commit=$GITHUB_SHA" -a "io.github.ps5-launcher.variant=$variant" \
-              "$IMAGE@$digest" > "verify-$variant.json"
-            jq -e --arg d "$digest" --arg r "$IMAGE" \
-              'all(.[]; .critical.image["docker-manifest-digest"] == $d and .critical.identity["docker-reference"] == $r)' \
-              "verify-$variant.json" >/dev/null || { echo "::error::A signature of $variant names another digest or repository"; exit 1; }
-            echo "cosign: \`$IMAGE@$digest\` ($variant) is signed by $SIGNING_PUBKEY for run $RUN_ID" >> "$GITHUB_STEP_SUMMARY"
-          done
-          # 2. What installed PCs run: Fedora 44's skopeo, the image's policy.json and registries.d
+          variant=main
+          digest=$MAIN_DIGEST
+          [[ $digest =~ ^sha256:[0-9a-f]{64}$ ]] || { echo "::error::Not a digest: $digest"; exit 1; }
+          cosign verify --key "$SIGNING_PUBKEY" --insecure-ignore-tlog --new-bundle-format=false \
+            -a "io.github.ps5-launcher.run-id=$RUN_ID" -a "io.github.ps5-launcher.run-attempt=$SIGN_ATTEMPT" \
+            -a "io.github.ps5-launcher.commit=$GITHUB_SHA" -a "io.github.ps5-launcher.variant=$variant" \
+            "$IMAGE@$digest" > "verify-$variant.json"
+          jq -e --arg d "$digest" --arg r "$IMAGE" \
+            'all(.[]; .critical.image["docker-manifest-digest"] == $d and .critical.identity["docker-reference"] == $r)' \
+            "verify-$variant.json" >/dev/null || { echo "::error::A signature of $variant names another digest or repository"; exit 1; }
+          echo "cosign: \`$IMAGE@$digest\` ($variant) is signed by $SIGNING_PUBKEY for run $RUN_ID" >> "$GITHUB_STEP_SUMMARY"
+          # 2. What installed PCs run: the selected Fedora release's skopeo, the image's policy.json and registries.d
           #    (packaging/os/signing/*.in for this repository), a full copy of each digest.
           mkdir -p sigcheck/registries.d
           sed "s|@REPOSITORY@|$IMAGE|; s|/usr/share/ps5-launcher/signing/cosign.pub|/src/$SIGNING_PUBKEY|" \
             packaging/os/signing/policy.json.in > sigcheck/policy.json
           sed "s|@REPOSITORY@|$IMAGE|" packaging/os/signing/registries.yaml.in > sigcheck/registries.d/ps5-launcher.yaml
           docker run --rm -v "$PWD:/src:ro" -v "$RUNNER_TEMP:/out" -w /src \
-            -e IMAGE -e MAIN_DIGEST -e NVIDIA_DIGEST quay.io/fedora/fedora:44 bash -euo pipefail -c '
+            -e IMAGE -e MAIN_DIGEST "$FEDORA_CONTAINER_IMAGE" bash -euo pipefail -c '
               dnf -y -q install skopeo >/dev/null
               skopeo --version
-              for digest in "$MAIN_DIGEST" "$NVIDIA_DIGEST"; do
-                rm -rf /out/copy
-                skopeo --policy sigcheck/policy.json --registries.d sigcheck/registries.d \
-                  copy --quiet "docker://$IMAGE@$digest" dir:/out/copy
-                echo "skopeo copy under the image policy accepts $IMAGE@$digest"
-              done
+              digest=$MAIN_DIGEST
+              rm -rf /out/copy
+              skopeo --policy sigcheck/policy.json --registries.d sigcheck/registries.d \
+                copy --quiet "docker://$IMAGE@$digest" dir:/out/copy
+              echo "skopeo copy under the image policy accepts $IMAGE@$digest"
               rm -rf /out/copy' | tee -a "$GITHUB_STEP_SUMMARY"
 
       - name: Copy the tested digests to the release tags
@@ -862,15 +713,12 @@ jobs:
             [ "$got" = "$1" ] || { echo "::error::$IMAGE:$2 is $got, not $1"; exit 1; }
             echo "\`$IMAGE:$2\` = \`$1\`" | tee -a "$GITHUB_STEP_SUMMARY"
           }
-          # Main first: an NVIDIA PC that switches back must find the main image of its pair.
           promote "$MAIN_DIGEST" "main-$DATE"
-          promote "$NVIDIA_DIGEST" "nvidia-$DATE"
           promote "$MAIN_DIGEST" main
-          promote "$NVIDIA_DIGEST" nvidia
 
       - name: Check every release tag's digest and signature
         run: |
-          for pair in "main-$DATE:$MAIN_DIGEST" "nvidia-$DATE:$NVIDIA_DIGEST" "main:$MAIN_DIGEST" "nvidia:$NVIDIA_DIGEST"; do
+          for pair in "main-$DATE:$MAIN_DIGEST" "main:$MAIN_DIGEST"; do
             tag=${pair%%:*}
             want=${pair#*:}
             got=sha256:$(skopeo inspect --raw "docker://$IMAGE:$tag" | sha256sum | cut -d' ' -f1)
@@ -883,9 +731,9 @@ jobs:
           done
 
   iso:
-    needs: [prepare, main, nvidia, release-guard, promote]
+    needs: [prepare, main, release-guard, promote]
     if: needs.release-guard.outputs.release == 'true' && (inputs.attach_iso || github.event_name == 'push')
-    runs-on: ubuntu-24.04
+    runs-on: ${{ vars.OS_RUNNER || 'ubuntu-24.04' }}
     timeout-minutes: 30
     permissions:
       contents: write
@@ -893,7 +741,8 @@ jobs:
       IMAGE: ${{ needs.prepare.outputs.image }}
       LAUNCHER_TAG: ${{ needs.prepare.outputs.launcher_tag }}
       MAIN_DIGEST: ${{ needs.main.outputs.digest }}
-      NVIDIA_DIGEST: ${{ needs.nvidia.outputs.digest }}
+      FEDORA_ISO_VERSION: ${{ needs.prepare.outputs.fedora_iso_version }}
+      FEDORA_GPG_FINGERPRINT: ${{ needs.prepare.outputs.fedora_gpg_fingerprint }}
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
@@ -905,21 +754,20 @@ jobs:
         run: |
           # The installer checks no signature, so the ISO embeds exactly the digests promote
           # checked, and only while the release tags still point at them.
-          for pair in "main:$MAIN_DIGEST" "nvidia:$NVIDIA_DIGEST"; do
-            tag=${pair%%:*}
-            want=${pair#*:}
-            got=sha256:$(skopeo inspect --raw "docker://$IMAGE:$tag" | sha256sum | cut -d' ' -f1)
-            [ "$got" = "$want" ] || { echo "::error::$IMAGE:$tag is $got, not the promoted $want"; exit 1; }
-            cosign verify --key "$SIGNING_PUBKEY" --insecure-ignore-tlog --new-bundle-format=false \
-              -a "io.github.ps5-launcher.run-id=$RUN_ID" "$IMAGE@$want" > /dev/null
-            echo "The ISO installs \`$IMAGE@$want\` for $tag, signed" | tee -a "$GITHUB_STEP_SUMMARY"
-          done
+          tag=main
+          want=$MAIN_DIGEST
+          got=sha256:$(skopeo inspect --raw "docker://$IMAGE:$tag" | sha256sum | cut -d' ' -f1)
+          [ "$got" = "$want" ] || { echo "::error::$IMAGE:$tag is $got, not the promoted $want"; exit 1; }
+          cosign verify --key "$SIGNING_PUBKEY" --insecure-ignore-tlog --new-bundle-format=false \
+            -a "io.github.ps5-launcher.run-id=$RUN_ID" "$IMAGE@$want" > /dev/null
+          echo "The ISO installs \`$IMAGE@$want\` for $tag, signed" | tee -a "$GITHUB_STEP_SUMMARY"
       - name: Build the ISO
         run: |
           iso=ps5-launcher-fedora-x86_64.iso
           docker run --rm --privileged -v "$PWD:/src" -w /src -e IMAGE="$IMAGE" \
-            -e MAIN_DIGEST="$MAIN_DIGEST" -e NVIDIA_DIGEST="$NVIDIA_DIGEST" -e ISO_CACHE=/src \
-            quay.io/fedora/fedora:44 packaging/os/build-iso.sh "$iso"
+            -e FEDORA_VERSION -e FEDORA_ISO_VERSION -e FEDORA_GPG_FINGERPRINT \
+            -e MAIN_DIGEST="$MAIN_DIGEST" -e ISO_CACHE=/src \
+            "$FEDORA_CONTAINER_IMAGE" packaging/os/build-iso.sh "$iso"
           sha256sum "$iso" > "$iso.sha256"
           size=$(stat -c %s "$iso")
           echo "ISO: $size bytes"

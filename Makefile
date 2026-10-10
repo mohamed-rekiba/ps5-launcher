@@ -7,7 +7,9 @@
 SHELL := bash
 
 DOCKER ?= docker
-FEDORA := quay.io/fedora/fedora:44
+FEDORA_VERSION ?= $(shell bash -c 'source packaging/os/config.sh; printf "%s" "$$FEDORA_VERSION"')
+FEDORA ?= quay.io/fedora/fedora:$(FEDORA_VERSION)
+export FEDORA_VERSION FEDORA_ISO_VERSION FEDORA_GPG_FINGERPRINT
 VERSION := $(shell sed -n 's/^version = "\(.*\)"/\1/p' Cargo.toml | head -1)
 # The binary the Linux packages wrap (a Linux x86_64 build).
 BINARY ?= target/release/ps5-launcher
@@ -17,7 +19,7 @@ DIST ?= dist/packages
 SHELL_SCRIPTS := $(shell grep -lE '^\#!.*(ba)?sh' install.sh scripts/*.sh packaging/linux/*.sh \
 	packaging/linux/ps5-launcher-session packaging/os/*.sh packaging/os/boottest/* \
 	packaging/os/files/usr/libexec/*/* 2>/dev/null)
-OS_TESTS := packaging/os/test-helper.sh packaging/os/test-boot-health.sh packaging/os/test-recovery-menu.sh \
+OS_TESTS := packaging/os/test-config.sh packaging/os/test-helper.sh packaging/os/test-boot-health.sh packaging/os/test-recovery-menu.sh \
 	packaging/os/test-signature-policy.sh
 
 .PHONY: help build run run-session test check check-shell lint packages appimage os-image os-iso clean
@@ -43,9 +45,9 @@ check: ## Everything CI's Linux job checks: build, tests, smoke test, shell test
 	scripts/smoke-test.sh target/ci/ps5-launcher
 	$(MAKE) check-shell
 
-check-shell: ## The session wrapper's tests here, and the OS tests in Fedora 44
+check-shell: ## The session wrapper's tests here, and the OS tests in the selected Fedora release
 	packaging/linux/test-session.sh
-	$(DOCKER) run --rm -v "$(CURDIR):/repo:ro" -w /repo $(FEDORA) bash -o pipefail -c '\
+	$(DOCKER) run --rm -v "$(CURDIR):/repo:ro" -w /repo -e FEDORA_VERSION $(FEDORA) bash -o pipefail -c '\
 		dnf -y -q install jq python3 util-linux procps-ng findutils diffutils >/dev/null && \
 		for t in $(OS_TESTS); do echo "== $$t"; bash "$$t" | tail -1 || exit 1; done'
 
@@ -69,7 +71,8 @@ os-image: ## The OS main image; needs LAUNCHER_RPM (see packaging/os/README.md)
 
 os-iso: ## The installer ISO for IMAGE (see packaging/os/build-iso.sh)
 	@test -n "$(IMAGE)" || { echo "Set IMAGE=ghcr.io/OWNER/ps5-launcher-fedora"; exit 1; }
-	$(DOCKER) run --rm --privileged -v "$(CURDIR):/src" -w /src -e IMAGE=$(IMAGE) $(FEDORA) \
+	$(DOCKER) run --rm --privileged -v "$(CURDIR):/src" -w /src -e IMAGE="$(IMAGE)" -e MAIN_DIGEST="$(MAIN_DIGEST)" \
+		-e FEDORA_VERSION -e FEDORA_ISO_VERSION -e FEDORA_GPG_FINGERPRINT $(FEDORA) \
 		packaging/os/build-iso.sh ps5-launcher-fedora-x86_64.iso
 
 clean: ## Remove build output (target/, dist/)

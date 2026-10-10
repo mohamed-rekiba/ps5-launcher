@@ -25,6 +25,7 @@ concurrency:
 
 env:
   CARGO_TERM_COLOR: always
+  FEDORA_VERSION: ${{ vars.OS_FEDORA_VERSION || '44' }}
 
 # Explicit bash enables pipefail, so a failing cargo isn't hidden by `| tee`.
 defaults:
@@ -45,6 +46,8 @@ jobs:
       - run: node --test scripts/package-licenses.test.mjs
       - name: Test the session's restart rules
         run: packaging/linux/test-session.sh
+      - name: Test PS5 Launcher OS build configuration
+        run: bash packaging/os/test-config.sh
       - name: Test PS5 Launcher OS's root helper
         run: packaging/os/test-helper.sh
       - name: Test PS5 Launcher OS's boot health check

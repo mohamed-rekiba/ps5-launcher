@@ -4,7 +4,7 @@
 // label above it and its hint below; switches and ‹ value › pickers sit in the row. The focused
 // row has the white ring.
 
-import { S, Theme, Icons, Zone, SettingData, SettingsHit, NvCard, PairCard } from "theme.slint";
+import { S, Theme, Icons, Zone, SettingData, SettingsHit, PairCard } from "theme.slint";
 import { Switch, BackButton } from "widgets.slint";
 import { AboutSlint } from "std-widgets.slint";
 
@@ -201,112 +201,6 @@ component Stepper inherits VerticalLayout {
     }
 }
 
-// The NVIDIA image's Secure Boot key waits for the blue MOK screen at the next start: its password
-// in large digits, numbered, because the screen may ask for single digits; then the steps.
-export component KeySteps inherits VerticalLayout {
-    in property <[string]> digits;
-    in property <length> text-w;
-    // The last step: what to do back in the launcher.
-    in property <string> last;
-    // In the Settings sheet: smaller digits, so the eight fit.
-    in property <bool> narrow;
-    padding-bottom: (28px * S.k);
-    Rectangle {
-        border-radius: (14px * S.k);
-        background: #ffffff0b;
-        border-width: 1px;
-        border-color: Theme.warn;
-        VerticalLayout {
-            padding: (28px * S.k);
-            spacing: (14px * S.k);
-            Text { text: "Enroll the NVIDIA driver's key"; width: root.text-w; wrap: word-wrap; font-size: (24px * S.k); font-weight: 600; color: Theme.text; }
-            Text {
-                text: "Secure Boot loads the new NVIDIA driver only after its key is enrolled. You do this once, on a blue screen when the PC starts. That screen needs a USB keyboard: a controller does not work there.";
-                width: root.text-w;
-                wrap: word-wrap;
-                font-size: (17px * S.k);
-                color: Theme.text2;
-            }
-            HorizontalLayout {
-                alignment: start;
-                spacing: root.narrow ? (8px * S.k) : (12px * S.k);
-                padding-top: (6px * S.k);
-                padding-bottom: (6px * S.k);
-                for d[i] in root.digits: VerticalLayout {
-                    spacing: (6px * S.k);
-                    Rectangle {
-                        width: root.narrow ? (60px * S.k) : (72px * S.k);
-                        height: root.narrow ? (78px * S.k) : (92px * S.k);
-                        border-radius: (12px * S.k);
-                        background: #ffffff16;
-                        Text { text: d; font-size: root.narrow ? (48px * S.k) : (58px * S.k); font-weight: 600; font-family: "DejaVu Sans Mono"; color: Theme.text; }
-                    }
-                    Text { text: i + 1; font-size: (15px * S.k); color: Theme.text3; horizontal-alignment: center; }
-                }
-            }
-            for step[i] in [
-                "Plug in a USB keyboard, then restart the PC from the Power menu.",
-                "A blue screen says \"Perform MOK management\". Press any key within 10 seconds. If you miss it, restart again.",
-                "Choose \"Enroll MOK\", then \"Continue\", then \"Yes\".",
-                "Type the password above and press Enter. If the screen asks for single digits, the numbers under the digits tell you which one.",
-                root.last,
-            ]: HorizontalLayout {
-                spacing: (12px * S.k);
-                Text { text: (i + 1) + "."; width: (24px * S.k); font-size: (17px * S.k); font-weight: 600; color: Theme.text; }
-                Text { text: step; width: root.text-w - (36px * S.k); wrap: word-wrap; font-size: (17px * S.k); color: Theme.text; }
-            }
-        }
-    }
-}
-
-// The NVIDIA driver on Display (the prototype's stepper): the numbered steps, then a card with a
-// title and its text. Its buttons are the rows under it.
-export component NvidiaCard inherits VerticalLayout {
-    in property <NvCard> card;
-    in property <length> text-w;
-    // In the Settings sheet: the steps one a line.
-    in property <bool> narrow;
-    padding-bottom: (28px * S.k);
-    spacing: (22px * S.k);
-    if root.card.step >= 0: Stepper {
-        steps: ["1  Install", "2  Secure Boot key", "3  Download", "4  Restart"];
-        at: root.card.step;
-        narrow: root.narrow;
-    }
-    Rectangle {
-        border-radius: (14px * S.k);
-        background: #121a31;
-        border-width: 1px;
-        border-color: root.card.kind == 1 ? Theme.warn : Theme.line;
-        VerticalLayout {
-            padding: (28px * S.k);
-            spacing: (12px * S.k);
-            HorizontalLayout {
-                spacing: (14px * S.k);
-                alignment: start;
-                VerticalLayout {
-                    alignment: center;
-                    Image {
-                        source: root.card.kind == 0 ? Icons.chip : root.card.kind == 2 ? Icons.check : Icons.info;
-                        colorize: root.card.kind == 0 ? #76b900 : root.card.kind == 1 ? Theme.warn : root.card.kind == 2 ? Theme.ok : Theme.text2;
-                        width: (34px * S.k);
-                        height: (34px * S.k);
-                    }
-                }
-                Text { text: root.card.title; width: root.text-w - (48px * S.k); wrap: word-wrap; font-size: (28px * S.k); font-weight: 600; color: Theme.text; vertical-alignment: center; }
-            }
-            for line[i] in root.card.lines: Text {
-                text: line;
-                width: root.text-w;
-                wrap: word-wrap;
-                font-size: i == 0 ? (20px * S.k) : (16px * S.k);
-                font-weight: i == 0 && root.card.kind == 1 ? 600 : 400;
-                color: i == 0 ? (root.card.kind == 1 ? Theme.warn : Theme.text) : Theme.text3;
-            }
-        }
-    }
-}
-
 // A button to hold while pairing: blue, with a ring. Others are dim.
 component PadButton inherits Rectangle {
     in property <bool> hold;
@@ -481,11 +375,6 @@ export component SettingsSheet inherits Rectangle {
     in property <[SettingsHit]> hits;
     // The About card under the rows: About's sub-sheet, or the root sheet on a desktop.
     in property <bool> about;
-    // Updates (OS) and Display: the Secure Boot key's password, a digit each, over its steps.
-    in property <[string]> key;
-    in property <string> key-last;
-    // Display: the NVIDIA driver's card over the rows.
-    in property <NvCard> nv;
     // Controllers: pairing a controller, over the rows.
     in property <PairCard> pair;
     in property <string> version;
@@ -619,9 +508,7 @@ export component SettingsSheet inherits Rectangle {
                 if root.sub: Rectangle { height: (20px * S.k); }
 
                 // A System area's cards over its rows.
-                if root.nv.show: NvidiaCard { card: root.nv; text-w: root.inner - (56px * S.k); narrow: true; }
                 if root.pair.show: PairSteps { card: root.pair; text-w: root.inner - (56px * S.k); narrow: true; }
-                if root.key.length > 0: KeySteps { digits: root.key; text-w: root.inner - (56px * S.k); last: root.key-last; narrow: true; }
                 SettingRows {
                     rows: root.rows;
                     selected: root.zone == Zone.settings ? root.idx : -1;

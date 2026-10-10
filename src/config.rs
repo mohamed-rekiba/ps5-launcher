@@ -65,9 +65,6 @@ pub struct Config {
     pub app_auto_update: bool,
     /// Catalog game ids whose artwork comes from RAWG (chosen per game in the Options menu).
     pub rawg_art: Vec<i64>,
-    /// System → Display (PS5 Launcher OS): where the NVIDIA driver's install is. It is kept
-    /// across restarts, which the install needs.
-    pub nvidia: crate::nvidia::Flow,
     /// System → Display: the screen output for the next session start; None is Automatic. The
     /// session wrapper reads it from session.conf (`screen::save`).
     pub session_output: Option<crate::screen::Output>,
@@ -155,7 +152,6 @@ impl Default for Config {
             shad_auto_update: true,
             app_auto_update: true,
             rawg_art: Vec::new(),
-            nvidia: crate::nvidia::Flow::default(),
             session_output: None,
             setup_done: false,
             setup_step: None,
@@ -609,15 +605,25 @@ mod tests {
     }
 
     #[test]
+    fn old_driver_setup_is_ignored_and_setup_moves_forward() {
+        let cfg: Config = serde_json::from_str(r#"{"sounds":false,"setup_step":"graphics","nvidia":{"step":{"step":"key-queued","boot":"old"}}}"#).unwrap();
+        assert!(!cfg.sounds);
+        assert_eq!(cfg.setup_step, Some(crate::setup::Step::GameDrive));
+        let json = serde_json::to_value(&cfg).unwrap();
+        assert!(json.get("nvidia").is_none());
+    }
+
+    #[test]
     fn the_display_choices_survive_a_restart() {
         let old: Config = serde_json::from_str(r#"{"sounds":false}"#).unwrap();
-        assert_eq!(old.nvidia, crate::nvidia::Flow::default(), "an older config has no NVIDIA step");
         assert_eq!(old.session_output, None, "and the automatic output");
         let mut c = Config::default();
-        c.nvidia.step = crate::nvidia::Step::KeyQueued { boot: "b1".into() };
-        c.session_output = Some(crate::screen::Output { width: 2560, height: 1440, refresh: Some(144) });
+        c.session_output = Some(crate::screen::Output {
+            width: 2560,
+            height: 1440,
+            refresh: Some(144),
+        });
         let back: Config = serde_json::from_slice(&serde_json::to_vec(&c).unwrap()).unwrap();
-        assert_eq!(back.nvidia, c.nvidia);
         assert_eq!(back.session_output, c.session_output);
     }
 
@@ -816,8 +822,12 @@ mod tests {
     fn values_the_launcher_cannot_use_are_kept_as_they_are() {
         let mut c = read(r#"{"width": 1280, "emulators": {
             "kyty": {"settings": {"width": "wide", "height": -5, "future": [1, {"a": 2}]}},
-            "ghost": {"enabled": false, "source": {"custom": {"executable": "/x"}}, "settings": {"speed": 3}}}}"#);
-        assert_eq!(c.width, 1280, "an unusable stored value leaves the old value in effect");
+            "ghost": {"enabled": false, "source": {"custom": {"executable": "/x"}}, "settings": {"speed": 3}}}}"#,
+        );
+        assert_eq!(
+            c.width, 1280,
+            "an unusable stored value leaves the old value in effect"
+        );
         assert_eq!(c.height, 1080);
         let back = again(&mut c);
         let kyty = &back.emulators["kyty"];
@@ -1056,14 +1066,16 @@ mod tests {
         let path = dir.path().join("config.json");
         let old = br#"{"width": 1280}"#;
         std::fs::write(&path, old).unwrap();
-        let threads: Vec<_> = (0..8).map(|i| {
-            let path = path.clone();
-            std::thread::spawn(move || {
-                let mut c = Config::from_json_with(old, Path::new(KYTY_ROOT));
-                c.height = 700 + i;
-                c.save_at(&path);
+        let threads: Vec<_> = (0..8)
+            .map(|i| {
+                let path = path.clone();
+                std::thread::spawn(move || {
+                    let mut c = Config::from_json_with(old, Path::new(KYTY_ROOT));
+                    c.height = 700 + i;
+                    c.save_at(&path);
+                })
             })
-        }).collect();
+            .collect();
         for t in threads {
             t.join().unwrap();
         }

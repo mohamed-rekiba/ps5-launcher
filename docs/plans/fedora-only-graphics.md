@@ -1,6 +1,6 @@
 # Plan: Fedora-only graphics, and test builds without keys
 
-Status: **approved**. The owner chose ("fix all"): drop the NVIDIA proprietary image (only
+Status: **graphics and custom Secure Boot removal implemented; unsigned local build mode pending**. The owner chose ("fix all"): drop the NVIDIA proprietary image (only
 Fedora-signed kernel modules; NVIDIA cards use nouveau + Mesa NVK; no Secure Boot key of ours),
 and let test builds run without the image signing key. The advisor (Codex) wrote the plan below.
 
@@ -29,7 +29,7 @@ Do not add `nouveau.config=NvGspRm=1`. Current upstream nouveau enables GSP by d
 
 The main Containerfile already installs `mesa-dri-drivers`, `mesa-vulkan-drivers`, `vulkan-loader` and `nvidia-gpu-firmware`. Fedora’s Vulkan package supplies NVK; NVIDIA firmware is a `linux-firmware` subpackage. No extra driver package is needed. Add image checks for the NVK library/ICD, nouveau module and required firmware. [Fedora Mesa package](https://packages.fedoraproject.org/pkgs/mesa/mesa-vulkan-drivers/fedora-44.html), [Fedora firmware package](https://packages.fedoraproject.org/pkgs/linux-firmware/nvidia-gpu-firmware/)
 
-Delete `Containerfile.nvidia`, `nvidia/`, `secureboot/`, certificate labels, `SECUREBOOT_KEY`, MOK commands and passwords. Remove `mokutil` unless retained solely for hardware diagnostics. Keep RPM Fusion dependencies needed for codecs.
+Completed: removed the proprietary-driver image, module-signing certificate labels and secrets, and enrollment commands and passwords. RPM Fusion dependencies remain for codecs.
 
 4. **Unsigned test path**
 

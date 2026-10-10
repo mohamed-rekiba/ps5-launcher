@@ -8,9 +8,12 @@
 # in a Fedora container with docker.
 set -euo pipefail
 here=$(cd "$(dirname "$0")" && pwd)
+# shellcheck source=packaging/os/config.sh
+source "$here/config.sh"
+os_config_validate
 if [ "$(uname -s)" != Linux ]; then
     repo=$(cd "$here/../.." && pwd)
-    exec docker run --rm -v "$repo:/src:ro" -w /src quay.io/fedora/fedora:44 sh -c \
+    exec docker run --rm -v "$repo:/src:ro" -w /src -e FEDORA_VERSION "$FEDORA_CONTAINER_IMAGE" sh -c \
         'dnf -y -q install jq python3 util-linux procps-ng >/dev/null && packaging/os/test-boot-health.sh'
 fi
 work=$(mktemp -d)
@@ -306,17 +309,6 @@ check "a socket others can write to does not count" is "$(j "$(att "$A")" .resul
 fresh
 status "$A" ""
 launcher ok
-printf 'IMAGE=nvidia\nIMAGE_REF=ghcr.io/owner/ps5-launcher-fedora:nvidia\n' > "$work/os-release"
-health
-check "the NVIDIA image on a GPU without the NVIDIA driver is unhealthy" has "$(j "$(att "$A")" .reason)" "NVIDIA driver"
-fresh
-status "$A" ""
-printf 'IMAGE=nvidia\nIMAGE_REF=ghcr.io/owner/ps5-launcher-fedora:nvidia\n' > "$work/os-release"
-gpu nvidia
-health
-check "the NVIDIA image on the NVIDIA driver is healthy" is "$(j "$(att "$A")" .result)" healthy
-fresh
-status "$A" ""
 gpu nvidia
 health
 check "the main image with the NVIDIA driver is unhealthy" has "$(j "$(att "$A")" .reason)" "no usable driver"

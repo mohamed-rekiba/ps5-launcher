@@ -3,7 +3,7 @@
 //! docs/plans/ps5-launcher-os.md). Parsing, the command lines and the root helper's answers live
 //! here; `system::call` runs them.
 
-use crate::nvidia::Image;
+use crate::system::Image;
 use crate::system::{Call, Ran};
 
 /// PS5 Launcher OS's root helper (packaging/os/files/usr/libexec/ps5-launcher/helper).
@@ -73,10 +73,7 @@ pub enum Task {
     UpdateCheck,
     Update,
     Rollback,
-    QueueKey,
-    /// Whether the NVIDIA image's key is enrolled (read-only).
-    KeyState,
-    /// Change to the main or the NVIDIA image (next restart).
+    /// Follow the main image (next restart).
     Switch(Image),
     /// Delete the boot health check's notice: the launcher showed it.
     HealthAck,
@@ -85,16 +82,13 @@ pub enum Task {
 /// A helper task's call. Its time is the helper's own deadline for the task, plus a margin.
 pub fn helper_call(task: Task) -> Call {
     // The helper's steps run one after the other, each under its own deadline: the shared lock
-    // and mokutil 30 s, skopeo 120 s, a download 2 hours.
+    // 30 s, skopeo 120 s, a download 2 hours.
     let (args, secs): (&[&str], u32) = match task {
         Task::UpdateCheck => (&["update-check"], 120 + HELPER_MARGIN),
         // Downloads the new system image: it may take a long time on a slow line.
         Task::Update => (&["update"], 2 * 60 * 60 + LONG_HELPER_MARGIN),
         Task::Rollback => (&["rollback"], 120 + HELPER_MARGIN),
-        Task::QueueKey => (&["queue-key"], 120 + 3 * 30 + HELPER_MARGIN),
-        Task::KeyState => (&["key-state"], 120 + 2 * 30 + HELPER_MARGIN),
         Task::Switch(Image::Main) => (&["switch", "main"], 30 + 2 * 60 * 60 + LONG_HELPER_MARGIN),
-        Task::Switch(Image::Nvidia) => (&["switch", "nvidia"], 30 + 120 + 2 * 30 + 2 * 60 * 60 + LONG_HELPER_MARGIN),
         // The helper only deletes a file.
         Task::HealthAck => (&["health-ack"], HELPER_MARGIN),
     };
@@ -103,92 +97,22 @@ pub fn helper_call(task: Task) -> Call {
     Call::new("pkexec", &all, secs)
 }
 
-/// What `helper update` (or `switch`) answered.
-#[derive(Clone, PartialEq, Eq, Debug)]
-pub enum Staging {
-    /// Staged: it installs at the next restart.
-    Done,
-    /// The NVIDIA image's Secure Boot key is not enrolled (exit 3): queue it with `queue-key`.
-    KeyRequired,
-    /// The key waits for the blue MOK screen (exit 4): restart and enroll it first.
-    KeyPending,
-    Failed(String),
-}
-
-pub fn staging(call: &Call, ran: &Ran) -> Staging {
-    match ran.code {
-        Some(0) => Staging::Done,
-        Some(3) if ran.stdout.trim() == "key-required" => Staging::KeyRequired,
-        Some(4) if ran.stdout.trim() == "key-pending" => Staging::KeyPending,
-        _ => Staging::Failed(ran.error(call)),
-    }
-}
-
-/// What `helper queue-key` printed.
-#[derive(Clone, PartialEq, Eq, Debug)]
-pub enum Key {
-    /// The 8 digits the blue MOK screen asks for.
-    Password(String),
-    /// Enrolled already: the update can go ahead.
-    Enrolled,
-}
-
-pub fn parse_key(output: &str) -> Result<Key, String> {
-    match output.trim() {
-        "key-enrolled" => Ok(Key::Enrolled),
-        p if p.len() == 8 && p.bytes().all(|b| b.is_ascii_digit()) => Ok(Key::Password(p.to_string())),
-        other => Err(format!("unexpected answer from queue-key: {other:?}")),
-    }
-}
-
-/// How "Download update" ended.
 #[derive(Clone, PartialEq, Eq, Debug)]
 pub enum UpdateEnd {
     Staged,
-    /// The key is queued: the blue MOK screen asks for this password at the next start. The
-    /// update is not staged yet; it is downloaded again once the key is enrolled.
-    Password(String),
-    /// A queued key waits for the blue screen: restart and enroll it first.
-    KeyPending,
     Failed(String),
 }
 
-/// `helper update`, and when the key is required, `helper queue-key`. When queue-key finds the
-/// key enrolled already, the update runs once more. `run` runs a call (`system::call_status`).
 pub fn update_flow(run: &dyn Fn(&Call) -> Result<Ran, String>) -> UpdateEnd {
-    stage_flow(run, Task::Update, false)
-}
-
-/// `task` (update, or switch nvidia), then the key as `update_flow` does. `requeue`: a key that
-/// waits for the blue screen (exit 4) is queued again too, for a new password; without it, the
-/// flow stops at KeyPending.
-pub fn stage_flow(run: &dyn Fn(&Call) -> Result<Ran, String>, task: Task, requeue: bool) -> UpdateEnd {
-    let update = helper_call(task);
-    for _ in 0..2 {
-        let ran = match run(&update) {
-            Ok(ran) => ran,
-            Err(e) => return UpdateEnd::Failed(e),
-        };
-        match staging(&update, &ran) {
-            Staging::Done => return UpdateEnd::Staged,
-            Staging::KeyPending if !requeue => return UpdateEnd::KeyPending,
-            Staging::KeyPending => {}
-            Staging::Failed(e) => return UpdateEnd::Failed(e),
-            Staging::KeyRequired => {}
-        }
-        let queue = helper_call(Task::QueueKey);
-        let key = run(&queue).and_then(|ran| if ran.code == Some(0) { parse_key(&ran.stdout) } else { Err(ran.error(&queue)) });
-        match key {
-            Ok(Key::Password(p)) => return UpdateEnd::Password(p),
-            Ok(Key::Enrolled) => {}
-            Err(e) => return UpdateEnd::Failed(e),
-        }
+    let call = helper_call(Task::Update);
+    match run(&call) {
+        Ok(ran) if ran.code == Some(0) => UpdateEnd::Staged,
+        Ok(ran) => UpdateEnd::Failed(ran.error(&call)),
+        Err(e) => UpdateEnd::Failed(e),
     }
-    UpdateEnd::Failed("the key is enrolled, but the helper still asks for it".into())
 }
 
-/// The digest `helper update-check` found on the NVIDIA image (`update-available <digest>`).
-/// The main image prints bootc's own text instead; bootc status then has the version.
+/// An optional digest from update-check; bootc status normally reports the version.
 pub fn parse_check(output: &str) -> Option<String> {
     output.trim().strip_prefix("update-available ").map(|d| d.trim().to_string()).filter(|d| !d.is_empty())
 }
@@ -214,26 +138,14 @@ pub fn status_text(status: &Status, found: Option<&str>, checking: bool) -> Stri
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::nvidia::Image;
+    use crate::system::Image;
 
     fn ran(code: i32, stdout: &str) -> Ran {
-        Ran { code: Some(code), stdout: stdout.into(), stderr: String::new() }
-    }
-
-    #[test]
-    fn the_helpers_exit_codes() {
-        let call = helper_call(Task::Update);
-        assert_eq!(staging(&call, &ran(0, "")), Staging::Done);
-        assert_eq!(staging(&call, &ran(3, "key-required\n")), Staging::KeyRequired);
-        assert_eq!(staging(&call, &ran(4, "key-pending\n")), Staging::KeyPending);
-        let failed = Ran { code: Some(1), stdout: String::new(), stderr: "helper: could not read ghcr.io/x\n".into() };
-        assert_eq!(
-            staging(&call, &failed),
-            Staging::Failed("pkexec /usr/libexec/ps5-launcher/helper update failed (exit 1): helper: could not read ghcr.io/x".into())
-        );
-        // pkexec's own refusal (126, 127) or a stray 3 is a failure, not a key step.
-        assert!(matches!(staging(&call, &ran(126, "")), Staging::Failed(_)));
-        assert!(matches!(staging(&call, &ran(3, "")), Staging::Failed(_)));
+        Ran {
+            code: Some(code),
+            stdout: stdout.into(),
+            stderr: String::new(),
+        }
     }
 
     /// Answers each helper task with the next answer given for it, and records the tasks.
@@ -260,43 +172,19 @@ mod tests {
     }
 
     #[test]
-    fn a_required_key_is_queued_and_its_password_shown() {
-        let (run, asked) = helper(&[("update", 3, "key-required\n"), ("queue-key", 0, "04718263\n")]);
-        assert_eq!(update_flow(&run), UpdateEnd::Password("04718263".into()));
-        assert_eq!(*asked.borrow(), ["update", "queue-key"]);
-    }
-
-    #[test]
-    fn a_key_enrolled_already_lets_the_update_run_again() {
-        let (run, asked) = helper(&[("update", 3, "key-required\n"), ("queue-key", 0, "key-enrolled\n"), ("update", 0, "")]);
-        assert_eq!(update_flow(&run), UpdateEnd::Staged);
-        assert_eq!(*asked.borrow(), ["update", "queue-key", "update"]);
-    }
-
-    #[test]
-    fn a_pending_key_or_a_failure_stops_the_update() {
-        let (run, _) = helper(&[("update", 4, "key-pending\n")]);
-        assert_eq!(update_flow(&run), UpdateEnd::KeyPending);
-        let (run, _) = helper(&[("update", 3, "key-required\n"), ("queue-key", 1, "")]);
-        assert!(matches!(update_flow(&run), UpdateEnd::Failed(e) if e.contains("queue-key failed (exit 1)")));
-        let (run, _) = helper(&[("update", 3, "key-required\n"), ("queue-key", 0, "key-enrolled\n"), ("update", 3, "key-required\n"), ("queue-key", 0, "key-enrolled\n")]);
-        assert!(matches!(update_flow(&run), UpdateEnd::Failed(_)), "no endless loop");
-        let failing = |_: &Call| Err("could not run pkexec".to_string());
-        assert_eq!(update_flow(&failing), UpdateEnd::Failed("could not run pkexec".into()));
-    }
-
-    #[test]
     fn helper_command_lines() {
         assert_eq!(helper_call(Task::UpdateCheck).args, [HELPER, "update-check"]);
         assert_eq!(helper_call(Task::Update).args, [HELPER, "update"]);
         assert_eq!(helper_call(Task::Rollback).args, [HELPER, "rollback"]);
-        assert_eq!(helper_call(Task::QueueKey).args, [HELPER, "queue-key"]);
-        assert_eq!(helper_call(Task::KeyState).args, [HELPER, "key-state"]);
-        assert_eq!(helper_call(Task::Switch(Image::Nvidia)).args, [HELPER, "switch", "nvidia"]);
-        assert_eq!(helper_call(Task::Switch(Image::Main)).args, [HELPER, "switch", "main"]);
+        assert_eq!(
+            helper_call(Task::Switch(Image::Main)).args,
+            [HELPER, "switch", "main"]
+        );
         assert_eq!(helper_call(Task::Update).program, "pkexec");
-        assert!(helper_call(Task::Switch(Image::Nvidia)).secs >= 3600, "a switch downloads an image");
-        assert!(helper_call(Task::Update).secs >= 3600, "a download takes time");
+        assert!(
+            helper_call(Task::Update).secs >= 3600,
+            "a download takes time"
+        );
     }
 
     #[test]
@@ -307,15 +195,8 @@ mod tests {
             (Task::UpdateCheck, 120),
             (Task::Update, 2 * 60 * 60),
             (Task::Rollback, 120),
-            // The longest chain of the helper's steps: skopeo (120 s), then mokutil --test-key,
-            // --revoke-import and --import (30 s each).
-            (Task::QueueKey, 120 + 3 * 30),
-            // skopeo, then mokutil --sb-state and --test-key.
-            (Task::KeyState, 120 + 2 * 30),
             // The lock (30 s), then bootc switch.
             (Task::Switch(Image::Main), 30 + 2 * 60 * 60),
-            // The lock, skopeo, mokutil twice, then bootc switch.
-            (Task::Switch(Image::Nvidia), 30 + 120 + 2 * 30 + 2 * 60 * 60),
         ];
         for (task, secs) in helper {
             assert!(helper_call(task).secs > secs, "{task:?}");
@@ -330,15 +211,6 @@ mod tests {
         // helper, which polkit allows without a password.
         assert_eq!(status_call().program, "pkexec");
         assert_eq!(status_call().args, [HELPER, "status"]);
-    }
-
-    #[test]
-    fn the_key_password() {
-        assert_eq!(parse_key("04718263\n"), Ok(Key::Password("04718263".into())));
-        assert_eq!(parse_key("key-enrolled\n"), Ok(Key::Enrolled));
-        for out in ["", "1234567", "123456789", "abcdefgh"] {
-            assert!(parse_key(out).is_err(), "{out:?}");
-        }
     }
 
     #[test]

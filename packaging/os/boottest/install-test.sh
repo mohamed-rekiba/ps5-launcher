@@ -14,28 +14,26 @@
 #    to the unsigned image, then to the wrong-key one: bootc upgrade refuses both. Then to the
 #    signed upgrade image (the candidate plus a marker file): bootc upgrade stages it; restart,
 #    check; bootc rollback, restart, check that the candidate runs again.
-# 4. bootc switch --enforce-container-sigpolicy to the NVIDIA candidate, restart, check its kernel
-#    arguments and modules (the VM has no NVIDIA card, so the driver cannot load); switch back to
-#    main, restart, check that no NVIDIA kernel argument or file is left.
 # Every step must pass; the first failure ends the test with a non-zero exit.
 #
-# The VM pulls the images from the registry, so they must be public. The host moves FOLLOW_TAG
+# The VM pulls the image from the registry, so it must be public. The host moves FOLLOW_TAG
 # with `sudo skopeo copy`, so root's registry login must be in place (the workflow does it).
 #
 # IMAGE         image name without tag (ghcr.io/OWNER/ps5-launcher-fedora)
-# MAIN_DIGEST, NVIDIA_DIGEST, UPGRADE_DIGEST   sha256:... of the three signed candidates
-# MAIN_TAG, NVIDIA_TAG                         their testing tags
+# MAIN_DIGEST, UPGRADE_DIGEST   sha256:... of the two signed candidates
 # UNSIGNED_DIGEST, UNSIGNED_TAG    CI only: the upgrade image, never signed
 # WRONGKEY_DIGEST, WRONGKEY_TAG    CI only: the upgrade image, signed with a throwaway key
 # FOLLOW_TAG    CI only: the tag the installed VM follows; this test moves it
-# SECUREBOOT_CERT_FILE   the certificate for the ISO
 # OUT           folder for the logs, screenshots and the test ISO (default target/os/install-test)
 set -euo pipefail
-: "${IMAGE:?}" "${MAIN_DIGEST:?}" "${NVIDIA_DIGEST:?}" "${UPGRADE_DIGEST:?}"
-: "${MAIN_TAG:?}" "${NVIDIA_TAG:?}" "${FOLLOW_TAG:?}"
+: "${IMAGE:?}" "${MAIN_DIGEST:?}" "${UPGRADE_DIGEST:?}"
+: "${FOLLOW_TAG:?}"
 : "${UNSIGNED_DIGEST:?}" "${UNSIGNED_TAG:?}" "${WRONGKEY_DIGEST:?}" "${WRONGKEY_TAG:?}"
 out=${OUT:-target/os/install-test}
 here=$(dirname "$0")
+# shellcheck source=packaging/os/config.sh
+source "$here/../config.sh"
+os_config_validate_iso
 ovmf_code=${OVMF_CODE:-/usr/share/OVMF/OVMF_CODE_4M.fd}
 ovmf_vars=${OVMF_VARS:-/usr/share/OVMF/OVMF_VARS_4M.fd}
 port=2222
@@ -67,7 +65,7 @@ start_vm() { # SERIAL_LOG, then more QEMU arguments
     local serial=$1
     shift
     rm -f "$qmp" "$pidfile"
-    qemu-system-x86_64 -enable-kvm -machine q35 -cpu host -m 6G -smp 4 \
+    qemu-system-x86_64 -enable-kvm -machine q35 -cpu host -m "$VM_MEMORY_MB" -smp "$VM_CPUS" \
         -drive "if=pflash,format=raw,readonly=on,file=$ovmf_code" \
         -drive "if=pflash,format=raw,file=$out/vars.fd" \
         -drive "file=$out/disk.qcow2,if=virtio,format=qcow2" \
@@ -154,7 +152,7 @@ refused() { # WHAT, then the bootc command: it must fail on the signature and st
     nothing_staged "$what"
     echo "ok   $what was refused on its signature"
 }
-check_system() { # main|nvidia [--session] [--enforced], LOG
+check_system() { # main [--session] [--enforced], LOG
     local log=$1
     shift
     vm sudo -n /usr/bin/bash -s "$@" < "$here/check-system" | tee "$out/$log" ||
@@ -173,14 +171,14 @@ sed -e "s|@PASSWORD@|$password|" \
     -e "s|@TARGET@|$IMAGE:$FOLLOW_TAG|" \
     "$here/install-test.ks.in" > "$out/install-test.ks"
 docker run --rm --privileged -v "$PWD:/src" -v "$out:/out" -w /src \
-    -e IMAGE="$IMAGE" -e MAIN_DIGEST="$MAIN_DIGEST" -e NVIDIA_DIGEST="$NVIDIA_DIGEST" \
+    -e FEDORA_VERSION -e FEDORA_ISO_VERSION -e FEDORA_GPG_FINGERPRINT \
+    -e IMAGE="$IMAGE" -e MAIN_DIGEST="$MAIN_DIGEST" \
     -e ISO_CACHE=/out -e KERNEL_ARGS="console=ttyS0,115200 inst.text" \
-    -e SECUREBOOT_CERT_FILE="${SECUREBOOT_CERT_FILE:-packaging/os/secureboot/public_key.der}" \
-    quay.io/fedora/fedora:44 packaging/os/build-iso.sh /out/install-test.iso /out/install-test.ks
+    "$FEDORA_CONTAINER_IMAGE" packaging/os/build-iso.sh /out/install-test.iso /out/install-test.ks
 
 step "Installing in a UEFI VM (up to 60 minutes)"
 cp "$ovmf_vars" "$out/vars.fd"
-qemu-img create -q -f qcow2 "$out/disk.qcow2" 30G
+qemu-img create -q -f qcow2 "$out/disk.qcow2" "${VM_DISK_GB}G"
 start_vm "$out/install-serial.log" -drive "file=$out/install-test.iso,media=cdrom,readonly=on"
 for i in $(seq 720); do
     vm_running || break
@@ -221,7 +219,7 @@ expect_booted_enforced "the enforced deployment"
 check_system boot2-check.log main --enforced
 
 # --- 3. Signature gates, upgrade and rollback -----------------------------------------------
-step "bootc switch to unsigned and wrong-key images is refused"
+step "bootc switch to unsigned and wrong-key image is refused"
 refused "bootc switch --enforce-container-sigpolicy to the unsigned image" \
     bootc switch --enforce-container-sigpolicy "$IMAGE:$UNSIGNED_TAG"
 refused "bootc switch --enforce-container-sigpolicy to the wrong-key image" \
@@ -231,7 +229,7 @@ refused "bootc switch --enforce-container-sigpolicy to the wrong-key image" \
 refused "bootc switch without the flag to the unsigned image" bootc switch "$IMAGE:$UNSIGNED_TAG"
 refused "bootc switch without the flag to the wrong-key image" bootc switch "$IMAGE@$WRONGKEY_DIGEST"
 
-step "bootc upgrade to unsigned and wrong-key images is refused"
+step "bootc upgrade to unsigned and wrong-key image is refused"
 follow "$UNSIGNED_DIGEST"
 refused "bootc upgrade to the unsigned image" bootc upgrade
 follow "$WRONGKEY_DIGEST"
@@ -253,21 +251,6 @@ expect_digest "$MAIN_DIGEST" "the rollback"
 vm test ! -e /usr/lib/ps5-launcher/upgrade-test || die "the rollback still has the upgrade's marker"
 check_system rollback-check.log main --enforced
 
-# --- 4. Main to NVIDIA and back -------------------------------------------------------------
-step "bootc switch to NVIDIA"
-vm sudo -n bootc switch --enforce-container-sigpolicy "$IMAGE:$NVIDIA_TAG" | tail -20
-restart_vm "nvidia"
-expect_digest "$NVIDIA_DIGEST" "the NVIDIA image"
-expect_booted_enforced "the NVIDIA image"
-check_system nvidia-check.log nvidia --enforced
-
-step "bootc switch back to main"
-vm sudo -n bootc switch --enforce-container-sigpolicy "$IMAGE:$MAIN_TAG" | tail -20
-restart_vm "main-again"
-expect_digest "$MAIN_DIGEST" "main after NVIDIA"
-expect_booted_enforced "main after NVIDIA"
-check_system main-again-check.log main --session --enforced
-
 vm sudo -n systemctl poweroff || true
 echo
-echo "RESULT: PASS (install, signature enforcement and gates, upgrade, rollback, switch to NVIDIA and back)"
+echo "RESULT: PASS (install, signature enforcement and gates, upgrade, rollback)"

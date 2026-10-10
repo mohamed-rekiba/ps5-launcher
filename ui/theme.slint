@@ -241,7 +241,6 @@ export struct QuickItem { label: string, status: string }
 // The NVIDIA driver's card on System → Display. step: the stepper's step (0 to 3), -1 without a
 // stepper. kind: 0 the offer (NVIDIA green chip), 1 a warning (old or unknown card), 2 done or
 // ready (green check), 3 neutral. lines: the text under the title, the first one larger.
-export struct NvCard { show: bool, step: int, kind: int, title: string, lines: [string] }
 // Pairing a controller on System → Controllers. step: the stepper's step (0 pairing mode, 1 scan,
 // 2 pair, 3 connect, 4 all done). kind: 0 a step runs or waits, 1 an error, 2 done. lines: the text
 // under the title, the first one larger. pictures: the buttons to hold, for each controller type.

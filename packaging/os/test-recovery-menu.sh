@@ -53,7 +53,7 @@ no_restart() { [ ! -s "$work/systemctl.log" ]; }
 
 settings=()
 menu
-check "the menu shows the four choices" screen_has "4  Restart"
+check "the menu shows the three choices" screen_has "3  Restart"
 check "  the image and its digest" screen_has "This system: main image, sha256:1234"
 check "  and ends at the end of input" true
 
@@ -63,55 +63,27 @@ check "  says when it starts" screen_has "The main image starts at the next rest
 check "  and restarts only when asked" no_restart
 
 settings=(exit-switch-main=1)
-menu 1 4
+menu 1 3
 check "a failed switch says so" screen_has "The switch failed (exit 1)"
-check "  and the menu comes back" test "$(grep -c "Choose 1-4" "$work/screen")" = 2
-check "  where 4 restarts" grep -qx reboot "$work/systemctl.log"
+check "  and the menu comes back" test "$(grep -c "Choose 1-3" "$work/screen")" = 2
+check "  where 3 restarts" grep -qx reboot "$work/systemctl.log"
 
-settings=(exit-switch-nvidia=3 out-queue-key=12345678)
 menu 2 y
-check "2 with the key not enrolled says key-required" screen_has "key-required"
-check "  shows the enrolment steps" screen_has "Enroll MOK"
-check "  queues the key when asked" helper_ran "switch nvidia" "queue-key"
-check "  shows the password" screen_has "password for the blue screen is: 12345678"
-check "  digit by digit" screen_has "digit 8: 8"
-check "  and does not restart by itself" no_restart
-
-settings=(exit-switch-nvidia=4)
-menu 2 n
-check "2 with the key pending says key-pending" screen_has "key-pending"
-check "  and queues nothing unless asked" helper_ran "switch nvidia"
-
-settings=(exit-switch-nvidia=3 out-queue-key=key-enrolled)
-menu 2 y
-check "a key already enrolled is said plainly" screen_has "already enrolled"
-check "  with no password shown" sh -c "! grep -q 'password for the blue screen' '$work/screen'"
-
-settings=(exit-switch-nvidia=3 exit-queue-key=1)
-menu 2 y
-check "a key that cannot be queued is an error" screen_has "Could not queue the key (exit 1)"
-
-settings=()
-menu 2 n
-check "2 with the key enrolled switches" helper_ran "switch nvidia"
-check "  and says the NVIDIA image starts" screen_has "The NVIDIA image starts at the next restart"
-
-menu 3 y
-check "3 rolls back" helper_ran "rollback"
+check "2 rolls back" helper_ran "rollback"
 check "  and restarts when asked" grep -qx reboot "$work/systemctl.log"
 
 settings=(exit-rollback=1)
-menu 3
+menu 2
 check "a failed rollback says so" screen_has "The rollback failed (exit 1)"
 check "  without a restart" no_restart
 
 settings=()
-menu 4
-check "4 restarts" grep -qx reboot "$work/systemctl.log"
+menu 3
+check "3 restarts" grep -qx reboot "$work/systemctl.log"
 check "  and runs no helper task" helper_ran
 
 menu 9 "rm -rf /"
-check "anything else is refused" test "$(grep -c "Type 1, 2, 3 or 4" "$work/screen")" = 2
+check "anything else is refused" test "$(grep -c "Type 1, 2 or 3" "$work/screen")" = 2
 check "  and runs no helper task" helper_ran
 
 echo '{"version": 1, "outcome": "rolled-back", "reason": "launcher not healthy (Plasma fallback)"}' > "$work/notice.json"

@@ -1,3 +1,0 @@
-# NVIDIA image: the closed driver instead of nouveau, and kernel modesetting, which gamescope needs.
-kargs = ["rd.driver.blacklist=nouveau", "modprobe.blacklist=nouveau", "nvidia-drm.modeset=1"]
-match-architectures = ["x86_64"]

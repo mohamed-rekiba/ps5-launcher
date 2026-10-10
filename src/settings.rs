@@ -76,15 +76,8 @@ pub enum SId {
     OsStatus,
     OsDownload,
     OsRollback,
-    // Display: the screen's GPU, the NVIDIA driver's steps, and the output for the next session.
+    // Display: the screen's GPU and the output for the next session.
     Gpu,
-    NvInstall,
-    NvLater,
-    /// The key was not enrolled, or its password is gone: queue it again.
-    NvRetry,
-    NvRestart,
-    /// "Use the open-source driver" (on the NVIDIA image).
-    NvOpenSource,
     OutResolution,
     OutRefresh,
     // Time: the zone, the NTP switch, and the zone picker (a region, then its zones; the indices
@@ -122,7 +115,7 @@ pub enum Cat {
     /// (pairing, Forget) when bluetoothctl finds an adapter.
     Controllers,
     Sound,
-    /// The screen's GPU and driver, the NVIDIA driver, and the screen output: when a connected
+    /// The screen's GPU and driver, and the screen output: when a connected
     /// screen shows in sysfs.
     Display,
     Storage,
@@ -232,7 +225,7 @@ pub fn category(id: SId) -> Option<Cat> {
         Volume | Mute | Output(_) => Cat::Sound,
         Drive(_) | Partition(..) => Cat::Storage,
         OsStatus | OsDownload | OsRollback => Cat::OsUpdates,
-        Gpu | NvInstall | NvLater | NvRetry | NvRestart | NvOpenSource | OutResolution | OutRefresh => Cat::Display,
+        Gpu | OutResolution | OutRefresh => Cat::Display,
         TimeZone | Ntp | TzBack | TzRegion(_) | TzZone(_) => Cat::Time,
         RestartLauncher | RunSetup => Cat::About,
         Open(cat) => cat,
@@ -405,12 +398,11 @@ pub fn system_settings_command(desktop: Option<&str>, macos: bool, exists: &dyn 
 }
 
 /// A dot on a category when something waits there: a launcher update on Updates, an emulator
-/// update on Emulators, a step of the NVIDIA driver on Display.
-pub fn waiting(cat: Cat, app_update: bool, emulator_update: bool, display: bool) -> bool {
+/// update on Emulators.
+pub fn waiting(cat: Cat, app_update: bool, emulator_update: bool) -> bool {
     match cat {
         Cat::Updates => app_update,
         Cat::Emulators => emulator_update,
-        Cat::Display => display,
         _ => false,
     }
 }
@@ -444,13 +436,6 @@ const HIT: f32 = 72.0;
 const HITS_TOP: f32 = 12.0;
 /// The About card under the rows, with its space or heading.
 const ABOUT_CARD: f32 = 36.0 + 30.0 + 120.0;
-/// The Secure Boot key's steps (Updates, Display), with the space under them: the setup's wide
-/// page, and the sheet, where the steps wrap more.
-const KEY_CARD: f32 = 510.0;
-const KEY_CARD_NARROW: f32 = 560.0;
-/// The NVIDIA driver's card on Display (the stepper, a title and its text).
-const NV_CARD: f32 = 300.0;
-const NV_CARD_NARROW: f32 = 400.0;
 /// The pairing card on Controllers: the stepper, a title, its text and the pictures of the
 /// buttons to hold; and without the pictures.
 const PAIR_CARD: f32 = 560.0;
@@ -778,7 +763,7 @@ impl App {
             add(&mut rows, SId::RestartLauncher, r);
             if Mode::current() == Mode::Os {
                 let mut r = row(4, "Run the setup again");
-                r.hint = "Network, time zone, controllers, the graphics driver and a drive for games".into();
+                r.hint = "Network, time zone, controllers, a drive for games".into();
                 add(&mut rows, SId::RunSetup, r);
             }
         }
@@ -791,9 +776,9 @@ impl App {
 
     /// The sheet on screen: the root sheet or the open sub-sheet, from every row.
     fn settings_page(&mut self) {
-        let (app_update, emulator_update, display) = (self.upd.installed.is_some() || self.app_update_available(), self.kyty_update_available(), self.display_dot());
+        let (app_update, emulator_update) = (self.upd.installed.is_some() || self.app_update_available(), self.kyty_update_available());
         let nav = &self.settings_nav;
-        let p = project(&nav.all, &nav.cats, nav.sub, &|cat| waiting(cat, app_update, emulator_update, display));
+        let p = project(&nav.all, &nav.cats, nav.sub, &|cat| waiting(cat, app_update, emulator_update));
         self.settings_nav.sections = p.sections;
         self.settings_ids = p.ids;
         self.settings_rows = p.rows;
@@ -890,25 +875,14 @@ impl App {
         ui.set_settings_title(sub.map(|c| c.label()).unwrap_or_default().into());
         ui.set_settings_hits(model(hits));
         // The About card: on About's sub-sheet, or at the root sheet's end on a desktop.
-        ui.set_settings_about(sub == Some(Cat::About) || (sub.is_none() && nav.cats.contains(&Cat::System)));
-        let key = match sub {
-            Some(Cat::OsUpdates) => self.os_key_digits(),
-            Some(Cat::Display) => self.nv_key_digits(),
-            _ => Vec::new(),
-        };
-        ui.set_settings_key(model(key));
-        ui.set_settings_key_last(
-            if self.overlay == Overlay::Setup {
-                "Choose \"Reboot\". The setup comes back, checks the key by itself and downloads the driver."
-            } else if sub == Some(Cat::Display) {
-                "Choose \"Reboot\". Back here, the launcher checks the key by itself; then download the driver."
-            } else {
-                "Choose \"Reboot\". Back here, choose Download update again."
-            }
-            .into(),
+        ui.set_settings_about(
+            sub == Some(Cat::About) || (sub.is_none() && nav.cats.contains(&Cat::System)),
         );
-        ui.set_settings_nv(if sub == Some(Cat::Display) { self.nv_card() } else { crate::NvCard::default() });
-        ui.set_settings_pair(if sub == Some(Cat::Controllers) { self.pair_card() } else { crate::PairCard::default() });
+        ui.set_settings_pair(if sub == Some(Cat::Controllers) {
+            self.pair_card()
+        } else {
+            crate::PairCard::default()
+        });
         ui.set_settings_mode(mode_label(Mode::current()).into());
         ui.set_settings_warning(self.cfg.lock().unwrap().save_notice().unwrap_or_default().into());
         ui.set_settings(model(self.settings_rows.clone()));
@@ -936,9 +910,11 @@ impl App {
         };
         let per_line = (width / 8.5).max(20.0) as usize;
         // The cards over the rows of a System area.
-        let (key, nv, pair) = if setup { (KEY_CARD, NV_CARD, (PAIR_CARD, PAIR_CARD_TEXT)) } else { (KEY_CARD_NARROW, NV_CARD_NARROW, (PAIR_CARD_NARROW, PAIR_CARD_TEXT_NARROW)) };
-        y += if slint::Model::row_count(&ui.get_settings_key()) > 0 { key } else { 0.0 };
-        y += if ui.get_settings_nv().show { nv } else { 0.0 };
+        let pair = if setup {
+            (PAIR_CARD, PAIR_CARD_TEXT)
+        } else {
+            (PAIR_CARD_NARROW, PAIR_CARD_TEXT_NARROW)
+        };
         let p = ui.get_settings_pair();
         y += match (p.show, p.pictures) {
             (false, _) => 0.0,
@@ -1077,11 +1053,20 @@ impl App {
             }
             SId::Resolution | SId::Present | SId::VideoOut | SId::Display | SId::OutResolution | SId::OutRefresh => self.settings_change(i, 1),
             SId::Volume | SId::Wired | SId::Drive(_) | SId::Gpu | SId::Pad(_) => {}
-            SId::Network(_) | SId::WifiScan | SId::SavedNetwork(_) | SId::Output(_) | SId::Partition(..) | SId::OsStatus | SId::OsDownload | SId::OsRollback => self.sys_activate(id),
-            SId::NvInstall | SId::NvLater | SId::NvRetry | SId::NvRestart | SId::NvOpenSource | SId::TimeZone | SId::TzBack | SId::TzRegion(_) | SId::TzZone(_) => {
+            SId::Network(_)
+            | SId::WifiScan
+            | SId::SavedNetwork(_)
+            | SId::Output(_)
+            | SId::Partition(..)
+            | SId::OsStatus
+            | SId::OsDownload
+            | SId::OsRollback => self.sys_activate(id),
+            SId::TimeZone | SId::TzBack | SId::TzRegion(_) | SId::TzZone(_) => {
                 self.sys_activate(id)
             }
-            SId::BtDevice(_) | SId::BtPair | SId::BtScan | SId::BtFound(_) | SId::BtPairClose => self.sys_activate(id),
+            SId::BtDevice(_) | SId::BtPair | SId::BtScan | SId::BtFound(_) | SId::BtPairClose => {
+                self.sys_activate(id)
+            }
             SId::RawgRemove => {
                 self.save_cfg(|c| c.rawg_key.clear());
                 self.rawg_status.clear();
@@ -1534,7 +1519,7 @@ mod tests {
             (Cat::Sound, &[Volume, Mute, Output(2)]),
             (Cat::Storage, &[Drive(0), Partition(0, 3)]),
             (Cat::OsUpdates, &[OsStatus, OsDownload, OsRollback]),
-            (Cat::Display, &[Gpu, NvInstall, NvLater, NvRetry, NvRestart, NvOpenSource, OutResolution, OutRefresh]),
+            (Cat::Display, &[Gpu, OutResolution, OutRefresh]),
             (Cat::Time, &[TimeZone, Ntp, TzBack, TzRegion(3), TzZone(40)]),
             (Cat::About, &[RestartLauncher, RunSetup]),
         ] {
@@ -1608,7 +1593,16 @@ mod tests {
         let system = p.sections[7];
         assert_eq!(p.ids[system + 1..], [SId::Open(Cat::Network), SId::Open(Cat::Controllers), SId::Open(Cat::Display), SId::Open(Cat::Time), SId::Open(Cat::About)]);
         let display = &p.rows[system + 3];
-        assert_eq!((display.kind, display.label.as_str(), display.more, display.dot), (4, "Display", true, true), "the NVIDIA driver waits there");
+        assert_eq!(
+            (
+                display.kind,
+                display.label.as_str(),
+                display.more,
+                display.dot
+            ),
+            (4, "Display", true, true),
+            "a projected notification dot"
+        );
         assert!(!p.rows[system + 1].dot);
         assert!(!p.ids.contains(&SId::Network(0)) && !p.ids.contains(&SId::RestartLauncher), "System rows live in their sub-sheet");
         assert!(!p.ids.contains(&SId::OpenSystemSettings), "not a desktop");
@@ -1618,7 +1612,7 @@ mod tests {
     fn a_dot_shows_on_the_section_where_an_update_waits() {
         let all = model_rows();
         let cats = categories(Mode::Session, Tools::default());
-        let p = project(&all, &cats, None, &|c| waiting(c, true, true, false));
+        let p = project(&all, &cats, None, &|c| waiting(c, true, true));
         let dotted: Vec<String> = p.rows.iter().filter(|r| r.dot).map(|r| r.label.to_string()).collect();
         assert_eq!(dotted, ["EMULATORS", "UPDATES"]);
     }
@@ -1768,13 +1762,13 @@ mod tests {
 
     #[test]
     fn dots_show_where_an_update_waits() {
-        assert!(waiting(Cat::Updates, true, false, false));
-        assert!(!waiting(Cat::Updates, false, true, true));
-        assert!(waiting(Cat::Emulators, false, true, false));
-        assert!(!waiting(Cat::Emulators, true, false, true));
-        assert!(!waiting(Cat::Games, true, true, true));
-        assert!(waiting(Cat::Display, false, false, true), "the NVIDIA driver waits");
-        assert!(!waiting(Cat::Display, true, true, false));
+        assert!(waiting(Cat::Updates, true, false));
+        assert!(!waiting(Cat::Updates, false, true));
+        assert!(waiting(Cat::Emulators, false, true));
+        assert!(!waiting(Cat::Emulators, true, false));
+        assert!(!waiting(Cat::Games, true, true));
+        assert!(!waiting(Cat::Display, false, false));
+        assert!(!waiting(Cat::Display, true, true));
     }
 
     #[test]

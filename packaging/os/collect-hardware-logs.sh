@@ -10,7 +10,7 @@
 # It prints the booted digest at the end: write it in hardware-test.md.
 #
 # What it saves: bootc status, the kernel command line, the GPU lines of lspci, the NVIDIA and
-# nouveau modules, the Secure Boot state and the subjects of the enrolled keys, the last 2000
+# nouveau modules, the GPU firmware diagnostics, the last 2000
 # lines of this boot's journal, the session log, the list of the launcher's game logs with the
 # end of the newest one, and the OS marker. The launcher has no log file of its own: the session
 # wrapper writes its output into ~/.cache/ps5-launcher-session.log.
@@ -54,13 +54,11 @@ home=${home:-/nonexistent}
 # The commands below read these from the environment, never pasted into the command text.
 export LOG_HOME=$home LOG_STAGE=$stage
 
-save hardware.txt 'echo "stage: $LOG_STAGE"; date -u; cat /sys/class/dmi/id/sys_vendor /sys/class/dmi/id/product_name /sys/class/dmi/id/bios_version 2>/dev/null; lscpu | grep -E "^Model name"; lspci -nn | grep -E "VGA|3D|Display"; mokutil --sb-state; uname -r'
+save hardware.txt 'echo "stage: $LOG_STAGE"; date -u; cat /sys/class/dmi/id/sys_vendor /sys/class/dmi/id/product_name /sys/class/dmi/id/bios_version 2>/dev/null; lscpu | grep -E "^Model name"; lspci -nn | grep -E "VGA|3D|Display"; uname -r'
 save bootc-status.json 'bootc status --json'
 save cmdline.txt 'cat /proc/cmdline'
 save lspci-gpu.txt 'lspci -nnk | grep -A3 -E "VGA|3D|Display"'
 save lsmod-gpu.txt 'lsmod | grep -E "^(nvidia|nouveau)"'
-save mokutil-sb-state.txt 'mokutil --sb-state'
-save mokutil-enrolled.txt 'mokutil --list-enrolled | grep -E "Subject:"'
 save journal.txt 'journalctl -b --no-pager | tail -n 2000'
 save os-marker.txt 'cat /usr/lib/ps5-launcher/os-release'
 save session.log 'tail -n 3000 "$LOG_HOME/.cache/ps5-launcher-session.log"'

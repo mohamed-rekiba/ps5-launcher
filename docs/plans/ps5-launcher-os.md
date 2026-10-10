@@ -8,14 +8,14 @@ advisor (Codex) and are recorded here and in the commit messages.
 
 | Phase | State |
 |---|---|
-| 0a. Image and installer spike | Done in CI: Fedora 44 bootc builds and boots under KVM, the signed NVIDIA modules build, the helper and SDDM fallback work. Real-hardware questions are open. |
+| 0a. Image and installer spike | Done in CI: Fedora 44 bootc builds and boots under KVM, the helper and SDDM fallback work. Real-hardware questions are open. |
 | 0b. UI prototype | Done; picks below. |
-| 1. OS image | Built: `packaging/os/`, `.github/workflows/os.yml` with VM gates and manual promotion. Not run yet: needs the owner's Secure Boot key, a public GHCR package and the release environment. **Image signing is built, not run yet: it needs the owner's signing key and one green end-to-end run, then a reviewed change lifts the release guard.** |
+| 1. OS image | Built: `packaging/os/`, `.github/workflows/os.yml` with VM gates and manual promotion. Not run yet: needs a public GHCR package and the release environment. **Image signing is built, not run yet: it needs the owner's signing key and one green end-to-end run, then a reviewed change lifts the release guard.** |
 | 2. System layer and session | Done. |
 | 3. Power menu, Quick Menu, PS button, power key | Done. |
 | 4. Settings with the side rail | Done; then the side rail was replaced by the old right-side sheet at the owner's request. The System areas open as sub-sheets in the same panel. |
 | 5. On-screen keyboard | Done. |
-| 6. System pages | Network, Sound, Storage, Updates done. Display (with the NVIDIA offer) and Time in progress. Controllers (battery, Bluetooth pairing, Forget) built, not yet tried with a real adapter. File sharing and formatting not built. |
+| 6. System pages | Network, Sound, Storage, Updates done. Display (with Fedora driver information) and Time in progress. Controllers (battery, Bluetooth pairing, Forget) built, not yet tried with a real adapter. File sharing and formatting not built. |
 | 7. First-start setup | Not started. |
 | 8. Docs, migration, release | Not started. |
 
@@ -49,12 +49,7 @@ first-start setup.
 - A **Quick Menu** (like the PS5 Control Center) for volume, Wi-Fi, controllers, downloads and power.
 - An on-screen keyboard built in Slint, inside the launcher, made for a controller.
 - Power actions leave Settings and go to one **Power menu** (table below).
-- NVIDIA kernel modules are built at image build time from RPM Fusion's akmod and signed with our
-  own Secure Boot key.
-- **NVIDIA driver on offer, not forced.** One ISO installs the main image; NVIDIA PCs start on the
-  open-source drivers (nouveau and NVK). The launcher finds the card and offers "Install the NVIDIA
-  driver", which switches the PC to the NVIDIA image. Two ways out that need no launcher: an ISO
-  boot entry "Install with the NVIDIA driver", and a recovery boot entry (Phase 1).
+- **Fedora graphics:** kernel drivers and Mesa, including nouveau and NVK for NVIDIA.
 - **Fallback desktop: a minimal but complete KDE Plasma.** Not Plasma Mobile (touch first). Plasma
   Bigscreen (TV first, packaged in Fedora) gets a short controller test in Phase 0b as an option.
 - The UI asks the system what it can do (capabilities). It never asks "which mode am I in?".
@@ -108,7 +103,7 @@ Phase 0b  UI prototype ──► Phase 2  System layer + session ──► Phase
                                                     Phases 3 to 7 (launcher UI) ┘
 ```
 
-Phase 0a goes first because it can change the plan: if the installer or the signed NVIDIA module
+Phase 0a goes first because it can change the plan: if the installer or Fedora graphics
 does not work, the UI work does not help. Phases 0b and 2 to 7 are launcher code and run in
 parallel with Phase 1.
 
@@ -121,17 +116,12 @@ A throwaway branch that answers these questions, on a pinned Fedora release:
    since Fedora 43; its source needs a transport prefix (for example `registry:`), its update
    target does not. Verify on the real netinstaller, not only in the kickstart parser.
 3. After install: `bootc upgrade` to a second image, then `bootc rollback`, both work.
-4. NVIDIA: the kmod built at image build time loads on real hardware **with Secure Boot on**,
-   after MOK enrolment.
+4. Fedora graphics load with Secure Boot enabled on real hardware.
 5. `image-builder --bootc-ref` makes a qcow2 that boots in QEMU.
 6. **The first start on the open-source NVIDIA drivers:** on the pinned kernel, Mesa and
    gamescope, with gamescope driving the screen directly (not nested in a desktop). Test at least
    one Turing or Ampere card and one Ada or Blackwell card. Record which cards show the launcher
-   and which do not. If many fail, the installer choice comes back as the main path.
-7. **The switch from main to NVIDIA:** queue the key, restart, enroll, `bootc switch`, restart.
-   Measure the real download size when the NVIDIA image is built `FROM` the exact main digest.
-8. **The switch back:** `bootc switch` from NVIDIA to main leaves no nouveau block, kernel
-   argument or NVIDIA configuration behind.
+   and which do not. Record limitations in the hardware test results.
 
 Check-in: a short report of what worked, with versions pinned. The plan is updated before Phase 1.
 
@@ -143,10 +133,8 @@ runner with KVM; nothing on real hardware yet):
 | 1. Image with gamescope and the launcher | Builds natively on `fedora-bootc:44` (kernel 7.2.9, Mesa 26.2.4, gamescope 3.16.29, Plasma 6.7.5), 1.94 GB; `bootc container lint` passes. RPM Fusion's ffmpeg and freeworld VA drivers replace Fedora's cleanly. |
 | 2. Netinstall ISO with the `bootc` kickstart | ISO builds (1.2 GB, under the 2 GiB limit). **Not installed yet** (needs the images in a registry). |
 | 3. Upgrade and rollback | Not tested yet. |
-| 4. Signed NVIDIA kmod | `akmod-nvidia` 615.71.09 builds the open modules (Dual MIT/GPL) for the image's kernel and signs all five with our key. akmods builds as its own user, so the key mount must be readable (mode 0444). Loading under Secure Boot: **needs real hardware**. |
 | 5. qcow2 from `image-builder` | Works; the qcow2 boots in QEMU/KVM. SDDM logs the fallback user in to the PS5 Launcher session. |
 | 6. Open-source NVIDIA driver at first start | **Needs real hardware.** In the VM, gamescope refuses the software renderer ("Failed to initialize Vulkan: not a valid physical device"), so the VM cannot show the launcher. |
-| 7, 8. Switch to NVIDIA and back | NVIDIA image = main + 3 layers, about 0.5 GB uncompressed. Real download size and the switch itself: not tested yet. |
 
 Found and fixed along the way:
 - A session that ends at once made SDDM's Relogin loop. The wrapper now gives up at the third
@@ -168,9 +156,7 @@ A Slint prototype with fake data, run with `--windowed`, to try the controller f
 4. The on-screen keyboard: docked at the bottom, the edited field lifted above it, layouts for
    password, address, number and search, controller shortcuts, hold Ⓐ for accents, game-title
    suggestions in search.
-5. The "Install the NVIDIA driver" flow: the offer, the download, the Secure Boot screen that
-   explains the blue MOK screen and its keyboard need, and the restarts.
-6. Plasma Bigscreen in a VM with a controller, to decide between it and minimal Plasma.
+5. Plasma Bigscreen in a VM with a controller, to decide between it and minimal Plasma.
 
 Output: screenshots and a list of design changes. Nothing from the prototype is merged.
 
@@ -183,16 +169,10 @@ picks decided with the project's advisor):
 | Quick Menu | B, the right drawer | Seven cards do not fit the bottom strip without cutting their text. |
 | Power menu | A, the centred list | Compact, and it fits every mode's set of actions. |
 | Keyboard | A, docked QWERTY | Larger keys, easier to aim with a D-pad and to read from a sofa. |
-| NVIDIA flow | The stepper, with numbered steps | With Secure Boot on, key enrolment comes before the driver download. |
 
 Fixes before Phases 3 to 5: one focus style everywhere (the red focused "Close game" is too
 loud) with the button prompts of the connected controller; rail labels and status readable from a
 sofa; every flow complete for the controller (Back, focus return, loss dialog, cancel, errors).
-
-**MOK password:** a random 8-digit number for each enrolment request, shown on screen with each
-digit numbered, "no spaces", and "write this down or take a photo before the restart". MokManager
-can ask for single characters by position, and the screen explains that. This replaces the fixed
-`ps5launcher` password in the spike kickstart (to change in Phase 1).
 
 ## Phase 1: The OS image (`packaging/os/`)
 
@@ -204,67 +184,17 @@ image before the migration (Phase 8), and the Fedora image is not released yet.
 | File | What it does |
 |---|---|
 | `packaging/os/Containerfile` | The main image, `FROM` the pinned `fedora-bootc` digest. |
-| `packaging/os/Containerfile.nvidia` | The NVIDIA image, `FROM` the **exact tested digest of the main image**, plus one driver layer. A first stage builds and signs the kmods against that image's kernel. |
 | `packaging/os/files/` | Configuration copied into `/usr` where possible, so updates replace it. |
 | `packaging/os/ps5-launcher-os.ks` | The kickstart for the network installer. |
 | `packaging/os/build-iso.sh` | Fedora's netinstall ISO with the kickstart. |
 | `packaging/os/README.md` | How it is built and tested. |
 | `.github/workflows/os.yml` | Build, check, sign, push to a testing tag, then promote the tested digest. |
 
-### NVIDIA kmod build (first stage of `Containerfile.nvidia`)
+### Fedora graphics
 
-- Read the kernel version from the main image's `/usr/lib/modules/`. Never use `uname -r`: in a
-  container build it returns the build host's kernel.
-- The NVIDIA package install must not upgrade the kernel; the kernel packages are locked during
-  the transaction. CI checks that the kernel in the NVIDIA image is the main image's kernel.
-- The two images are published as a pair. The NVIDIA image carries a label with its parent main
-  digest. Main and NVIDIA share every layer except the driver layer, so a switch downloads only
-  that layer, plus any main layers the PC does not have yet. CI reports the compressed size of the
-  driver layer.
-- Install the matching `kernel-devel`, then `akmod-nvidia`, then
-  `akmods --force --kernels <that version>`. Install the resulting kmod RPM in the final stage, run
-  `depmod` for that kernel, and regenerate the initramfs if the module or the nouveau block must
-  be in it.
-- The signing key comes in only as a build secret mount for the signing step. It is never in a
-  layer or a build cache. Secret name: `SECUREBOOT_KEY` (the user sets the value).
-- Checks: the vermagic of every NVIDIA module matches the image kernel. A signer string is not
-  proof; Phase 0a and the release test prove that the module loads under Secure Boot.
-- If any of this fails (a new kernel that the driver does not support yet), CI does not publish,
-  and users keep the last good image.
-
-### NVIDIA: which cards, and how the driver gets installed
-
-**Cards.**
-
-- Turing and newer (RTX 20, GTX 16 and later): the NVIDIA image with the open kernel modules.
-  The NVIDIA GSP firmware these cards need comes with the GPU firmware packages.
-- Maxwell, Pascal and Volta: no NVIDIA image in the first version (open question 5). They stay on
-  the open-source drivers. NVK supports them, but nouveau mostly cannot raise their clock speed,
-  so the launcher says plainly: "Games will be very slow on this card."
-- Kepler and older: the same message.
-- Detection uses the **GPU that drives the screen**, by PCI device ID, not any NVIDIA chip in the
-  PC.
-
-**The offer in the launcher** (first-start setup, and System → Display afterwards):
-
-1. "NVIDIA GeForce RTX 3070 found. Install the NVIDIA driver to play at full speed. Download:
-   about N MB, needs a restart." **Install driver** / **Later**.
-2. Before downloading, the helper checks for a network connection, free disk space and an update
-   already waiting. Each case gets its own message.
-3. **Secure Boot on:** first the key, then the switch. The helper queues the key. The launcher
-   explains the blue MOK screen, shows the password in large text, and says plainly that **this
-   screen needs a USB keyboard** (it runs before Linux, so the on-screen keyboard cannot work
-   there). Restart. The launcher checks that the key is enrolled (`mokutil`). Only then does it
-   stage the NVIDIA image. Restart again. If the key was not enrolled, nothing is switched, and
-   the launcher offers to try again.
-4. **Secure Boot off:** stage the NVIDIA image, then one restart.
-5. The page shows each state separately: downloading, ready, waiting for the key, restart needed.
-
-**Going back.** "Use the open-source driver" is a `bootc switch` to the main image. Rollback is
-only the emergency path: after one NVIDIA update, the previous deployment is NVIDIA too.
-
-**A changed graphics card.** At each start the launcher compares the GPU with the image: NVIDIA
-card on main offers the driver; no NVIDIA card on the NVIDIA image offers the switch back.
+The single main image uses Fedora kernel drivers and Mesa. NVIDIA uses nouveau and NVK.
+Fedora maintains the Secure Boot trust chain; the project does not sign kernel modules or
+manage enrollment. Graphics compatibility and performance need real hardware tests.
 
 **Health check and automatic recovery.** bootc does not notice a black screen. A boot health
 unit checks that the expected driver is bound to the GPU, gamescope runs, and the launcher
@@ -273,10 +203,7 @@ starts the previous deployment. The launcher then shows what happened, and the l
 
 **Ways out that need no launcher.**
 
-- ISO boot menu: **"Install with the NVIDIA driver"**, for cards where the open-source driver shows
-  nothing. The kickstart installs the NVIDIA image and queues the key.
-- Recovery boot entry in the installed system: switches to the other image in text mode, then
-  restarts.
+- Recovery in the installed system can roll back or switch to the main update channel.
 
 ### Contents of the image
 
@@ -293,8 +220,6 @@ starts the previous deployment. The launcher then shows what happened, and the l
   the packages are installed.
 - **Launcher helpers installed explicitly:** `mpv-libs` and `yt-dlp` are only "recommends" in
   `packaging/linux/nfpm.yaml`, and the image must not depend on weak dependencies.
-- **NVIDIA image only:** the kmods, the driver libraries, kernel arguments in
-  `/usr/lib/bootc/kargs.d/*.toml` (nouveau off, `nvidia-drm.modeset=1`).
 - **Services the launcher drives:** NetworkManager, BlueZ, PipeWire with WirePlumber, udisks2,
   Samba and firewalld (Samba off by default), time sync.
 - **No automatic updates by bootc:** `bootc-fetch-apply-updates.timer` is on in fedora-bootc
@@ -314,42 +239,24 @@ starts the previous deployment. The launcher then shows what happened, and the l
 - **Privileged helper:** polkit does not raise the rights of an arbitrary command. A small
   root-owned helper (`/usr/libexec/ps5-launcher/helper`) accepts a fixed list of verbs:
   `update-check`, `update`, `rollback`, `share on|off` (only the Samba unit and its firewall
-  service), `set-next-session`, `clear-next-session`, `format <drive>`, `queue-key`,
-  `switch main|nvidia` (only our two image names, and only signed images, by the image signature
+  service), `set-next-session`, `clear-next-session`, `format <drive>`,
+  `switch main` (only our image, and only signed images, by the image signature
   policy). A polkit action allows it with no password for
   the active local user. The launcher calls it through `pkexec`. Every verb is tested with no
   desktop authentication agent running.
 - **OS marker:** `/usr/lib/ps5-launcher/os-release` tells the launcher that it runs in the OS and
-  which image (`main` or `nvidia`).
-
-### Secure Boot key lifecycle
-
-- The public certificate is in the repository and in the image. The kickstart queues it with
-  `mokutil --import`; the user enrolls it once on the blue MOK screen.
-- If enrolment is missed: the ISO keeps the "Enroll the Secure Boot key again" boot entry, and the
-  launcher's About page shows the state and the steps.
-- **Key rotation must never strand an NVIDIA PC.** Queuing a key is only a request; the user can
-  skip it, and machines can skip releases. So:
-  - Each NVIDIA image carries a label with the fingerprint of the key that signed its modules.
-  - The automatic bootc update timer is off. Updates go only through the helper, which reads the
-    label of the new image before it stages it. If Secure Boot is on and that key is not enrolled
-    (`mokutil --list-enrolled`), the helper does not stage the image. It queues the key, and the
-    launcher shows "Enroll the new key at the next restart" with the steps.
-  - The current deployment stays as the rollback entry until the new one has started with its
-    modules loaded.
-- The Fedora kernel's own Secure Boot trust is separate. Only our modules need our key.
+  the `main` image.
 
 ### Checks in CI, and publishing
 
-- `bootc container lint` on both images.
+- `bootc container lint` on the main image.
 - Required packages and libraries present (`rpm -q`, `ldconfig -p` for libmpv and libarchive).
-- The NVIDIA checks above.
 - Boot test: `image-builder` makes a qcow2, QEMU boots it, and a screenshot of the VM screen is
   compared against the launcher's first screen. CI checks for `/dev/kvm` first. GitHub does not
   officially support nested virtualization; without KVM the test runs on a self-hosted runner.
 - CI pushes to a testing tag. Only a digest that passed every check is promoted to the release
   tags.
-- Before each OS release, by hand: the network install from the ISO, MOK enrolment, an update and
+- Before each OS release, by hand: the network install from the ISO, an update and
   a rollback. The qcow2 test does not cover these.
 - The ISO must stay under GitHub's 2 GiB limit per release file; the existing size check stays.
 
@@ -473,7 +380,7 @@ tested before its UI. One check-in per page.
    battery, forget.
 3. **Sound:** output device, volume.
 4. **Display:** gamescope output resolution and refresh rate. The graphics driver: which one runs,
-   and the NVIDIA offer or "Use the open-source driver" (Phase 1).
+   and Fedora driver information (Phase 1).
 5. **Storage:** drives and free space. A new drive shows a toast "Use it for games?": add it as a
    game folder, or format it for games. Format (through the helper, ext4 or exFAT, to decide)
    needs a second confirmation and refuses the system disk.
@@ -497,10 +404,8 @@ The launcher's own text stays English. Translating the launcher is a separate pr
 
 ## Phase 7: First-start setup
 
-At the first start in the OS: network → time zone → pair controllers → graphics driver (only when
-an NVIDIA card is found) → game drive. Every step can be skipped. The driver downloads in the
-background while the player goes on with the setup. The installer asks only for the disk and the
-user.
+At the first start in the OS: network → time zone → pair controllers → game drive.
+Every step can be skipped. Graphics drivers arrive with Fedora system updates.
 
 ## Phase 8: Docs, migration and release
 
@@ -513,21 +418,15 @@ user.
 
 ## Decisions after the spike
 
-- **Image names:** `ghcr.io/mohamedalirashad/ps5-launcher-fedora:main` and `:nvidia` (the owner is
-  a workflow variable). Candidates are `testing-main-<run id>` and `testing-nvidia-<run id>`;
-  promoted digests also get dated tags. The Bazzite repository and its tags are never used.
+- **Image name:** `ghcr.io/<owner>/<OS_IMAGE_NAME>:main`, configured by repository variables.
+  Candidates use `testing-main-<run id>`; promoted digests also get dated tags.
+  The Bazzite repository and its tags are never used.
 - **Publishing:** candidates only on schedule and releases; promotion only by hand, from `main`,
   after the VM gates, behind the `os-fedora-release` environment, citing hardware results for that
-  exact run and digest pair. A guard in the workflow file blocks promotion and ISO publication
+  exact run and digest. A guard in the workflow file blocks promotion and ISO publication
   until image signing exists.
 - **The launcher goes in as the rpm** built from the release binary; the image installs the
   rpm's recommendations explicitly.
-- **MOK passwords:** random 8 digits for launcher-driven enrolment; `12345678` only for the ISO's
-  "Install with the NVIDIA driver" entry.
-- **NVIDIA key gate:** the image label `io.github.ps5-launcher.secureboot-cert-sha256` names the
-  certificate; the helper checks it with `mokutil --test-key` (pending does not count) and stages
-  the NVIDIA image by digest. `bootc status` and every helper task run as root through pkexec,
-  each with its own deadline.
 - **SSH off** in the release image (a preset keeps it off); the fallback user has a locked
   password and is not an administrator.
 - **Boot health:** our own unit, not greenboot; one automatic rollback, only on the first attempt
@@ -538,10 +437,10 @@ user.
   holding the `handle-power-key` inhibitor through `systemd-inhibit` and a pipe.
 - **Image signing (built, not run yet):** a dedicated cosign key pair (cosign v3.1.3, legacy
   sigstore attachments in GHCR, simple signing payload, no transparency log); a reject-by-default
-  `/etc/containers/policy.json` and a `registries.d` entry in both images;
+  `/etc/containers/policy.json` and a `registries.d` entry in the main image;
   `--enforce-container-sigpolicy` on every helper switch; the helper checks the exact digest
   through skopeo's image proxy before it trusts it (skopeo inspect checks nothing); the public
-  ISO pins the promoted digests, and the first start turns enforcement on. Secrets
+  ISO pins the promoted digest, and the first start turns enforcement on. Secrets
   `OS_IMAGE_SIGNING_KEY` and `COSIGN_PASSWORD` in the environment `os-fedora-signing` (main only).
   See `packaging/os/signing/README.md`.
 
@@ -552,22 +451,16 @@ user.
    screen (greetd running the launcher in a greeter mode) comes later, with multi-user.
 3. ~~New image name and tags~~: decided (see above). Still open: how long the Bazzite image keeps
    being built for current users.
-4. **NVIDIA license:** confirm what redistributing the driver inside our image requires before the
-   first public release.
-5. ~~Older NVIDIA cards~~: decided, not supported in the first version; they run on the
-   open-source driver, and the launcher warns that games will be very slow.
 6. **Time zone detection:** use an outside geolocation service (asks first), or a list only?
 7. **Hybrid laptops (Intel + NVIDIA):** out of scope for the first version unless someone can test.
 
 ## Not verified
 
 - The kickstart `bootc` command on the real Fedora netinstaller (Phase 0a).
-- A signed NVIDIA kmod loading under Secure Boot on a bootc image (Phase 0a).
+- Fedora graphics loading under Secure Boot on a bootc image (Phase 0a).
 - ~~KVM on GitHub's standard runners~~: they have it (the spike's VM boot ran there).
-- RPM Fusion packaging of the NVIDIA 580 legacy branch for current Fedora.
-- gamescope on the current NVIDIA driver, and gamescope on NVK (there are open gamescope issues
+- gamescope on Fedora graphics and NVK (there are open gamescope issues
   about NVK).
-- The real download size of the switch to the NVIDIA image.
 - Plasma Bigscreen with a controller.
 - Whether controller presses reach a game while the Quick Menu is open, and whether a grab stops them.
 - The polkit defaults for NetworkManager, BlueZ, udisks2 and timedated without an authentication agent.

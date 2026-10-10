@@ -8,16 +8,10 @@
 #   helper set-next-session plasma   log in to Plasma once, at the next automatic login
 #   helper clear-next-session        forget that (Plasma's autostart, and every boot)
 #   helper status                    bootc status --json (it needs root on a booted system)
-#   helper update-check              is a system update available? (On the NVIDIA image it
-#                                    prints update-available <digest> or up-to-date.) A channel
-#                                    whose image is not signed with our key fails.
+#   helper update-check              is a system update available? (A channel whose image is not signed with our key fails.)
 #   helper update                    download a system update; it installs at the next restart
 #   helper rollback                  start the previous system at the next restart
-#   helper switch main|nvidia        change to the main or the NVIDIA image (next restart)
-#   helper queue-key                 queue the next NVIDIA image's Secure Boot key; prints the
-#                                    password the blue MOK screen asks for, or key-enrolled
-#   helper key-state                 is that key enrolled? Prints enrolled, pending, missing or
-#                                    secure-boot-off, and changes nothing
+#   helper switch main        follow the main image (next restart)
 #   helper set-timezone <zone>       set the time zone to one that timedatectl lists
 #   helper set-ntp on|off            set the time automatically, or not
 #   helper health-ack                delete the boot health check's notice (the launcher showed it)
@@ -25,24 +19,17 @@
 # Image signatures (packaging/os/signing/README.md): every image this helper trusts is checked
 # first, by its exact digest, against the system's containers policy and the shipped key, with
 # $verify (skopeo's image proxy; only the manifest, the signatures and the config are fetched).
-# Its labels are then read from that same checked digest. Every bootc switch passes
+# Every bootc switch passes
 # --enforce-container-sigpolicy, so bootc stores the choice and its later pulls require it too.
-# An image that fails the check stops the task (exit 1) before bootc or mokutil runs.
+# An image that fails the check stops the task (exit 1) before bootc runs.
 #
 # update, switch and rollback hold $lock_file while they run, and so does the boot health check
 # (/usr/libexec/ps5-launcher-os/boot-health) before it rolls back: the two never change the
 # deployments at the same time. A task that cannot get the lock within $short seconds fails.
 #
-# With Secure Boot on, the NVIDIA image's driver only loads when its signing key is enrolled.
-# So update and switch nvidia first check the new image's key, and stage it by digest only
-# when the key is enrolled. Otherwise they print one word and exit:
-#   key-required (exit 3)  run queue-key, restart, and enroll the key on the blue screen
-#   key-pending  (exit 4)  the key waits for the blue screen: restart and enroll it
 set -eu
 sddm_dir=/etc/sddm.conf.d
 os_release=/usr/lib/ps5-launcher/os-release
-cert_dir=/usr/share/ps5-launcher/secureboot
-state_dir=/var/lib/ps5-launcher
 health_dir=/var/lib/ps5-launcher-os/health
 lock_file=/run/ps5-launcher-os.lock
 verify=/usr/libexec/ps5-launcher/verify-image
@@ -54,10 +41,9 @@ long=7200
 PATH=/usr/sbin:/usr/bin
 export PATH
 next_session="$sddm_dir/90-ps5-launcher-os-next-session.conf"
-cert_label=io.github.ps5-launcher.secureboot-cert-sha256
 
 usage() {
-    echo "usage: helper set-next-session plasma | clear-next-session | status | update-check | update | rollback | switch main|nvidia | queue-key | key-state | set-timezone <zone> | set-ntp on|off | health-ack" >&2
+    echo "usage: helper set-next-session plasma | clear-next-session | status | update-check | update | rollback | switch main | set-timezone <zone> | set-ntp on|off | health-ack" >&2
     exit 2
 }
 
@@ -78,47 +64,14 @@ marker() {
     sed -n "s/^$1=//p" "$os_release" | head -1
 }
 
-# Whether Secure Boot checks kernel modules. Anything but a clear answer stops the task: guessing
-# "off" would stage an image whose driver may not load.
-secure_boot() {
-    sb=$(timeout -k 10 "$short" mokutil --sb-state 2>&1 || true)
-    case "$sb" in
-    *"validation is disabled in shim"*) return 1 ;;
-    *"SecureBoot enabled"*) return 0 ;;
-    *"SecureBoot disabled"*) return 1 ;;
-    *) fail "unknown Secure Boot state: $sb" ;;
-    esac
-}
-
 # The digest `ref` (NAME:TAG) points at now, checked against the signature policy. Sets $digest,
-# and $sha: the certificate label of that checked digest. skopeo inspect checks no signature, so
-# it only finds the digest; $verify then checks exactly that digest and reads its label.
+# skopeo inspect only finds the digest; $verify checks exactly that digest.
 verified_digest() {
     digest=$(timeout -k 10 "$check" skopeo inspect --format "{{.Digest}}" "docker://$1") ||
         fail "could not read $1"
     printf '%s' "$digest" | grep -qxE 'sha256:[0-9a-f]{64}' || fail "no digest for $1"
-    sha=$(timeout -k 10 "$check" "$verify" "${1%:*}@$digest" "$cert_label") ||
+    timeout -k 10 "$check" "$verify" "${1%:*}@$digest" >/dev/null ||
         fail "${1%:*}@$digest: no valid signature by this system's image signing key"
-}
-
-# verified_digest, and the certificate file the checked label names. Sets $digest and $cert.
-resolve() {
-    verified_digest "$1"
-    printf '%s' "$sha" | grep -qxE '[0-9a-f]{64}' || fail "$1 has no valid $cert_label label"
-    cert="$cert_dir/$sha.der"
-    # Only a real file in the system's own folder, whose contents are what the label names.
-    if [ -L "$cert_dir" ] || [ -L "$cert" ] || [ ! -f "$cert" ]; then
-        fail "$1 is signed with a key this system does not know ($sha)"
-    fi
-    actual=$(sha256sum < "$cert")
-    [ "${actual%% *}" = "$sha" ] || fail "$cert does not match its name"
-}
-
-# The NVIDIA image's reference: the running one on the NVIDIA image, its sibling on main.
-nvidia_ref() {
-    ref=$(marker IMAGE_REF)
-    [ "$(marker IMAGE)" = nvidia ] || ref="${ref%:*}:nvidia"
-    echo "$ref"
 }
 
 # Whether $1 is a time zone timedatectl lists. First the name itself: one to three parts of
@@ -129,38 +82,6 @@ valid_zone() {
     "" | *[!A-Za-z0-9_+/-]* | /* | */ | *//* | -* | */-* | */*/*/*) return 1 ;;
     esac
     timeout -k 10 "$short" timedatectl list-timezones | grep -qxF -- "$1"
-}
-
-# The digest staged last on the NVIDIA image (update-check compares the channel with it).
-remember_digest() {
-    mkdir -p "$state_dir"
-    tmp=$(mktemp "$state_dir/.nvidia-digest.XXXXXX")
-    echo "$1" > "$tmp"
-    mv -f "$tmp" "$state_dir/nvidia-digest"
-}
-
-# Stage `ref` (an NVIDIA image) by digest, once its key is enrolled. A key that only waits for
-# the blue screen does not count: the driver would still be refused at the next start.
-stage_nvidia() {
-    ref=$1
-    resolve "$ref"
-    if secure_boot; then
-        state=$(timeout -k 10 "$short" mokutil --test-key "$cert" 2>&1 || true)
-        case "$state" in
-        *"is already enrolled"* | *"already in the built-in trusted keyring"*) ;;
-        *"already in the enrollment request"*)
-            echo key-pending
-            exit 4
-            ;;
-        *)
-            echo key-required
-            exit 3
-            ;;
-        esac
-    fi
-    timeout -k 10 "$long" bootc switch --enforce-container-sigpolicy "${ref%:*}@$digest"
-    remember_digest "$digest"
-    exit 0
 }
 
 # Whether bootc stores the signature enforcement for the image it follows (bootc status shows
@@ -194,27 +115,11 @@ case "$task $#" in
 "clear-next-session 0") rm -f "$next_session" ;;
 "status 0") exec timeout -k 10 "$short" bootc status --json ;;
 "update-check 0")
-    # bootc cannot see a newer image once it follows a digest, so the NVIDIA image asks the
-    # channel itself.
-    if [ "$(marker IMAGE)" = nvidia ]; then
-        resolve "$(marker IMAGE_REF)"
-        if [ "$digest" = "$(cat "$state_dir/nvidia-digest" 2>/dev/null)" ]; then
-            echo up-to-date
-        else
-            echo "update-available $digest"
-        fi
-        exit 0
-    fi
     verified_digest "$(marker IMAGE_REF)"
     exec timeout -k 10 "$check" bootc upgrade --check
     ;;
 "update 0")
     lock
-    # The NVIDIA image is always staged by digest (after the key check when Secure Boot is on),
-    # and bootc then follows that digest, not a tag. So its channel comes from the marker.
-    if [ "$(marker IMAGE)" = nvidia ]; then
-        stage_nvidia "$(marker IMAGE_REF)"
-    fi
     # bootc upgrade follows the stored choice. Without it (a rollback to the installed system),
     # the same channel is switched to with the enforcement, which also stages its newest image.
     if enforced; then
@@ -230,7 +135,7 @@ case "$task $#" in
     exec timeout -k 10 "$check" bootc rollback
     ;;
 "switch 1")
-    case "$1" in main | nvidia) ;; *) usage ;; esac
+    case "$1" in main) ;; *) usage ;; esac
     lock
     ref=$(marker IMAGE_REF)
     [ -n "$ref" ] || fail "$os_release has no IMAGE_REF"
@@ -239,41 +144,7 @@ case "$task $#" in
         verified_digest "${ref%:*}:main"
         exec timeout -k 10 "$long" bootc switch --enforce-container-sigpolicy "${ref%:*}:main"
         ;;
-    nvidia) stage_nvidia "${ref%:*}:nvidia" ;;
     *) usage ;;
-    esac
-    ;;
-"queue-key 0")
-    resolve "$(nvidia_ref)"
-    case "$(timeout -k 10 "$short" mokutil --test-key "$cert" 2>&1 || true)" in
-    *"is already enrolled"* | *"already in the built-in trusted keyring"*)
-        echo key-enrolled
-        exit 0
-        ;;
-    *"already in the enrollment request"*)
-        # mokutil keeps a waiting request and its first password; replace it, so the password
-        # printed below is the one the blue screen asks for.
-        timeout -k 10 "$short" mokutil --revoke-import >/dev/null || fail "mokutil could not replace the waiting request"
-        ;;
-    esac
-    # 8 random digits: easy to type on the blue screen, which may ask for them one by one.
-    password=$(od -An -N4 -tu4 /dev/urandom | tr -d ' ')
-    password=$(printf '%08d' $((password % 100000000)))
-    printf '%s\n%s\n' "$password" "$password" | timeout -k 10 "$short" mokutil --import "$cert" >/dev/null ||
-        fail "mokutil could not queue the key"
-    echo "$password"
-    ;;
-"key-state 0")
-    # Read-only: the launcher asks after a restart whether the blue screen enrolled the key.
-    if ! secure_boot; then
-        echo secure-boot-off
-        exit 0
-    fi
-    resolve "$(nvidia_ref)"
-    case "$(timeout -k 10 "$short" mokutil --test-key "$cert" 2>&1 || true)" in
-    *"is already enrolled"* | *"already in the built-in trusted keyring"*) echo enrolled ;;
-    *"already in the enrollment request"*) echo pending ;;
-    *) echo missing ;;
     esac
     ;;
 "set-timezone 1")

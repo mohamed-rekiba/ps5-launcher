@@ -43,8 +43,6 @@ mod library;
 mod library_layout;
 mod network;
 mod notice;
-mod nvidia;
-mod nvidia_ids;
 mod osupdate;
 mod preferences;
 mod hostos;

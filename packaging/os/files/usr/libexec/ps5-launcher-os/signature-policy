@@ -10,9 +10,6 @@
 # system follows our repository without that choice, this runs, under the lock it shares with the
 # root helper and the boot health check:
 #   main:   bootc switch --enforce-container-sigpolicy <the tag it follows>
-#   nvidia: bootc switch --enforce-container-sigpolicy <repository>@<booted digest>
-#           (the NVIDIA image follows digests, so the helper's Secure Boot key check is never
-#           skipped; nothing new is downloaded)
 # The switch stages a deployment of the same image (or of a newer, signed one on main); it is
 # booted at the next restart. Without a network it fails, and the next start tries again.
 #
@@ -38,8 +35,6 @@
 set -uo pipefail
 os_release=/usr/lib/ps5-launcher/os-release
 state=/var/lib/ps5-launcher-os/signature-policy.json
-# The helper's "digest staged last" on the NVIDIA image (helper update-check compares with it).
-nvidia_digest=/var/lib/ps5-launcher/nvidia-digest
 lock_file=/run/ps5-launcher-os.lock
 lock_wait=60
 health_wait=190
@@ -66,7 +61,6 @@ record() {
 status() { timeout -k 10 60 bootc status --json --format-version=1 2>/dev/null | sed -n '/{/,$p'; }
 
 ref=$(marker IMAGE_REF)
-variant=$(marker IMAGE)
 repo=${ref%:*}
 if [ -z "$ref" ] || [ "$repo" = "$ref" ]; then
     record failed "$os_release has no IMAGE_REF" ""
@@ -100,17 +94,7 @@ if [ "$(jq -r '(.status.staged == null) and (.status.rollback == null)' <<<"$jso
     exit 0
 fi
 
-case $variant in
-nvidia)
-    booted=$(jq -er '.status.booted.image.imageDigest' <<<"$json" 2>/dev/null)
-    if ! [[ $booted =~ ^sha256:[0-9a-f]{64}$ ]]; then
-        record failed "no booted digest in bootc status" "$image"
-        exit 1
-    fi
-    target=$repo@$booted
-    ;;
-*) target=$image ;;
-esac
+target=$image
 
 # Up to 2 minutes for a network, before the lock; bootc says what is wrong when there is none.
 timeout -k 5 130 nm-online -q -t 120 || log "no network yet"
@@ -141,13 +125,5 @@ fi
 if [ "$(status | jq -r '.spec.image.signature // "none"' 2>/dev/null)" != containerPolicy ]; then
     record failed "bootc switch ran, but bootc status shows no enforcement" "$target"
     exit 1
-fi
-if [ "$variant" = nvidia ]; then
-    # This digest is the running one: without the record, the helper's first update check would
-    # offer it as an update.
-    mkdir -p "${nvidia_digest%/*}"
-    tmp=$(mktemp "${nvidia_digest%/*}/.nvidia-digest.XXXXXX")
-    echo "$booted" > "$tmp"
-    mv -f "$tmp" "$nvidia_digest"
 fi
 record enforced "bootc enforces the signature policy from the next restart on" "$target"

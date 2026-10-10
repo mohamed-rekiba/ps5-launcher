@@ -4,7 +4,6 @@
 # packaging/os/README.md). It needs no login and no launcher, and it does only what the
 # launcher's root helper does, through the helper, so the helper's checks stay:
 #   1  switch to the main image          helper switch main
-#   2  switch to the NVIDIA image        helper switch nvidia (and queue-key when it asks)
 #   3  roll back to the previous system  helper rollback (no network needed)
 #   4  restart
 # Errors are shown, and the menu comes back. The paths are fixed; test-recovery-menu.sh tests a
@@ -36,9 +35,8 @@ header() {
     fi
     say "" \
         "  1  Switch to the main image (AMD, Intel, and NVIDIA on the open-source driver)" \
-        "  2  Switch to the NVIDIA image (NVIDIA's own driver)" \
-        "  3  Roll back to the previous system" \
-        "  4  Restart" ""
+        "  2  Roll back to the previous system" \
+        "  3  Restart" ""
 }
 
 # Runs the helper with its output on screen. Sets $code.
@@ -61,72 +59,19 @@ restart() {
     exit 0
 }
 
-show_password() { # PASSWORD
-    local i
-    say "" "The password for the blue screen is: $1" "Digit by digit (it may ask for single digits by position):"
-    for i in $(seq 1 ${#1}); do
-        say "  digit $i: ${1:i-1:1}"
-    done
-    say "" "Write it down or take a photo of it now."
-}
-
-enrol_steps() {
-    say "" "With Secure Boot on, the NVIDIA driver only loads with our key enrolled. The steps:" \
-        "  1. Queue the key here; this menu shows a password." \
-        "  2. Restart. A blue \"MOK management\" screen appears before Linux. It needs a USB keyboard." \
-        "  3. Choose Enroll MOK, Continue, Yes, type the password, then Reboot." \
-        "  4. Start recovery mode again (the same GRUB edit) and choose 2 again."
-}
-
-queue_key() {
-    ask "Queue the key now? [y/N] "
-    case $answer in y | Y | yes) ;; *) return ;; esac
-    run_helper queue-key
-    if [ "$code" != 0 ]; then
-        say "" "Could not queue the key (exit $code). Nothing was changed."
-        return
-    fi
-    out=$(tail -n 1 "$out_file")
-    case $out in
-    key-enrolled) say "" "The key is already enrolled. Choose 2 again." ;;
-    *) show_password "$out" && say "Then restart (choose 4) and enroll the key." ;;
-    esac
-}
-
-switch_nvidia() {
-    run_helper switch nvidia
-    case $code in
-    0) done_restart "The NVIDIA image starts" ;;
-    3)
-        say "" "The NVIDIA image's Secure Boot key is not enrolled (key-required). Nothing was switched."
-        enrol_steps
-        queue_key
-        ;;
-    4)
-        say "" "The key is queued but not enrolled yet (key-pending). Nothing was switched." \
-            "Restart, and enroll it on the blue screen with the password you were given." \
-            "Lost the password? Queue the key again: it gets a new password."
-        enrol_steps
-        queue_key
-        ;;
-    *) say "" "The switch failed (exit $code). Nothing was switched." ;;
-    esac
-}
-
 while :; do
     header
-    ask "Choose 1-4: "
+    ask "Choose 1-3: "
     case $answer in
     1)
         run_helper switch main
         if [ "$code" = 0 ]; then done_restart "The main image starts"; else say "" "The switch failed (exit $code). Nothing was switched."; fi
         ;;
-    2) switch_nvidia ;;
-    3)
+    2)
         run_helper rollback
         if [ "$code" = 0 ]; then done_restart "The previous system starts"; else say "" "The rollback failed (exit $code)."; fi
         ;;
-    4) restart ;;
-    *) say "Type 1, 2, 3 or 4, then Enter." ;;
+    3) restart ;;
+    *) say "Type 1, 2 or 3, then Enter." ;;
     esac
 done

@@ -2,8 +2,7 @@
 # PS5 Launcher OS's boot health check, with one automatic rollback (ps5-boot-health.service).
 #
 # At every start it checks that the PC reached a working launcher:
-#   (a) the GPU that drives the screen has the right driver: on the NVIDIA image (OS marker
-#       IMAGE=nvidia) "nvidia", on the main image any bound GPU driver that is not "nvidia";
+#   (a) the GPU that drives the screen has a bound Fedora GPU driver;
 #   (b) gamescope runs for the automatic-login user;
 #   (c) the launcher answers "ok" on its health socket for $stable seconds in a row. Plasma, the
 #       fallback desktop, does not count.
@@ -159,22 +158,13 @@ check_gpu() {
         card=${card%%-*}
         driver=$(basename "$(readlink "$drm_dir/$card/device/driver" 2>/dev/null)" 2>/dev/null)
         found="$found ${driver:-none}"
-        case $image in
-        nvidia) [ "$driver" = nvidia ] && { gpu_problem=""; return; } ;;
-        *)
-            case $driver in
-            "" | nvidia | simple-framebuffer | efi-framebuffer | vesa-framebuffer) ;;
-            *) gpu_problem=""; return ;;
-            esac
-            ;;
+        case $driver in
+        "" | nvidia | simple-framebuffer | efi-framebuffer | vesa-framebuffer) ;;
+        *) gpu_problem=""; return ;;
         esac
     done
     [ -n "$found" ] || return
-    if [ "$image" = nvidia ]; then
-        gpu_problem="the screen's GPU does not use the NVIDIA driver (drivers:$found)"
-    else
-        gpu_problem="the screen's GPU has no usable driver (drivers:$found)"
-    fi
+    gpu_problem="the screen's GPU has no usable driver (drivers:$found)"
 }
 
 # (c) Whether the launcher answers on its socket. It must be a socket of the user, mode 0600,

@@ -7,9 +7,12 @@
 # It needs Linux (flock), jq and GNU coreutils. On macOS it runs itself in a Fedora container.
 set -euo pipefail
 here=$(cd "$(dirname "$0")" && pwd)
+# shellcheck source=packaging/os/config.sh
+source "$here/config.sh"
+os_config_validate
 if [ "$(uname -s)" != Linux ]; then
     repo=$(cd "$here/../.." && pwd)
-    exec docker run --rm -v "$repo:/src:ro" -w /src quay.io/fedora/fedora:44 sh -c \
+    exec docker run --rm -v "$repo:/src:ro" -w /src -e FEDORA_VERSION "$FEDORA_CONTAINER_IMAGE" sh -c \
         'dnf -y -q install jq util-linux diffutils >/dev/null && packaging/os/test-signature-policy.sh'
 fi
 work=$(mktemp -d)
@@ -17,14 +20,13 @@ trap 'rm -rf "$work"' EXIT
 mkdir -p "$work/bin"
 sed -e "s|^os_release=/usr/lib/ps5-launcher/os-release$|os_release=$work/os-release|" \
     -e "s|^state=/var/lib/ps5-launcher-os/signature-policy.json$|state=$work/state/signature-policy.json|" \
-    -e "s|^nvidia_digest=/var/lib/ps5-launcher/nvidia-digest$|nvidia_digest=$work/helper-state/nvidia-digest|" \
     -e "s|^lock_file=/run/ps5-launcher-os.lock$|lock_file=$work/lock|" \
     -e "s|^lock_wait=60$|lock_wait=1|" \
     -e "s|^health_wait=190$|health_wait=4|" \
     -e "s|^PATH=/usr/sbin:/usr/bin$|PATH=$work/bin:/usr/sbin:/usr/bin:/bin|" \
     "$here/files/usr/libexec/ps5-launcher-os/signature-policy" > "$work/signature-policy"
 chmod +x "$work/signature-policy"
-for fixed in "^os_release=$work/" "^state=$work/" "^nvidia_digest=$work/" "^lock_file=$work/" "^lock_wait=1$" "^health_wait=4$" \
+for fixed in "^os_release=$work/" "^state=$work/" "^lock_file=$work/" "^lock_wait=1$" "^health_wait=4$" \
     "^PATH=$work/bin:"; do
     grep -q "$fixed" "$work/signature-policy" || { echo "FAIL the fixed line $fixed was not found"; exit 1; }
 done
@@ -80,14 +82,6 @@ check "  in version 1" test "$(jq -r .version "$work/state/signature-policy.json
 check "the next start changes nothing" run 0
 check "  no switch" test ! -s "$work/bootc.log"
 check "  still enforced" test "$(state)" = enforced
-
-printf 'IMAGE=nvidia\nIMAGE_REF=%s:nvidia\n' "$repo" > "$work/os-release"
-status "$repo:nvidia" registry "" false false
-check "a fresh NVIDIA install is switched with the enforcement" run 0
-check "  to the booted digest, so no new image and no key check is skipped" \
-    grep -qx "switch --enforce-container-sigpolicy $repo@$booted" "$work/bootc.log"
-check "  and the helper's update check knows that digest is the running one" \
-    grep -qx "$booted" "$work/helper-state/nvidia-digest"
 
 printf 'IMAGE=main\nIMAGE_REF=%s:main\n' "$repo" > "$work/os-release"
 status "$repo:main" registry "" false true

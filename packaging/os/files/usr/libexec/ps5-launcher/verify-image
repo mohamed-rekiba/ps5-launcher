@@ -3,7 +3,7 @@
 
     verify-image NAME@sha256:<hex> [LABEL]
 
-The root helper runs it before it trusts an image (update-check, queue-key and staging). It asks
+The root helper runs it before it trusts an image (update-check and staging). It asks
 skopeo's image proxy (`skopeo experimental-image-proxy`, the same code bootc pulls through) to
 open the image. Opening checks /etc/containers/policy.json, with the signatures that
 /etc/containers/registries.d names, before it reads anything else. So only the manifest, the

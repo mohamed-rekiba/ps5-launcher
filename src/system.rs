@@ -40,13 +40,24 @@ impl Mode {
 /// Written into PS5 Launcher OS images (packaging/os/): `IMAGE=main` or `IMAGE=nvidia`.
 const OS_MARKER: &str = "/usr/lib/ps5-launcher/os-release";
 
-/// PS5 Launcher OS's image (main or NVIDIA) from the marker's contents.
-fn image_of(marker: &str) -> Option<crate::nvidia::Image> {
-    marker_image(marker).and_then(crate::nvidia::Image::parse)
+/// The Fedora OS image named in the system marker.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub enum Image {
+    Main,
+}
+
+impl Image {
+    pub fn parse(name: &str) -> Option<Self> {
+        (name == "main").then_some(Self::Main)
+    }
+}
+
+fn image_of(marker: &str) -> Option<Image> {
+    marker_image(marker).and_then(Image::parse)
 }
 
 /// The image this PC runs, in PS5 Launcher OS; None in the other modes.
-pub fn os_image() -> Option<crate::nvidia::Image> {
+pub fn os_image() -> Option<Image> {
     if Mode::current() != Mode::Os {
         return None;
     }
@@ -579,9 +590,8 @@ mod tests {
 
     #[test]
     fn the_image_from_the_marker() {
-        use crate::nvidia::Image;
         assert_eq!(image_of("IMAGE=main\n"), Some(Image::Main));
-        assert_eq!(image_of("# PS5 Launcher OS\n IMAGE=\"nvidia\" \n"), Some(Image::Nvidia));
+        assert_eq!(image_of("# PS5 Launcher OS\n IMAGE=\"nvidia\" \n"), None);
         assert_eq!(image_of("IMAGE=bazzite"), None);
         assert_eq!(image_of(""), None);
     }
@@ -721,8 +731,8 @@ mod tests {
     #[test]
     fn an_error_carries_what_the_tool_said() {
         let call = Call::new("helper", &["update"], 60);
-        let said_on_stdout = Ran { code: Some(3), stdout: "key-required\n".into(), stderr: "  ".into() };
-        assert_eq!(said_on_stdout.error(&call), "helper update failed (exit 3): key-required");
+        let said_on_stdout = Ran { code: Some(3), stdout: "update-unavailable\n".into(), stderr: "  ".into() };
+        assert_eq!(said_on_stdout.error(&call), "helper update failed (exit 3): update-unavailable");
         let killed = Ran { code: None, stdout: String::new(), stderr: String::new() };
         assert_eq!(killed.error(&call), "helper update failed (stopped): ");
     }

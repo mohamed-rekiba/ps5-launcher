@@ -688,7 +688,6 @@ impl App {
         }
         // PS5 Launcher OS: resume the NVIDIA driver's install after a restart, and compare the
         // screen's card with the image.
-        self.nvidia_start();
         // PS5 Launcher OS: read what the first-start setup needs while the welcome screen shows,
         // and the boot health check's notice. Both show once the welcome screen is done.
         self.setup_start();

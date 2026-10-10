@@ -1,15 +1,14 @@
 # The image signing key
 
-Every PS5 Launcher OS image is signed with the project's own cosign key, separate from the
-Secure Boot key. Installed PCs pull an image only when its signature by this key checks out:
-bootc, the launcher's root helper and the first start all use the containers policy that both
-images ship.
+Every PS5 Launcher OS image is signed with the project's own cosign key. Installed PCs pull an image only when its signature by this key checks out:
+bootc, the launcher's root helper and the first start all use the containers policy that the
+image ships.
 
 | What | Where |
 |---|---|
 | Private key (cosign's encrypted PEM, `cosign.key`) | The owner's safe backup, and the secret `OS_IMAGE_SIGNING_KEY` of the environment `os-fedora-signing`. **Never in the repository.** |
 | Its password | The owner's safe backup, and the secret `COSIGN_PASSWORD` of the same environment. |
-| Public key (`cosign.pub`, PEM) | `packaging/os/signing/cosign.pub`, committed. Both images ship it as `/usr/share/ps5-launcher/signing/cosign.pub`. |
+| Public key (`cosign.pub`, PEM) | `packaging/os/signing/cosign.pub`, committed. The image ships it as `/usr/share/ps5-launcher/signing/cosign.pub`. |
 
 Until `cosign.pub` exists, every run of `.github/workflows/os.yml` and every image build
 fails with a message that points here. The workflow's `sign` job checks that the secret is the
@@ -17,7 +16,7 @@ private half of `cosign.pub` before it signs anything.
 
 ## What the images ship
 
-Both images get these from the templates in this folder, with the image's own repository
+The image gets these from the templates in this folder, with the image's own repository
 (`ghcr.io/<owner>/ps5-launcher-fedora`, the name part of `IMAGE_REF`) in place of
 `@REPOSITORY@`:
 
@@ -126,14 +125,14 @@ and no install test; run the workflow from `main`.
 
 ## How the workflow signs and checks
 
-- `sign` signs the main, NVIDIA and upgrade-test digests right after they are pushed, with
+- `sign` signs the main and upgrade-test digests right after they are pushed, with
   `cosign sign --key env://OS_IMAGE_SIGNING_KEY --use-signing-config=false --new-bundle-format=false --tlog-upload=false --registry-referrers-mode=legacy --yes`,
   and the annotations `io.github.ps5-launcher.run-id`, `.run-attempt`, `.commit` and `.variant`.
   These flags make cosign v3.1.3 write the legacy signature (a `sha256-<digest>.sig` tag with
   the "simple signing" payload), which is what containers/image reads, and upload nothing to a
   transparency log (cosign v3.1.3 `cmd/cosign/cli/options/sign.go` lines 125, 161, 164;
   `registry.go` line 221; `cmd/cosign/cli/signcommon/common.go` lines 437-442).
-- `promote` checks both digests with `cosign verify --key packaging/os/signing/cosign.pub --insecure-ignore-tlog --new-bundle-format=false`
+- `promote` checks the main digest with `cosign verify --key packaging/os/signing/cosign.pub --insecure-ignore-tlog --new-bundle-format=false`
   and this run's annotations, and with Fedora 44's skopeo copying each digest under the images'
   own policy. After the copy to the release tags it checks each tag's digest and signature
   again. The release tags are in the same repository and keep the digests

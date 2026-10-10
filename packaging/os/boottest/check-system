@@ -2,9 +2,9 @@
 # CI only. Checks a booted PS5 Launcher OS, as root, and prints one "ok" or "FAIL" line for
 # each check, then "RESULT: PASS" or "RESULT: FAIL". It exits non-zero on any failure.
 #
-#   check-system main|nvidia [--session] [--enforced]
+#   check-system main [--session] [--enforced]
 #
-# main or nvidia: the image that must be running. --session also checks the login: SDDM logs the
+# main: the image that must be running. --session also checks the login: SDDM logs the
 # user in to the PS5 Launcher session, and either the launcher runs, or (in a VM without a GPU)
 # gamescope failed only because Vulkan has no usable device, and the session wrapper fell back to
 # Plasma through the root helper, whose one-time login Plasma then cleared.
@@ -24,7 +24,7 @@
 #
 # The boot test image runs it from ps5-boottest-report.service; the install test runs it over SSH.
 set -u
-want=${1:?main or nvidia}
+want=${1:?main}
 session=""
 enforced=""
 for arg in "${@:2}"; do
@@ -63,30 +63,17 @@ else
         check "$unit is not running" not systemctl is-active "$unit"
     done
 fi
-for tool in skopeo mokutil pkexec bootc; do
+for tool in skopeo pkexec bootc; do
     check "$tool is installed" command -v "$tool"
 done
-certs=0
-for cert in /usr/share/ps5-launcher/secureboot/*.der; do
-    [ -f "$cert" ] || continue
-    certs=$((certs + 1))
-    check "$(basename "$cert") is named by its SHA-256" \
-        test "$(sha256sum "$cert" | cut -d' ' -f1).der" = "$(basename "$cert")"
-done
-check "the image ships the Secure Boot certificate" test "$certs" -ge 1
-
 kver=$(uname -r)
 case $want in
-nvidia)
-    check "kernel argument nvidia-drm.modeset=1" grep -qw nvidia-drm.modeset=1 /proc/cmdline
-    check "kernel argument modprobe.blacklist=nouveau" grep -qw modprobe.blacklist=nouveau /proc/cmdline
-    check "the nouveau block is installed" test -f /usr/lib/modprobe.d/ps5-launcher-os-nvidia.conf
-    check "the NVIDIA module is built for the running kernel" modinfo -k "$kver" nvidia
-    ;;
 main)
-    # Also after switching back from the NVIDIA image: nothing of it may stay behind.
     check "no NVIDIA or nouveau kernel arguments" not grep -Eq 'nvidia|nouveau' /proc/cmdline
     check "no nouveau block" test ! -e /usr/lib/modprobe.d/ps5-launcher-os-nvidia.conf
+    check "Fedora nouveau module" modinfo -k "$kver" nouveau
+    check "Mesa NVK ICD" sh -c 'find /usr/share/vulkan/icd.d -name "*nouveau*.json" | grep -q .'
+    check "NVIDIA firmware package" rpm -q nvidia-gpu-firmware
     check "no NVIDIA kernel module" not modinfo -k "$kver" nvidia
     ;;
 *)

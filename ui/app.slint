@@ -1,4 +1,4 @@
-import { S, Theme, Icons, Zone, DownloadData, BootStep, ChipData, ActionData, TileData, HeroData, CardData, CardRow, GenreChip, Fact, FactRow, Shot, HubData, SettingData, ToastData, MenuItem, RunningData, PowerRow, QuickCard, QuickItem, SettingsHit, NvCard, PairCard, OskKey, OskField, SetupView, NoticeView } from "theme.slint";
+import { S, Theme, Icons, Zone, DownloadData, BootStep, ChipData, ActionData, TileData, HeroData, CardData, CardRow, GenreChip, Fact, FactRow, Shot, HubData, SettingData, ToastData, MenuItem, RunningData, PowerRow, QuickCard, QuickItem, SettingsHit, PairCard, OskKey, OskField, SetupView, NoticeView } from "theme.slint";
 import { FocusRing, Chip, Btn, Kicker, Badge, Switch, KeyCap, BackButton, Shimmer, Cover } from "widgets.slint";
 import { DownloadsSheet, DownloadConsent } from "downloads.slint";
 import { LibraryFilter, LibrarySortPicker } from "library.slint";
@@ -266,12 +266,6 @@ export component AppWindow inherits Window {
     in property <string> settings-mode;
     // Settings' changes are not saved, and why (Config::save_notice); empty when they are.
     in property <string> settings-warning;
-    // Updates (OS) and Display: the digits of the Secure Boot key's password, with its steps.
-    in property <[string]> settings-key;
-    // The key's last step: what happens back in the launcher (Updates or Display).
-    in property <string> settings-key-last;
-    // Display: the NVIDIA driver's card.
-    in property <NvCard> settings-nv;
     // Controllers: pairing a controller (its steps, the buttons to hold, an error).
     in property <PairCard> settings-pair;
     // PS5 Launcher OS's first-start setup: its stepper, title, text and buttons. Its rows and
@@ -1220,7 +1214,7 @@ export component AppWindow inherits Window {
             scroll-y <=> root.settings-y; query <=> root.settings-query; find-editing: root.settings-find-editing;
             hits: root.settings-hits; about: root.settings-about; version: root.app-version; mode: root.settings-mode;
             warning: root.settings-warning;
-            key: root.settings-key; key-last: root.settings-key-last; nv: root.settings-nv; pair: root.settings-pair;
+            pair: root.settings-pair;
             pad: root.pad-hints; osk: root.osk-open; caret: root.edit-caret;
             click(zone, i) => { root.click(zone, i); }
             edit-done(text, accepted) => { root.edit-done(text, accepted); }
@@ -1234,7 +1228,7 @@ export component AppWindow inherits Window {
             view: root.setup; zone: root.zone; idx: root.idx;
             rows: root.settings; edit-index: root.edit-index; edit-text <=> root.edit-text;
             scroll-y <=> root.settings-y;
-            key: root.settings-key; key-last: root.settings-key-last; nv: root.settings-nv; pair: root.settings-pair;
+            pair: root.settings-pair;
             pad: root.pad-hints; osk: root.osk-open; caret: root.edit-caret;
             click(zone, i) => { root.click(zone, i); }
             edit-done(text, accepted) => { root.edit-done(text, accepted); }

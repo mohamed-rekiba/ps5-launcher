@@ -1,6 +1,6 @@
 //! The System pages of Settings in Session and OS mode: Network, Controllers, Sound, Display,
 //! Storage, Updates and Time (docs/plans/ps5-launcher-os.md, Phase 6), and the Quick Menu's volume
-//! and controller batteries. The backends (network, bluetooth, battery, sound, gpu, nvidia, screen,
+//! and controller batteries. The backends (network, bluetooth, battery, sound, gpu, screen,
 //! storage, osupdate, timezone) build the command lines and read the answers; this file runs them
 //! off the UI thread and shows the result. A page shows only when its tool answered; Controllers
 //! always shows, and gains its Bluetooth rows when bluetoothctl finds an adapter.
@@ -10,10 +10,10 @@ use crate::audio::{self, Sound};
 use crate::battery::{self, Controller};
 use crate::bluetooth::{self, PairEnd, Step};
 use crate::network::{self, Join};
-use crate::nvidia::{self, Image, Offer, SwitchEnd};
 use crate::osupdate::{self, Task, UpdateEnd};
 use crate::settings::{categories, installed, row, Cat, SId, Tools};
-use crate::system::{self, Call, Mode, PowerAction};
+use crate::system::Image;
+use crate::system::{self, Call, Mode};
 use crate::{gpu, screen, sound, storage, timezone, util, SettingData};
 use std::collections::HashMap;
 use std::path::Path;
@@ -105,7 +105,7 @@ pub struct Net {
 #[derive(Default)]
 pub struct Os {
     pub status: Option<osupdate::Status>,
-    /// What update-check found on the NVIDIA image (a digest).
+    /// What update-check found, when it reports a digest.
     pub found: Option<String>,
     pub checking: bool,
     /// The ticket of the read that checks for an update. It ends the check, even when a newer
@@ -114,21 +114,14 @@ pub struct Os {
     /// "Downloading…" or "Undoing…" while the helper works, and until the state is read again
     /// after it: a retry needs the real state, not the one before the task.
     pub busy: Option<&'static str>,
-    /// The password of the queued Secure Boot key, for the blue MOK screen.
-    pub key: Option<String>,
     /// When the Updates page last checked on opening.
     pub checked: Option<Instant>,
 }
 
-/// The Display page: the screen, its GPU and the NVIDIA driver's flow.
+/// The Display page: the screen and its GPU.
 #[derive(Default)]
 pub struct Disp {
     pub state: Option<DisplayState>,
-    /// The helper works on the NVIDIA driver: "Downloading…", "Switching…", "Queuing the key…".
-    pub busy: Option<&'static str>,
-    /// The password of the key queued in this run, for the blue MOK screen. It is not kept: after
-    /// a launcher restart the page offers a new one.
-    pub key: Option<String>,
 }
 
 /// What the Display page reads.
@@ -489,9 +482,6 @@ impl App {
             }
         }
         self.push_settings();
-        if setup {
-            self.setup_changed();
-        }
     }
 
     fn sys_error(&mut self, title: &str, error: &str) {
@@ -522,10 +512,10 @@ impl App {
         if cats.contains(&Cat::Sound) {
             self.sound_rows(&mut rows);
         }
-        // The setup shows only the driver on Display, and only the drives for games on Storage.
+        // The setup shows only the drives for games on Storage.
         let setup = self.setup.active;
         if cats.contains(&Cat::Display) {
-            self.display_rows(&mut rows, setup);
+            self.display_rows(&mut rows);
         }
         if cats.contains(&Cat::Storage) {
             self.storage_rows(&mut rows, setup);
@@ -553,11 +543,6 @@ impl App {
             SId::OsStatus => self.os_status_chosen(),
             SId::OsDownload => self.os_update(),
             SId::OsRollback => self.os_rollback(),
-            SId::NvInstall => self.nv_install(),
-            SId::NvLater => self.nv_later(),
-            SId::NvRetry => self.nv_queue_key(),
-            SId::NvRestart => self.nv_restart(),
-            SId::NvOpenSource => self.nv_switch(Image::Main),
             SId::TimeZone => self.tz_open(),
             SId::TzBack => self.tz_pick(Picker::Regions),
             SId::TzRegion(i) => self.tz_pick(Picker::Region(i)),
@@ -654,19 +639,22 @@ impl App {
             self.sys.net.scan = Some(ticket);
             self.sys_show();
         }
-        bg(move || load_net(rescan), move |app, res| {
-            let net = &mut app.sys.net;
-            if net.scan == Some(ticket) {
-                (net.scanning, net.scan) = (false, None);
-            }
-            if app.sys.gen.net.current(ticket) {
-                match res {
-                    Ok(net) => app.sys_set_net(net),
-                    Err(e) => app.sys_error("Couldn't read the network", &e),
+        bg(
+            move || load_net(rescan),
+            move |app, res| {
+                let net = &mut app.sys.net;
+                if net.scan == Some(ticket) {
+                    (net.scanning, net.scan) = (false, None);
                 }
-            }
-            app.sys_show();
-        });
+                if app.sys.gen.net.current(ticket) {
+                    match res {
+                        Ok(net) => app.sys_set_net(net),
+                        Err(e) => app.sys_error("Couldn't read the network", &e),
+                    }
+                }
+                app.sys_show();
+            },
+        );
     }
 
     fn net_radio(&mut self, on: bool) {
@@ -1396,13 +1384,13 @@ impl App {
         rows.push((Cat::OsUpdates, SId::OsStatus, r));
         if found && !staged {
             let mut r = row(4, "Download update");
-            r.value = os.busy.filter(|b| *b == "Downloading…").unwrap_or_default().into();
-            r.hint = if os.key.is_some() {
-                "Enroll the key first (the steps are above), then download the update again"
-            } else {
-                "You can keep playing while it downloads. It installs when you restart."
-            }
-            .into();
+            r.value = os
+                .busy
+                .filter(|b| *b == "Downloading…")
+                .unwrap_or_default()
+                .into();
+            r.hint =
+                "You can keep playing while it downloads. It installs when you restart.".into();
             rows.push((Cat::OsUpdates, SId::OsDownload, r));
         }
         if let Some(previous) = &status.rollback {
@@ -1483,28 +1471,23 @@ impl App {
         }
         audio::play(Sound::Select);
         self.sys.gen.os.next();
-        // No toast yet: on the NVIDIA image the helper may stop at the key before downloading.
         self.sys.os.busy = Some("Downloading…");
         self.sys_show();
-        bg(|| osupdate::update_flow(&system::call_status), |app, end| {
-            // `busy` stays until the state is read again.
-            match end {
-                UpdateEnd::Staged => {
-                    app.sys.os.key = None;
-                    app.toast("System update downloaded", "It installs when you restart: choose Update and restart in the Power menu.", 1);
+        bg(
+            || osupdate::update_flow(&system::call_status),
+            |app, end| {
+                // `busy` stays until the state is read again.
+                match end {
+                    UpdateEnd::Staged => {
+                        app.toast("System update downloaded", "It installs when you restart: choose Update and restart in the Power menu.", 1);
+                    }
+                    UpdateEnd::Failed(e) => {
+                        app.sys_error("Couldn't download the system update", &e)
+                    }
                 }
-                UpdateEnd::Password(password) => {
-                    app.sys.os.key = Some(password);
-                    app.toast("Enroll the driver's key", "The steps and the password are on the Updates page.", 0);
-                    app.ui().set_settings_y(0.0);
-                }
-                UpdateEnd::KeyPending => {
-                    app.toast("Restart and enroll the key first", "The blue screen asks for the key's password when the PC starts. Then download the update again.", 0);
-                }
-                UpdateEnd::Failed(e) => app.sys_error("Couldn't download the system update", &e),
-            }
-            app.os_read(false, true);
-        });
+                app.os_read(false, true);
+            },
+        );
     }
 
     fn os_rollback(&mut self) {
@@ -1515,131 +1498,48 @@ impl App {
         self.sys.gen.os.next();
         self.sys.os.busy = Some("Undoing…");
         self.sys_show();
-        self.sys_run(osupdate::helper_call(Task::Rollback), "Couldn't undo the system update", |app, ok| {
-            // `busy` stays until the state is read again.
-            if ok {
-                app.toast("The previous system starts at the next restart", "Restart from the Power menu.", 1);
-            }
-            app.os_read(false, true);
-        });
-    }
-
-    /// The digits of the key's password, when the Updates page shows its steps.
-    pub fn os_key_digits(&self) -> Vec<slint::SharedString> {
-        self.sys.os.key.as_deref().unwrap_or_default().chars().map(|c| c.to_string().into()).collect()
-    }
-
-    // ------------------------------------------------------------------ Display
-
-    /// The NVIDIA driver's offer for the screen's card.
-    pub(crate) fn nv_offer(&self) -> Offer {
-        let Some(d) = &self.sys.display.state else { return Offer::Nothing };
-        nvidia::offer(d.image, Some(&d.screen.card), &self.cfg.lock().unwrap().nvidia)
-    }
-
-    /// The Display page has a step of the NVIDIA driver waiting.
-    pub fn display_dot(&self) -> bool {
-        nvidia::dot(self.nv_offer())
+        self.sys_run(
+            osupdate::helper_call(Task::Rollback),
+            "Couldn't undo the system update",
+            |app, ok| {
+                // `busy` stays until the state is read again.
+                if ok {
+                    app.toast(
+                        "The previous system starts at the next restart",
+                        "Restart from the Power menu.",
+                        1,
+                    );
+                }
+                app.os_read(false, true);
+            },
+        );
     }
 
     /// The card's name: lspci's, or the vendor and IDs.
     fn gpu_name(d: &DisplayState) -> String {
-        d.name.clone().unwrap_or_else(|| gpu::fallback_name(&d.screen.card))
-    }
-
-    /// `helper switch nvidia` runs.
-    pub(crate) fn nv_downloading(&self) -> bool {
-        self.sys.display.busy == Some("Downloading…")
-    }
-
-    /// The NVIDIA driver's card over the Display page's rows.
-    pub fn nv_card(&self) -> crate::NvCard {
-        let Some(d) = &self.sys.display.state else { return crate::NvCard::default() };
-        let offer = self.nv_offer();
-        let downloading = self.nv_downloading();
-        let Some((title, lines)) = nvidia::card_text(offer, &Self::gpu_name(d), downloading) else { return crate::NvCard::default() };
-        let kind = match offer {
-            Offer::Install if !downloading => 0,
-            Offer::OldCard | Offer::UnknownCard | Offer::KeyMissed => 1,
-            Offer::KeyEnrolled | Offer::Restart(_) if !downloading => 2,
-            _ => 3,
-        };
-        crate::NvCard {
-            show: true,
-            step: nvidia::stepper(offer, downloading).map_or(-1, |s| s as i32),
-            kind,
-            title: title.into(),
-            lines: model(lines.into_iter().map(Into::into).collect()),
-        }
-    }
-
-    /// The digits of the key's password while the Display page waits for the restart.
-    pub fn nv_key_digits(&self) -> Vec<slint::SharedString> {
-        if self.nv_offer() != Offer::KeyWaiting {
-            return Vec::new();
-        }
-        self.sys.display.key.as_deref().unwrap_or_default().chars().map(|c| c.to_string().into()).collect()
+        d.name
+            .clone()
+            .unwrap_or_else(|| gpu::fallback_name(&d.screen.card))
     }
 
     /// `driver`: only the card and the NVIDIA driver (the setup's Graphics step: Skip is its Later).
-    fn display_rows(&self, rows: &mut Vec<(Cat, SId, SettingData)>, driver: bool) {
-        let Some(d) = &self.sys.display.state else { return };
-        let busy = self.sys.display.busy;
+    fn display_rows(&self, rows: &mut Vec<(Cat, SId, SettingData)>) {
+        let Some(d) = &self.sys.display.state else {
+            return;
+        };
         let mut r = row(4, &Self::gpu_name(d));
         r.value = d.screen.connector.clone().into();
-        r.hint = format!("Drives the screen · {}", gpu::driver_text(&d.screen.card, d.nvidia_version.as_deref())).into();
+        let mut hint = format!(
+            "Drives the screen · {}",
+            gpu::driver_text(&d.screen.card, d.nvidia_version.as_deref())
+        );
+        if d.image.is_some() && d.screen.card.vendor == gpu::NVIDIA {
+            hint.push_str(
+                " · Uses Fedora's nouveau driver and Mesa NVK. Updates arrive with system updates.",
+            );
+        }
+        r.hint = hint.into();
         rows.push((Cat::Display, SId::Gpu, r));
-        let action = |id: SId, label: &str, hint: &str| {
-            let mut r = row(4, label);
-            r.hint = hint.into();
-            if let Some(b) = busy {
-                r.value = b.into();
-            }
-            (Cat::Display, id, r)
-        };
-        let download = format!("About {} MB", nvidia::DOWNLOAD_MB);
-        match self.nv_offer() {
-            Offer::Install => {
-                let mut install = action(SId::NvInstall, "Install driver", "");
-                if busy.is_none() {
-                    (install.2.value, install.2.value_kind) = (download.into(), 3);
-                }
-                rows.push(install);
-                if busy.is_none() && !driver {
-                    rows.push(action(SId::NvLater, "Later", "The offer stays here, on System → Display"));
-                }
-            }
-            Offer::Later => {
-                let mut r = action(SId::NvInstall, "NVIDIA driver", "The card runs on the open-source driver now. Install the NVIDIA driver to play at full speed.");
-                if busy.is_none() {
-                    (r.2.value, r.2.value_kind) = ("Install".into(), 3);
-                }
-                rows.push(r);
-            }
-            Offer::KeyWaiting if self.sys.display.key.is_some() => {
-                rows.push(action(SId::NvRestart, "Restart now", "Keep the USB keyboard plugged in: the blue screen comes before the launcher"));
-            }
-            Offer::KeyWaiting => {
-                rows.push(action(SId::NvRetry, "Show a new password", "The password shows only once. A new one replaces the old one."));
-                rows.push(action(SId::NvRestart, "Restart now", "Only if you have the password: the blue screen asks for it"));
-            }
-            Offer::KeyMissed => rows.push(action(SId::NvRetry, "Try again", "Queues the key with a new password")),
-            Offer::KeyEnrolled => {
-                let mut r = action(SId::NvInstall, "Download the driver", "You can keep playing while it downloads");
-                if busy.is_none() {
-                    (r.2.value, r.2.value_kind) = (download.into(), 3);
-                }
-                rows.push(r);
-            }
-            Offer::Restart(_) => rows.push(action(SId::NvRestart, "Restart now", "")),
-            Offer::UseOpenSource => rows.push(action(SId::NvOpenSource, "Use the open-source driver", "Switches the system back at the next restart. Games run slower on it.")),
-            Offer::SwitchBack => rows.push(action(SId::NvOpenSource, "Switch to the open-source driver", "Starts the main system at the next restart")),
-            Offer::Nothing | Offer::OldCard | Offer::UnknownCard => {}
-        }
-        if driver {
-            return;
-        }
-
         header(rows, Cat::Display, "SCREEN OUTPUT");
         let chosen = self.cfg.lock().unwrap().session_output;
         let apply = "Applies at the next session start: restart the PC. Restart launcher is not enough, because the screen stays on.";
@@ -1699,188 +1599,6 @@ impl App {
         audio::play(Sound::Move);
         self.save_cfg(move |c| c.session_output = next);
         self.sys_show();
-    }
-
-    /// The PC's boot ID, for the flow's restarts.
-    fn boot() -> String {
-        gpu::boot_id(Path::new(gpu::BOOT_ID))
-    }
-
-    /// At each start in PS5 Launcher OS: resume the NVIDIA driver's flow after a restart, and
-    /// compare the screen's card with the image.
-    pub fn nvidia_start(&mut self) {
-        let Some(image) = system::os_image() else { return };
-        // The setup's Graphics step tells the player instead of these toasts.
-        let quiet = self.setup_due();
-        let before = self.cfg.lock().unwrap().nvidia.clone();
-        let mut flow = before.clone();
-        let resumed = nvidia::resume(&mut flow, image, &Self::boot());
-        // Most starts change nothing: then the config is not written.
-        if flow != before {
-            self.save_cfg(|c| c.nvidia = flow);
-        }
-        match resumed {
-            nvidia::Resume::Done(Image::Nvidia) => self.toast("NVIDIA driver installed", "Games run at full speed. To go back: Settings → Display.", 1),
-            nvidia::Resume::Done(Image::Main) => self.toast("Open-source driver in use", "The PC runs the main system again.", 1),
-            nvidia::Resume::NotSwitched(_) => {
-                self.toast("The driver did not change", "The PC started the previous system. Settings → Display shows what you can do.", 2)
-            }
-            nvidia::Resume::CheckKey => return self.nv_check_key(),
-            nvidia::Resume::Nothing => {}
-        }
-        // A changed graphics card: tell the player once at the start; the page has the action.
-        let ticket = self.sys.gen.display.next();
-        bg(load_display, move |app, res| {
-            let Ok(state) = res else { return };
-            if app.sys.gen.display.current(ticket) {
-                app.sys.display.state = Some(state);
-            }
-            match app.nv_offer() {
-                _ if quiet => {}
-                Offer::Install => app.toast("NVIDIA card found", "Install the NVIDIA driver in Settings → Display to play at full speed.", 0),
-                Offer::SwitchBack => app.toast("No NVIDIA card drives the screen", "Switch to the open-source driver in Settings → Display.", 0),
-                _ => {}
-            }
-        });
-    }
-
-    /// After the restart: is the key enrolled now? Read-only.
-    fn nv_check_key(&mut self) {
-        self.sys.display.busy = Some("Checking the key…");
-        bg(
-            || system::call(&nvidia::key_state_call()).and_then(|out| nvidia::parse_key_state(&out)),
-            |app, res| {
-                app.sys.display.busy = None;
-                match res {
-                    Ok(state) => {
-                        let mut flow = app.cfg.lock().unwrap().nvidia.clone();
-                        nvidia::key_checked(&mut flow, state);
-                        app.save_cfg(|c| c.nvidia = flow);
-                        match state {
-                            // The setup's Graphics step shows it.
-                            _ if app.setup_due() => {}
-                            nvidia::KeyState::Enrolled | nvidia::KeyState::SecureBootOff => {
-                                app.toast("Key enrolled", "Download the NVIDIA driver in Settings → Display.", 1)
-                            }
-                            _ => app.toast("The key was not enrolled", "Nothing was changed. Try again in Settings → Display.", 2),
-                        }
-                    }
-                    // The step stays: the next start asks again.
-                    Err(e) => app.sys_error("Couldn't check the driver's key", &e),
-                }
-                app.display_load();
-            },
-        );
-    }
-
-    /// Install driver: with Secure Boot on and the key not enrolled, the key comes first (the
-    /// password, then a restart); otherwise the download. The helper's switch checks the key
-    /// again by itself.
-    fn nv_install(&mut self) {
-        if self.sys.display.busy.is_some() {
-            return;
-        }
-        audio::play(Sound::Select);
-        self.sys.gen.display.next();
-        self.sys.display.busy = Some("Checking Secure Boot…");
-        self.sys_show();
-        bg(
-            || system::call(&nvidia::key_state_call()).and_then(|out| nvidia::parse_key_state(&out)),
-            |app, res| {
-                app.sys.display.busy = None;
-                match res {
-                    Ok(nvidia::KeyState::Enrolled | nvidia::KeyState::SecureBootOff) => app.nv_switch(Image::Nvidia),
-                    Ok(nvidia::KeyState::Pending | nvidia::KeyState::Missing) => app.nv_queue_key(),
-                    Err(e) => {
-                        app.sys_error("Couldn't check Secure Boot", &e);
-                        app.sys_show();
-                    }
-                }
-            },
-        );
-    }
-
-    /// Install driver (to the NVIDIA image), or the way back (to main).
-    pub(crate) fn nv_switch(&mut self, to: Image) {
-        if self.sys.display.busy.is_some() {
-            return;
-        }
-        audio::play(Sound::Select);
-        self.sys.gen.display.next();
-        self.sys.display.busy = Some(if to == Image::Nvidia { "Downloading…" } else { "Switching…" });
-        self.sys_show();
-        bg(move || nvidia::switch_flow(&system::call_status, to), move |app, end| {
-            app.sys.display.busy = None;
-            let mut flow = app.cfg.lock().unwrap().nvidia.clone();
-            nvidia::switched(&mut flow, to, &end, &Self::boot());
-            app.save_cfg(|c| c.nvidia = flow);
-            match end {
-                SwitchEnd::Staged => {
-                    app.sys.display.key = None;
-                    if app.setup.active {
-                        app.toast("NVIDIA driver downloaded", "Restart at the end of the setup to finish installing it.", 1);
-                    } else {
-                        app.toast("Ready: restart to finish", "Choose Restart now on Settings → Display.", 1);
-                    }
-                    // The Power menu's Restart follows the staged system.
-                    app.check_staged();
-                }
-                SwitchEnd::Password(password) => {
-                    app.sys.display.key = Some(password);
-                    if !app.setup.active {
-                        app.toast("Enroll the driver's key", "The steps and the password are on Settings → Display.", 0);
-                    }
-                    app.ui().set_settings_y(0.0);
-                }
-                SwitchEnd::Failed(e) => {
-                    let what = if to == Image::Nvidia { "Couldn't install the NVIDIA driver" } else { "Couldn't switch to the open-source driver" };
-                    app.sys_error(what, &e);
-                }
-            }
-            app.display_load();
-        });
-    }
-
-    /// The offer folds to one row; the dot stays.
-    fn nv_later(&mut self) {
-        audio::play(Sound::Back);
-        self.save_cfg(|c| c.nvidia.later = true);
-        self.sys_show();
-    }
-
-    /// Queue the key again: a new password (the old one was lost, or not enrolled).
-    fn nv_queue_key(&mut self) {
-        if self.sys.display.busy.is_some() {
-            return;
-        }
-        audio::play(Sound::Select);
-        self.sys.gen.display.next();
-        self.sys.display.busy = Some("Queuing the key…");
-        self.sys_show();
-        let call = osupdate::helper_call(Task::QueueKey);
-        bg(
-            move || system::call(&call).and_then(|out| osupdate::parse_key(&out)),
-            |app, res| {
-                app.sys.display.busy = None;
-                let boot = Self::boot();
-                match res {
-                    Ok(osupdate::Key::Password(p)) => {
-                        app.sys.display.key = Some(p);
-                        app.save_cfg(|c| c.nvidia.step = nvidia::Step::KeyQueued { boot });
-                        app.ui().set_settings_y(0.0);
-                    }
-                    Ok(osupdate::Key::Enrolled) => app.save_cfg(|c| c.nvidia.step = nvidia::Step::KeyEnrolled),
-                    Err(e) => app.sys_error("Couldn't queue the driver's key", &e),
-                }
-                app.display_load();
-            },
-        );
-    }
-
-    /// Restart now: the Power menu's restart, with its countdown and what a restart would lose.
-    pub(crate) fn nv_restart(&mut self) {
-        let staged = self.sys.os.status.as_ref().is_some_and(|s| s.staged.is_some()) || matches!(self.cfg.lock().unwrap().nvidia.step, nvidia::Step::Staged { .. });
-        self.guard_power(PowerAction::Restart { update: staged });
     }
 
     // ------------------------------------------------------------------ Time

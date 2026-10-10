@@ -2,7 +2,7 @@ name: Package
 
 # Builds the release files for a tag, attaches them to its draft release, checks them, and
 # publishes the release. It starts when a v* tag is pushed (Release Please pushes one with
-# RELEASE_PLEASE_TOKEN; see release.yml). os.yml starts on the same tag and waits for this
+# its GitHub App token; see release.yml). os.yml starts on the same tag and waits for this
 # workflow to publish.
 # By hand (workflow_dispatch), "Use workflow from" decides where the files go:
 #   a v* tag   builds that tag again and attaches the files to its release (never to a release

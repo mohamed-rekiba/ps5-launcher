@@ -9,11 +9,10 @@ name: Release
 #   os.yml       waits for that, then builds and tests PS5 Launcher OS with the release
 # The app's self-updater reads the latest published release, so it never sees one without files.
 #
-# This needs the secret RELEASE_PLEASE_TOKEN: GitHub starts no workflow from a tag (or a pull
-# request) made with the workflow's own token. Use a fine-grained personal access token for this
-# repository only, with Contents, Pull requests and Workflows set to "Read and write" (Workflows,
-# so a release commit that changes a workflow can be tagged). With it, checks also run on the
-# release pull request.
+# A GitHub App installed on this repository issues a short-lived token for each run. Configure
+# RELEASE_APP_ID (repository variable) and RELEASE_APP_PRIVATE_KEY (repository secret).
+# The app needs Contents, Issues, Pull requests and Workflows: Read and write. This lets
+# release PRs run CI and release tags start Package and OS. See docs/DEVELOPMENT.md, Releases.
 on:
   push:
     branches: [main]
@@ -30,16 +29,28 @@ jobs:
     runs-on: ubuntu-24.04
     timeout-minutes: 10
     steps:
-      - name: Require RELEASE_PLEASE_TOKEN
+      - name: Require release app credentials
         env:
-          TOKEN: ${{ secrets.RELEASE_PLEASE_TOKEN }}
+          APP_ID: ${{ vars.RELEASE_APP_ID }}
+          APP_PRIVATE_KEY: ${{ secrets.RELEASE_APP_PRIVATE_KEY }}
         run: |
-          if [ -z "$TOKEN" ]; then
-            echo "::error::The secret RELEASE_PLEASE_TOKEN is missing. Without it, a release tag starts neither Package nor OS. See the top of .github/workflows/release.yml."
+          if [ -z "$APP_ID" ] || [ -z "$APP_PRIVATE_KEY" ]; then
+            echo "::error::Set repository variable RELEASE_APP_ID and secret RELEASE_APP_PRIVATE_KEY. Install the app on this repository; see docs/DEVELOPMENT.md, Releases."
             exit 1
           fi
+      - name: Create release app token
+        id: app-token
+        uses: actions/create-github-app-token@bcd2ba49218906704ab6c1aa796996da409d3eb1 # v3
+        with:
+          app-id: ${{ vars.RELEASE_APP_ID }}
+          private-key: ${{ secrets.RELEASE_APP_PRIVATE_KEY }}
+          # No owner/repositories inputs: scope access to this repository only.
+          permission-contents: write
+          permission-issues: write
+          permission-pull-requests: write
+          permission-workflows: write
       - uses: googleapis/release-please-action@45996ed1f6d02564a971a2fa1b5860e934307cf7 # v5.0.0
         with:
-          token: ${{ secrets.RELEASE_PLEASE_TOKEN }}
+          token: ${{ steps.app-token.outputs.token }}
           config-file: .github/release-please-config.json
           manifest-file: .github/release-please-manifest.json

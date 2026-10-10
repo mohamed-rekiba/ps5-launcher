@@ -1,17 +1,15 @@
 #!/usr/bin/env bash
 # Tests packaging/os/files/usr/libexec/ps5-launcher/helper, the launcher's root helper. It runs
 # a copy whose fixed paths point at a test folder, with fake bootc, skopeo, verify-image and
-# mokutil:
+# signature checks:
 #   packaging/os/test-helper.sh
 set -euo pipefail
 work=$(mktemp -d)
 trap 'rm -rf "$work"' EXIT
-mkdir -p "$work/bin" "$work/sddm" "$work/certs" "$work/registry"
+mkdir -p "$work/bin" "$work/sddm" "$work/registry"
 chmod 755 "$work/sddm"
 sed -e "s|^sddm_dir=/etc/sddm.conf.d$|sddm_dir=$work/sddm|" \
     -e "s|^os_release=/usr/lib/ps5-launcher/os-release$|os_release=$work/os-release|" \
-    -e "s|^cert_dir=/usr/share/ps5-launcher/secureboot$|cert_dir=$work/certs|" \
-    -e "s|^state_dir=/var/lib/ps5-launcher$|state_dir=$work/state|" \
     -e "s|^health_dir=/var/lib/ps5-launcher-os/health$|health_dir=$work/health|" \
     -e "s|^lock_file=/run/ps5-launcher-os.lock$|lock_file=$work/lock|" \
     -e "s|^verify=/usr/libexec/ps5-launcher/verify-image$|verify=$work/bin/verify-image|" \
@@ -20,8 +18,7 @@ sed -e "s|^sddm_dir=/etc/sddm.conf.d$|sddm_dir=$work/sddm|" \
     -e "s|^PATH=/usr/sbin:/usr/bin$|PATH=$work/bin:/usr/sbin:/usr/bin:/bin|" \
     "$(dirname "$0")/files/usr/libexec/ps5-launcher/helper" > "$work/helper"
 chmod +x "$work/helper"
-for fixed in "^sddm_dir=$work/sddm$" "^os_release=$work/os-release$" "^cert_dir=$work/certs$" \
-    "^state_dir=$work/state$" "^health_dir=$work/health$" "^lock_file=$work/lock$" \
+for fixed in "^sddm_dir=$work/sddm$" "^os_release=$work/os-release$" "^health_dir=$work/health$" "^lock_file=$work/lock$" \
     "^verify=$work/bin/verify-image$" "^short=1$" \
     "^long=2$" "^PATH=$work/bin:"; do
     if ! grep -q "$fixed" "$work/helper"; then
@@ -30,16 +27,12 @@ for fixed in "^sddm_dir=$work/sddm$" "^os_release=$work/os-release$" "^cert_dir=
     fi
 done
 printf 'IMAGE=main\nIMAGE_REF=ghcr.io/owner/ps5-launcher-fedora:main\n' > "$work/os-release"
-da=sha256:$(printf 'a%.0s' $(seq 64))
-dc=sha256:$(printf 'c%.0s' $(seq 64))
 dm=sha256:$(printf 'e%.0s' $(seq 64))
 # The fakes. bootc and timedatectl log their arguments; timedatectl lists the zones in
 # $work/zones. skopeo answers from $work/registry/<tag> ("digest label"): the digest only, as
 # skopeo inspect checks no signature. verify-image answers for a digest from the same files:
 # the label, unless $work/sig/<digest> says "unsigned" or "wrong-key"; it logs its arguments.
 # bootc status prints $work/bootc-status.json.
-# mokutil answers from $work/sb-state and $work/mok ("enrolled", "pending" or "not"), and logs
-# what --import gets on stdin.
 # bootc hangs while $work/hang exists, to test the helper's own deadlines.
 # shellcheck disable=SC2016 # the fake expands $* and $1 itself, when it runs
 printf '#!/bin/sh\necho "$*" >> "%s/bootc.log"\n[ -e "%s/hang" ] && sleep 60\n[ "$1" = status ] && cat "%s/bootc-status.json"\nexit 0\n' \
@@ -73,22 +66,6 @@ exit 1
 FAKE
 mkdir -p "$work/sig"
 echo "$dm main-label" > "$work/registry/main"
-cat > "$work/bin/mokutil" <<FAKE
-#!/bin/sh
-case "\$1" in
---sb-state) cat "$work/sb-state" ;;
---test-key)
-    case \$(cat "$work/mok") in
-    enrolled) echo "\$2 is already enrolled"; exit 0 ;;
-    pending) echo "\$2 is already in the enrollment request"; exit 0 ;;
-    *) echo "\$2 is not enrolled"; exit 1 ;;
-    esac ;;
---import)
-    [ "\$(cat "$work/mok")" = pending ] && { echo "SKIP: \$2 is already in the enrollment request"; exit 0; }
-    echo "\$2" > "$work/import.file"; cat > "$work/import.stdin"; echo pending > "$work/mok" ;;
---revoke-import) echo not > "$work/mok"; echo revoked >> "$work/revoke.log" ;;
-esac
-FAKE
 cat > "$work/bin/timedatectl" <<FAKE
 #!/bin/sh
 echo "\$*" >> "$work/timedatectl.log"
@@ -96,7 +73,7 @@ echo "\$*" >> "$work/timedatectl.log"
 exit 0
 FAKE
 printf 'Africa/Abidjan\nAmerica/Argentina/Buenos_Aires\nEurope/Berlin\nUTC\n' > "$work/zones"
-chmod +x "$work/bin/bootc" "$work/bin/skopeo" "$work/bin/verify-image" "$work/bin/mokutil" "$work/bin/timedatectl"
+chmod +x "$work/bin/bootc" "$work/bin/skopeo" "$work/bin/verify-image" "$work/bin/timedatectl"
 # macOS has no timeout on the helper's PATH (Homebrew's coreutils has one); Fedora does.
 if ! PATH=/usr/sbin:/usr/bin:/bin command -v timeout >/dev/null; then
     ln -s "$(command -v timeout || command -v gtimeout)" "$work/bin/timeout"
@@ -154,127 +131,21 @@ chmod 755 "$work/sddm"
 mv "$work/sddm" "$work/sddm.real" && ln -s "$work/sddm.real" "$work/sddm"
 check "a symlinked SDDM folder is refused" fails helper set-next-session plasma
 rm "$work/sddm" && mv "$work/sddm.real" "$work/sddm"
-# The NVIDIA image's update gate. The new image's label names its signing certificate by SHA-256.
-cert=$(printf 'fake DER certificate' | { sha256sum 2>/dev/null || shasum -a 256; })
-cert=${cert%% *}
-printf 'fake DER certificate' > "$work/certs/$cert.der"
-echo "$da $cert" > "$work/registry/nvidia"
-printf 'IMAGE=nvidia\nIMAGE_REF=ghcr.io/owner/ps5-launcher-fedora:nvidia\n' > "$work/os-release"
-gate() { # EXPECTED_EXIT, then the helper's arguments; the output goes to $work/out
+gate() {
     local want=$1 got=0
     shift
     : > "$work/bootc.log"
     helper "$@" > "$work/out" || got=$?
     [ "$got" = "$want" ]
 }
-echo "Cannot determine secure boot state." > "$work/sb-state"
-echo not > "$work/mok"
-check "an unknown Secure Boot state stops the update" gate 1 update
+for removed in queue-key key-state; do
+    check "$removed is refused" gate 2 "$removed"
+    check "  without touching bootc" test ! -s "$work/bootc.log"
+done
+check "switch nvidia is refused" gate 2 switch nvidia
 check "  without touching bootc" test ! -s "$work/bootc.log"
-printf 'SecureBoot enabled\nSecureBoot validation is disabled in shim\n' > "$work/sb-state"
-check "Secure Boot with validation off in shim needs no key" gate 0 update
-echo "SecureBoot disabled" > "$work/sb-state"
-check "NVIDIA without Secure Boot needs no key" gate 0 update
-check "  but still follows its channel by digest" \
-    grep -qx "switch --enforce-container-sigpolicy ghcr.io/owner/ps5-launcher-fedora@$da" "$work/bootc.log"
-echo "SecureBoot enabled" > "$work/sb-state"
-echo enrolled > "$work/mok"
-check "NVIDIA with its key enrolled stages the checked digest" gate 0 update
-check "  by that digest, never the moving tag" \
-    grep -qx "switch --enforce-container-sigpolicy ghcr.io/owner/ps5-launcher-fedora@$da" "$work/bootc.log"
-echo not > "$work/mok"
-check "a key that is not enrolled stops the update" gate 3 update
-check "  and says key-required" grep -qx "key-required" "$work/out"
-check "  without touching bootc" test ! -s "$work/bootc.log"
-echo pending > "$work/mok"
-check "a key that only waits for the blue screen does not count" gate 4 update
-check "  and says key-pending" grep -qx "key-pending" "$work/out"
-echo enrolled > "$work/mok"
-echo "$da 0000" > "$work/registry/nvidia"
-check "an image signed with an unknown key is refused" gate 1 update
-check "  without touching bootc" test ! -s "$work/bootc.log"
-echo "$da" > "$work/registry/nvidia"
-check "an image without the label is refused" gate 1 update
-other=$(printf 'another certificate' | { sha256sum 2>/dev/null || shasum -a 256; })
-other=${other%% *}
-printf 'not what the label says' > "$work/certs/$other.der"
-echo "$da $other" > "$work/registry/nvidia"
-check "a certificate whose contents do not match its name is refused" gate 1 update
-rm "$work/certs/$other.der"
-printf 'another certificate' > "$work/elsewhere.der"
-ln -s "$work/elsewhere.der" "$work/certs/$other.der"
-check "a symlinked certificate is refused" gate 1 update
-check "  without touching bootc" test ! -s "$work/bootc.log"
-rm "$work/certs/$other.der"
-echo "$da $cert" > "$work/registry/nvidia"
-echo not > "$work/mok"
-check "queue-key queues the new image's key" gate 0 queue-key
-check "  with its certificate" grep -qx "$work/certs/$cert.der" "$work/import.file"
-check "  and prints an 8-digit password" grep -qxE "[0-9]{8}" "$work/out"
-check "  which it gives mokutil twice" diff <(cat "$work/out" "$work/out") "$work/import.stdin"
-first=$(cat "$work/out")
-check "queue-key again replaces the waiting request" gate 0 queue-key
-check "  by revoking it first" grep -qx revoked "$work/revoke.log"
-check "  so the new password is the one mokutil got" diff <(cat "$work/out" "$work/out") "$work/import.stdin"
-check "  and it is a new one" test "$(cat "$work/out")" != "$first"
-# key-state only reads: it never queues or revokes a key.
-: > "$work/revoke.log"
-echo not > "$work/mok"
-rm -f "$work/import.file"
-check "key-state with the key missing says missing" gate 0 key-state
-check "  in one word" grep -qx missing "$work/out"
-check "  and queues nothing" test ! -e "$work/import.file"
-echo pending > "$work/mok"
-check "key-state with the key queued says pending" gate 0 key-state
-check "  in one word" grep -qx pending "$work/out"
-check "  and revokes nothing" test ! -s "$work/revoke.log"
-echo enrolled > "$work/mok"
-check "key-state with the key enrolled says enrolled" gate 0 key-state
-check "  in one word" grep -qx enrolled "$work/out"
-echo "SecureBoot disabled" > "$work/sb-state"
-check "key-state without Secure Boot says secure-boot-off" gate 0 key-state
-check "  in one word" grep -qx secure-boot-off "$work/out"
-echo "Cannot determine secure boot state." > "$work/sb-state"
-check "key-state with an unknown Secure Boot state fails" gate 1 key-state
-echo "SecureBoot enabled" > "$work/sb-state"
-echo "$da 0000" > "$work/registry/nvidia"
-check "key-state for an image signed with an unknown key fails" gate 1 key-state
-echo "$da $cert" > "$work/registry/nvidia"
-printf 'IMAGE=main\nIMAGE_REF=ghcr.io/owner/ps5-launcher-fedora:main\n' > "$work/os-release"
-check "key-state on main asks about the NVIDIA image's key" gate 0 key-state
-check "  which is enrolled" grep -qx enrolled "$work/out"
-printf 'IMAGE=nvidia\nIMAGE_REF=ghcr.io/owner/ps5-launcher-fedora:nvidia\n' > "$work/os-release"
-echo enrolled > "$work/mok"
-check "queue-key with the key already enrolled queues nothing" gate 0 queue-key
-check "  and says key-enrolled" grep -qx key-enrolled "$work/out"
-echo not > "$work/mok"
-echo enrolled > "$work/mok"
-echo "SecureBoot enabled" > "$work/sb-state"
-gate 0 update
-check "staging remembers the digest" grep -qx "$da" "$work/state/nvidia-digest"
-check "update-check on NVIDIA with nothing new says up-to-date" gate 0 update-check
-check "  from the channel, not bootc" grep -qx up-to-date "$work/out"
-echo "$dc $cert" > "$work/registry/nvidia"
-check "update-check on NVIDIA with a newer image says update-available" gate 0 update-check
-check "  and its digest" grep -qx "update-available $dc" "$work/out"
-check "  without touching bootc" test ! -s "$work/bootc.log"
-echo "$da $cert" > "$work/registry/nvidia"
-printf 'IMAGE=main\nIMAGE_REF=ghcr.io/owner/ps5-launcher-fedora:main\n' > "$work/os-release"
-check "update-check on main asks bootc" gate 0 update-check
-check "  with upgrade --check" grep -qx "upgrade --check" "$work/bootc.log"
-check "switch nvidia from main stages the checked NVIDIA digest" gate 0 switch nvidia
-check "  on the same repository" \
-    grep -qx "switch --enforce-container-sigpolicy ghcr.io/owner/ps5-launcher-fedora@$da" "$work/bootc.log"
-echo not > "$work/mok"
-check "switch nvidia without the key enrolled says key-required" gate 3 switch nvidia
-printf 'IMAGE=nvidia\nIMAGE_REF=ghcr.io/owner/ps5-launcher-fedora:nvidia\n' > "$work/os-release"
-check "switch main needs no key" gate 0 switch main
-check "  and follows the main tag" grep -qx "switch --enforce-container-sigpolicy ghcr.io/owner/ps5-launcher-fedora:main" "$work/bootc.log"
-check "switch to anything else is refused" gate 2 switch ../../evil
-check "status reads bootc's state" gate 0 status
-check "  as JSON" grep -qx "status --json" "$work/bootc.log"
 # Image signatures: every image the helper trusts is checked by its exact digest first. An
-# unsigned image, or one signed with another key, stops the task before bootc or mokutil runs.
+# unsigned image, or one signed with another key, stops the task before bootc runs.
 sig() { # unsigned|wrong-key|signed, then the digests
     local state=$1
     shift
@@ -282,44 +153,19 @@ sig() { # unsigned|wrong-key|signed, then the digests
         if [ "$state" = signed ]; then rm -f "$work/sig/$d"; else echo "$state" > "$work/sig/$d"; fi
     done
 }
-refused() { # the helper's arguments: exit 1, and neither bootc nor mokutil's import ran
-    rm -f "$work/import.file"
-    gate 1 "$@" && test ! -s "$work/bootc.log" && test ! -e "$work/import.file"
+refused() { # the helper's arguments: exit 1, and bootc did not run
+    gate 1 "$@" && test ! -s "$work/bootc.log"
 }
-echo "SecureBoot enabled" > "$work/sb-state"
-echo enrolled > "$work/mok"
-printf 'IMAGE=nvidia\nIMAGE_REF=ghcr.io/owner/ps5-launcher-fedora:nvidia\n' > "$work/os-release"
-for bad in unsigned wrong-key; do
-    sig "$bad" "$da"
-    : > "$work/verify.log"
-    check "NVIDIA update to a $bad image is refused before staging" refused update
-    check "  after checking exactly that digest and its label" \
-        grep -qx "ghcr.io/owner/ps5-launcher-fedora@$da io.github.ps5-launcher.secureboot-cert-sha256" "$work/verify.log"
-    check "update-check on NVIDIA with a $bad image fails" refused update-check
-    check "  and offers nothing" fails grep -q update-available "$work/out"
-    echo not > "$work/mok"
-    check "queue-key for a $bad image queues nothing" refused queue-key
-    check "key-state for a $bad image fails" refused key-state
-    echo enrolled > "$work/mok"
-done
-sig signed "$da"
-: > "$work/verify.log"
-check "a signed NVIDIA image is staged" gate 0 update
-check "  by the checked digest, with the policy enforced" \
-    grep -qx "switch --enforce-container-sigpolicy ghcr.io/owner/ps5-launcher-fedora@$da" "$work/bootc.log"
-check "  and its digest was checked first" grep -q "@$da " "$work/verify.log"
 sig unsigned "$dm"
-check "switch main from NVIDIA to an unsigned main is refused" refused switch main
+check "switch main to an unsigned image is refused" refused switch main
 sig signed "$dm"
 printf 'IMAGE=main\nIMAGE_REF=ghcr.io/owner/ps5-launcher-fedora:main\n' > "$work/os-release"
 for bad in unsigned wrong-key; do
-    sig "$bad" "$da"
-    check "switch nvidia from main to a $bad image is refused" refused switch nvidia
     sig "$bad" "$dm"
     check "update-check on main with a $bad channel fails before bootc" refused update-check
     check "switch main to a $bad image is refused" refused switch main
 done
-sig signed "$da" "$dm"
+sig signed "$dm"
 enforced_status ""
 check "update on main without the stored enforcement" gate 0 update
 check "  switches to its channel with the enforcement" \

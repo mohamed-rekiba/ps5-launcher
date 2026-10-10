@@ -2,7 +2,6 @@
 //! show, the step machine with Skip, Back and resume, the texts, and the order of the setup and
 //! the boot health notice. `setup_ui` shows it with the System pages' own rows.
 
-use crate::nvidia::{Image, Offer};
 use serde::{Deserialize, Serialize};
 use std::path::Path;
 
@@ -13,12 +12,18 @@ pub enum Step {
     Network,
     TimeZone,
     Controllers,
-    Graphics,
+    #[serde(alias = "graphics")]
     GameDrive,
     Finish,
 }
 
-pub const ORDER: [Step; 6] = [Step::Network, Step::TimeZone, Step::Controllers, Step::Graphics, Step::GameDrive, Step::Finish];
+pub const ORDER: [Step; 5] = [
+    Step::Network,
+    Step::TimeZone,
+    Step::Controllers,
+    Step::GameDrive,
+    Step::Finish,
+];
 
 impl Step {
     /// The stepper's label.
@@ -27,7 +32,6 @@ impl Step {
             Step::Network => "Network",
             Step::TimeZone => "Time zone",
             Step::Controllers => "Controllers",
-            Step::Graphics => "Graphics driver",
             Step::GameDrive => "Game drive",
             Step::Finish => "Finish",
         }
@@ -35,30 +39,6 @@ impl Step {
 
     fn rank(self) -> usize {
         ORDER.iter().position(|s| *s == self).unwrap_or(ORDER.len())
-    }
-}
-
-/// The NVIDIA driver, for the Graphics step.
-#[derive(Clone, Copy, PartialEq, Eq, Debug, Default)]
-pub enum Driver {
-    /// No offer: no NVIDIA card, an old or unknown one, or the NVIDIA image already.
-    #[default]
-    None,
-    /// The offer waits: Install driver.
-    Offered,
-    /// The player chose Install: the key waits, the download runs, or the restart waits.
-    Started,
-}
-
-impl Driver {
-    /// From the Display page's offer; `downloading`: `helper switch nvidia` runs.
-    pub fn from_offer(offer: Offer, downloading: bool) -> Driver {
-        match offer {
-            _ if downloading => Driver::Started,
-            Offer::Install | Offer::Later | Offer::KeyMissed => Driver::Offered,
-            Offer::KeyWaiting | Offer::KeyEnrolled | Offer::Restart(Image::Nvidia) => Driver::Started,
-            _ => Driver::None,
-        }
     }
 }
 
@@ -90,7 +70,6 @@ pub struct Facts {
     pub zone: String,
     /// The connected controllers.
     pub pads: usize,
-    pub driver: Driver,
     pub drive: Drive,
 }
 
@@ -117,7 +96,6 @@ pub fn shows(step: Step, facts: &Facts) -> bool {
         Step::Network => facts.network && !facts.wired,
         Step::TimeZone => facts.time,
         Step::Controllers => facts.pads == 0,
-        Step::Graphics => facts.driver != Driver::None,
         Step::GameDrive => facts.drive != Drive::None,
         Step::Finish => true,
     }
@@ -135,7 +113,6 @@ pub fn ready(step: Step, facts: &Facts) -> bool {
         // UTC is what a PC has when nobody chose a zone.
         Step::TimeZone => !facts.zone.is_empty() && !matches!(facts.zone.as_str(), "UTC" | "Etc/UTC" | "Etc/UCT" | "UCT"),
         Step::Controllers => facts.pads > 0,
-        Step::Graphics => facts.driver == Driver::Started,
         Step::GameDrive => facts.drive == Drive::Used,
         Step::Finish => true,
     }
@@ -189,32 +166,6 @@ impl Machine {
     }
 }
 
-/// How the Finish step ends, from the NVIDIA driver's state.
-#[derive(Clone, Copy, PartialEq, Eq, Debug)]
-pub enum Ending {
-    /// Nothing waits.
-    Ready,
-    /// The PC runs the NVIDIA image.
-    Installed,
-    /// The driver still downloads.
-    Downloading,
-    /// The driver is staged: restart to finish.
-    Restart,
-    /// The key waits for the blue screen: restart, and the setup comes back to the driver.
-    KeyRestart,
-}
-
-/// The Finish step's ending for the Display page's offer, on `image`.
-pub fn ending(offer: Offer, downloading: bool, image: Option<Image>) -> Ending {
-    match offer {
-        _ if downloading => Ending::Downloading,
-        Offer::Restart(Image::Nvidia) => Ending::Restart,
-        Offer::KeyWaiting => Ending::KeyRestart,
-        _ if image == Some(Image::Nvidia) => Ending::Installed,
-        _ => Ending::Ready,
-    }
-}
-
 /// A button under the step.
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub enum Button {
@@ -222,10 +173,6 @@ pub enum Button {
     Skip,
     Next,
     Done,
-    /// Restart the PC now.
-    Restart,
-    /// Finish the setup; the restart waits on Settings → Display.
-    Later,
 }
 
 impl Button {
@@ -235,24 +182,19 @@ impl Button {
             Button::Skip => "Skip",
             Button::Next => "Next",
             Button::Done => "Done",
-            Button::Restart => "Restart now",
-            Button::Later => "Later",
         }
     }
 }
 
 /// The buttons of `step`, the main one last. `first`: no step before it; `ready`: the player did
 /// what it asks.
-pub fn buttons(step: Step, first: bool, ready: bool, ending: Ending) -> Vec<Button> {
+pub fn buttons(step: Step, first: bool, ready: bool) -> Vec<Button> {
     let mut b = Vec::new();
     if !first {
         b.push(Button::Back);
     }
     match step {
-        Step::Finish => match ending {
-            Ending::Restart | Ending::KeyRestart => b.extend([Button::Later, Button::Restart]),
-            _ => b.push(Button::Done),
-        },
+        Step::Finish => b.push(Button::Done),
         _ if ready => b.push(Button::Next),
         _ => b.push(Button::Skip),
     }
@@ -260,29 +202,13 @@ pub fn buttons(step: Step, first: bool, ready: bool, ending: Ending) -> Vec<Butt
 }
 
 /// The title and the text over a step's rows.
-pub fn text(step: Step, ending: Ending) -> (&'static str, &'static str) {
+pub fn text(step: Step) -> (&'static str, &'static str) {
     match step {
         Step::Network => ("Connect to the internet", "Games, artwork and updates need it. Choose your Wi-Fi network, or plug in a network cable."),
         Step::TimeZone => ("Choose your time zone", "The clock follows it. The installer may have set it already: check it here."),
         Step::Controllers => ("Connect a controller", "Plug it in with a USB cable, or pair it over Bluetooth."),
-        Step::Graphics => (
-            "Install the graphics driver",
-            "Your NVIDIA card plays at full speed with the NVIDIA driver. It downloads in the background while you go on with the setup.",
-        ),
         Step::GameDrive => ("Use a drive for games", "Choose a drive to keep games on. The launcher makes a Games folder on it and deletes nothing."),
-        Step::Finish => match ending {
-            Ending::Ready => ("You're all set", "You can change all of this later in Settings."),
-            Ending::Installed => ("You're all set", "The NVIDIA driver is installed: games run at full speed. You can change all of this later in Settings."),
-            Ending::Downloading => (
-                "The NVIDIA driver is still downloading",
-                "You can start playing. When it is ready, restart from Settings → Display to finish installing it.",
-            ),
-            Ending::Restart => ("Restart to finish installing the NVIDIA driver", "The PC starts with the NVIDIA driver after the restart. No keyboard is needed this time."),
-            Ending::KeyRestart => (
-                "Restart to go on installing the NVIDIA driver",
-                "Enroll the driver's key on the blue screen when the PC starts: you need the password and a USB keyboard. The setup comes back after the restart.",
-            ),
-        },
+        Step::Finish => ("You're all set", "You can change all of this later in Settings."),
     }
 }
 
@@ -313,15 +239,26 @@ pub fn notice_now(welcome: bool, setup: bool, notice_shown: bool) -> bool {
 mod tests {
     use super::*;
 
-    /// A PC on Wi-Fi with nothing set up: every step but Graphics and Game drive.
+    /// A PC on Wi-Fi with nothing set up: every step but Game drive.
     fn fresh() -> Facts {
         Facts { network: true, time: true, zone: "UTC".into(), ..Facts::default() }
     }
 
     #[test]
     fn setup_steps_follow_the_facts() {
-        assert_eq!(steps(&fresh()), [Step::Network, Step::TimeZone, Step::Controllers, Step::Finish]);
-        let all = Facts { driver: Driver::Offered, drive: Drive::Offered, ..fresh() };
+        assert_eq!(
+            steps(&fresh()),
+            [
+                Step::Network,
+                Step::TimeZone,
+                Step::Controllers,
+                Step::Finish
+            ]
+        );
+        let all = Facts {
+            drive: Drive::Offered,
+            ..fresh()
+        };
         assert_eq!(steps(&all), ORDER);
         let cable = Facts { wired: true, online: true, ..fresh() };
         assert!(!steps(&cable).contains(&Step::Network), "online by cable");
@@ -332,27 +269,24 @@ mod tests {
         let no_time = Facts { time: false, ..fresh() };
         assert!(!steps(&no_time).contains(&Step::TimeZone));
         let pad = Facts { pads: 1, ..fresh() };
-        assert!(!steps(&pad).contains(&Step::Controllers), "a controller is connected");
-        let started = Facts { driver: Driver::Started, ..fresh() };
-        assert!(steps(&started).contains(&Step::Graphics), "the driver's install goes on");
-        let used = Facts { drive: Drive::Used, ..fresh() };
-        assert!(steps(&used).contains(&Step::GameDrive), "a second run shows the drive in use");
+        assert!(
+            !steps(&pad).contains(&Step::Controllers),
+            "a controller is connected"
+        );
+        let used = Facts {
+            drive: Drive::Used,
+            ..fresh()
+        };
+        assert!(
+            steps(&used).contains(&Step::GameDrive),
+            "a second run shows the drive in use"
+        );
         let bare = Facts::default();
-        assert_eq!(steps(&bare), [Step::Controllers, Step::Finish], "Controllers and Finish always can show");
-    }
-
-    #[test]
-    fn setup_driver_step_follows_the_offer() {
-        for offer in [Offer::Install, Offer::Later, Offer::KeyMissed] {
-            assert_eq!(Driver::from_offer(offer, false), Driver::Offered, "{offer:?}");
-        }
-        for offer in [Offer::KeyWaiting, Offer::KeyEnrolled, Offer::Restart(Image::Nvidia)] {
-            assert_eq!(Driver::from_offer(offer, false), Driver::Started, "{offer:?}");
-        }
-        assert_eq!(Driver::from_offer(Offer::Install, true), Driver::Started, "downloading");
-        for offer in [Offer::Nothing, Offer::OldCard, Offer::UnknownCard, Offer::UseOpenSource, Offer::SwitchBack, Offer::Restart(Image::Main)] {
-            assert_eq!(Driver::from_offer(offer, false), Driver::None, "{offer:?}");
-        }
+        assert_eq!(
+            steps(&bare),
+            [Step::Controllers, Step::Finish],
+            "Controllers and Finish always can show"
+        );
     }
 
     #[test]
@@ -364,11 +298,27 @@ mod tests {
         assert!(!ready(Step::TimeZone, &Facts { zone: String::new(), ..f.clone() }));
         assert!(ready(Step::TimeZone, &Facts { zone: "Europe/Berlin".into(), ..f.clone() }));
         assert!(!ready(Step::Controllers, &f));
-        assert!(ready(Step::Controllers, &Facts { pads: 2, ..f.clone() }));
-        assert!(!ready(Step::Graphics, &Facts { driver: Driver::Offered, ..f.clone() }));
-        assert!(ready(Step::Graphics, &Facts { driver: Driver::Started, ..f.clone() }));
-        assert!(!ready(Step::GameDrive, &Facts { drive: Drive::Offered, ..f.clone() }));
-        assert!(ready(Step::GameDrive, &Facts { drive: Drive::Used, ..f.clone() }));
+        assert!(ready(
+            Step::Controllers,
+            &Facts {
+                pads: 2,
+                ..f.clone()
+            }
+        ));
+        assert!(!ready(
+            Step::GameDrive,
+            &Facts {
+                drive: Drive::Offered,
+                ..f.clone()
+            }
+        ));
+        assert!(ready(
+            Step::GameDrive,
+            &Facts {
+                drive: Drive::Used,
+                ..f.clone()
+            }
+        ));
         assert!(ready(Step::Finish, &f));
     }
 
@@ -389,67 +339,52 @@ mod tests {
 
     #[test]
     fn setup_resumes_at_the_saved_step_after_a_restart() {
-        // The key for the NVIDIA driver: the PC restarted on the Graphics step.
-        let facts = Facts { driver: Driver::Started, drive: Drive::Offered, ..fresh() };
-        let m = Machine::start(&facts, Some(Step::Graphics));
-        assert_eq!(m.step(), Step::Graphics);
+        let facts = Facts {
+            drive: Drive::Offered,
+            ..fresh()
+        };
+        let m = Machine::start(&facts, Some(Step::GameDrive));
+        assert_eq!(m.step(), Step::GameDrive);
         assert_eq!(m.at(), 3, "the steps before it show as done");
         // A controller came, or the cable: the saved step is gone, so the next one that shows.
         let pad = Facts { pads: 1, ..fresh() };
-        assert_eq!(Machine::start(&pad, Some(Step::Controllers)).step(), Step::Finish);
-        let cable = Facts { wired: true, online: true, ..fresh() };
-        assert_eq!(Machine::start(&cable, Some(Step::Network)).step(), Step::TimeZone);
-        assert_eq!(Machine::start(&fresh(), Some(Step::Finish)).step(), Step::Finish);
-    }
-
-    #[test]
-    fn setup_resumes_from_a_saved_config() {
-        let mut cfg: crate::config::Config = serde_json::from_str(r#"{"setup_step": "graphics", "nvidia": {"step": {"step": "key-queued", "boot": "b1"}}}"#).unwrap();
-        assert!(!cfg.setup_done);
-        assert_eq!(cfg.setup_step, Some(Step::Graphics));
-        // At the start after the restart: the NVIDIA flow asks for the key, the setup goes on.
-        let resumed = crate::nvidia::resume(&mut cfg.nvidia, Image::Main, "b2");
-        assert_eq!(resumed, crate::nvidia::Resume::CheckKey);
-        let offer = crate::nvidia::offer(Some(Image::Main), Some(&rtx_3070()), &cfg.nvidia);
-        let facts = Facts { driver: Driver::from_offer(offer, false), ..fresh() };
-        assert_eq!(Machine::start(&facts, cfg.setup_step).step(), Step::Graphics);
-        // An older config: the setup has not run.
-        let old: crate::config::Config = serde_json::from_str("{}").unwrap();
-        assert_eq!((old.setup_done, old.setup_step), (false, None));
-        let json = serde_json::to_string(&crate::config::Config { setup_step: Some(Step::GameDrive), ..old }).unwrap();
-        assert!(json.contains(r#""setup_step":"game-drive""#), "{json}");
-    }
-
-    fn rtx_3070() -> crate::gpu::Card {
-        crate::gpu::Card { vendor: crate::gpu::NVIDIA, device: 0x2484, slot: None, driver: Some("nouveau".into()) }
+        assert_eq!(
+            Machine::start(&pad, Some(Step::Controllers)).step(),
+            Step::Finish
+        );
+        let cable = Facts {
+            wired: true,
+            online: true,
+            ..fresh()
+        };
+        assert_eq!(
+            Machine::start(&cable, Some(Step::Network)).step(),
+            Step::TimeZone
+        );
+        assert_eq!(
+            Machine::start(&fresh(), Some(Step::Finish)).step(),
+            Step::Finish
+        );
     }
 
     #[test]
     fn setup_buttons_say_skip_until_the_step_is_done() {
-        assert_eq!(buttons(Step::Network, true, false, Ending::Ready), [Button::Skip]);
-        assert_eq!(buttons(Step::Network, true, true, Ending::Ready), [Button::Next]);
-        assert_eq!(buttons(Step::TimeZone, false, false, Ending::Ready), [Button::Back, Button::Skip]);
-        assert_eq!(buttons(Step::Finish, false, true, Ending::Ready), [Button::Back, Button::Done]);
-        assert_eq!(buttons(Step::Finish, false, true, Ending::Downloading), [Button::Back, Button::Done]);
-        assert_eq!(buttons(Step::Finish, false, true, Ending::Restart), [Button::Back, Button::Later, Button::Restart]);
-        assert_eq!(buttons(Step::Finish, true, true, Ending::KeyRestart), [Button::Later, Button::Restart]);
-    }
-
-    #[test]
-    fn setup_finish_follows_the_driver() {
-        assert_eq!(ending(Offer::Nothing, false, Some(Image::Main)), Ending::Ready);
-        assert_eq!(ending(Offer::Install, false, Some(Image::Main)), Ending::Ready, "skipped");
-        assert_eq!(ending(Offer::Install, true, Some(Image::Main)), Ending::Downloading);
-        assert_eq!(ending(Offer::KeyEnrolled, true, Some(Image::Main)), Ending::Downloading);
-        assert_eq!(ending(Offer::Restart(Image::Nvidia), false, Some(Image::Main)), Ending::Restart);
-        assert_eq!(ending(Offer::KeyWaiting, false, Some(Image::Main)), Ending::KeyRestart);
-        assert_eq!(ending(Offer::UseOpenSource, false, Some(Image::Nvidia)), Ending::Installed);
-        assert_eq!(text(Step::Finish, Ending::Restart).0, "Restart to finish installing the NVIDIA driver");
-        assert_eq!(text(Step::Finish, Ending::Ready).0, "You're all set");
-        for step in ORDER {
-            let (title, body) = text(step, Ending::Ready);
-            assert!(!title.is_empty() && !body.is_empty(), "{step:?}");
-        }
+        assert_eq!(
+            buttons(Step::Network, true, false),
+            [Button::Skip]
+        );
+        assert_eq!(
+            buttons(Step::Network, true, true),
+            [Button::Next]
+        );
+        assert_eq!(
+            buttons(Step::TimeZone, false, false),
+            [Button::Back, Button::Skip]
+        );
+        assert_eq!(
+            buttons(Step::Finish, false, true),
+            [Button::Back, Button::Done]
+        );
     }
 
     #[test]

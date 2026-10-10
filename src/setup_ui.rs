@@ -1,8 +1,7 @@
 //! The first-start setup and the boot health notice on screen, in PS5 Launcher OS
 //! (docs/plans/ps5-launcher-os.md, Phase 7). The setup is a full-screen stepper over the System
-//! pages' own rows: each step shows one page (Network, Time, Controllers, the driver of Display,
-//! the drives of Storage), so joining a network, pairing a controller or installing the driver
-//! works as it does in Settings. `setup` decides the steps and the texts; `notice` reads the
+//! pages' own rows: Network, Time, Controllers and the drives of Storage. Joining a network
+//! and pairing a controller work as they do in Settings. `setup` decides the steps and the texts; `notice` reads the
 //! health check's file.
 //!
 //! The order: the welcome screen first (it prepares the catalog and the Home screen), then the
@@ -11,9 +10,8 @@
 use crate::app::*;
 use crate::audio::{self, Sound};
 use crate::notice;
-use crate::nvidia::{Image, Offer};
 use crate::settings::Cat;
-use crate::setup::{self, Button, Ending, Facts, Machine, Screen, Step};
+use crate::setup::{self, Button, Facts, Machine, Screen, Step};
 use crate::system::Mode;
 use crate::system_ui::bg;
 use std::path::Path;
@@ -27,8 +25,6 @@ pub struct SetupUi {
     probed: bool,
     /// The steps, once the facts are read.
     pub machine: Option<Machine>,
-    /// The driver's download started by itself after the key, in this run.
-    auto: bool,
 }
 
 #[derive(Default)]
@@ -53,7 +49,6 @@ fn page(step: Step) -> Cat {
         Step::Network => Cat::Network,
         Step::TimeZone => Cat::Time,
         Step::Controllers => Cat::Controllers,
-        Step::Graphics => Cat::Display,
         Step::GameDrive => Cat::Storage,
         Step::Finish => Cat::Setup,
     }
@@ -130,7 +125,6 @@ impl App {
             time: self.sys.tools.time,
             zone: self.sys.time.clock.as_ref().map(|c| c.zone.clone()).unwrap_or_default(),
             pads: self.controllers().len(),
-            driver: setup::Driver::from_offer(self.nv_offer(), self.nv_downloading()),
             drive: setup::drive(&self.sys.drives, &|dir| self.is_game_dir(dir)),
         }
     }
@@ -169,22 +163,19 @@ impl App {
             // Read the page again: the Network page scans for networks.
             self.sys_page_opened(cat);
         }
-        self.setup_changed();
-    }
-
-    /// The Finish step's ending, from the NVIDIA driver's state.
-    fn setup_ending(&self) -> Ending {
-        let image = self.sys.display.state.as_ref().and_then(|d| d.image);
-        setup::ending(self.nv_offer(), self.nv_downloading(), image)
     }
 
     fn setup_buttons(&self) -> Vec<Button> {
         let Some(m) = &self.setup.machine else { return Vec::new() };
         let step = m.step();
-        setup::buttons(step, m.at() == 0, setup::ready(step, &self.setup_facts()), self.setup_ending())
+        setup::buttons(
+            step,
+            m.at() == 0,
+            setup::ready(step, &self.setup_facts()),
+        )
     }
 
-    /// The main button (Skip, Next, Done, Restart now) comes last.
+    /// The main button (Skip, Next, Done) comes last.
     pub fn setup_main_button(&self) -> i32 {
         self.setup_buttons().len().saturating_sub(1) as i32
     }
@@ -203,32 +194,29 @@ impl App {
                 ..Default::default()
             },
             Some(m) => {
-                let (title, text) = setup::text(m.step(), self.setup_ending());
+                let (title, text) = setup::text(m.step());
                 crate::SetupView {
                     kicker: format!("SET UP PS5 LAUNCHER OS · STEP {} OF {}", m.at() + 1, m.steps().len()).into(),
                     steps: model(m.steps().iter().map(|s| s.label().into()).collect()),
                     at: m.at() as i32,
                     title: title.into(),
-                    text: text.into(),
+                    text: if m.step() == Step::Finish
+                        && self.sys.display.state.as_ref().is_some_and(|d| {
+                            d.image.is_some() && d.screen.card.vendor == crate::gpu::NVIDIA
+                        }) {
+                        format!("{text} NVIDIA graphics use Fedora's nouveau driver and Mesa NVK. Updates arrive with system updates.").into()
+                    } else {
+                        text.into()
+                    },
                     buttons: model(buttons.iter().map(|b| b.label().into()).collect()),
                 }
             }
         };
-        // The buttons change (Skip becomes Next; the Finish step gains Restart now).
+        // The buttons change as a step becomes ready (Skip becomes Next).
         if self.zone == Z_SETUP_NAV && self.idx >= buttons.len() as i32 {
             self.set_focus(Z_SETUP_NAV, buttons.len().saturating_sub(1) as i32);
         }
         self.ui().set_setup(view);
-    }
-
-    /// The page changed under the setup: after the key's restart, the driver downloads by
-    /// itself, since the player chose Install before it.
-    pub fn setup_changed(&mut self) {
-        let downloading = self.sys.display.busy.is_some();
-        if self.setup_step() == Some(Step::Graphics) && self.nv_offer() == Offer::KeyEnrolled && !downloading && !self.setup.auto {
-            self.setup.auto = true;
-            self.nv_switch(Image::Nvidia);
-        }
     }
 
     pub fn act_setup(&mut self, a: Act) {
@@ -278,28 +266,13 @@ impl App {
         match b {
             Button::Back => self.setup_back(),
             Button::Skip | Button::Next => {
-                // Skipping the driver is its Later: the offer folds to one row on Display.
-                if b == Button::Skip && self.setup_step() == Some(Step::Graphics) && self.nv_offer() == Offer::Install {
-                    self.save_cfg(|c| c.nvidia.later = true);
-                }
                 audio::play(Sound::Select);
                 if let Some(m) = self.setup.machine.as_mut() {
                     m.next();
                 }
                 self.setup_enter();
             }
-            Button::Done | Button::Later => self.setup_finish(),
-            Button::Restart => match self.setup_ending() {
-                // The key's restart: the setup comes back to the driver after it.
-                Ending::KeyRestart => {
-                    self.save_cfg(|c| c.setup_step = Some(Step::Graphics));
-                    self.nv_restart();
-                }
-                _ => {
-                    self.setup_finish();
-                    self.nv_restart();
-                }
-            },
+            Button::Done => self.setup_finish(),
         }
     }
 
