@@ -17,13 +17,14 @@ trap 'rm -rf "$work"' EXIT
 mkdir -p "$work/bin"
 sed -e "s|^os_release=/usr/lib/ps5-launcher/os-release$|os_release=$work/os-release|" \
     -e "s|^state=/var/lib/ps5-launcher-os/signature-policy.json$|state=$work/state/signature-policy.json|" \
+    -e "s|^nvidia_digest=/var/lib/ps5-launcher/nvidia-digest$|nvidia_digest=$work/helper-state/nvidia-digest|" \
     -e "s|^lock_file=/run/ps5-launcher-os.lock$|lock_file=$work/lock|" \
     -e "s|^lock_wait=60$|lock_wait=1|" \
     -e "s|^health_wait=190$|health_wait=4|" \
     -e "s|^PATH=/usr/sbin:/usr/bin$|PATH=$work/bin:/usr/sbin:/usr/bin:/bin|" \
     "$here/files/usr/libexec/ps5-launcher-os/signature-policy" > "$work/signature-policy"
 chmod +x "$work/signature-policy"
-for fixed in "^os_release=$work/" "^state=$work/" "^lock_file=$work/" "^lock_wait=1$" "^health_wait=4$" \
+for fixed in "^os_release=$work/" "^state=$work/" "^nvidia_digest=$work/" "^lock_file=$work/" "^lock_wait=1$" "^health_wait=4$" \
     "^PATH=$work/bin:"; do
     grep -q "$fixed" "$work/signature-policy" || { echo "FAIL the fixed line $fixed was not found"; exit 1; }
 done
@@ -85,6 +86,8 @@ status "$repo:nvidia" registry "" false false
 check "a fresh NVIDIA install is switched with the enforcement" run 0
 check "  to the booted digest, so no new image and no key check is skipped" \
     grep -qx "switch --enforce-container-sigpolicy $repo@$booted" "$work/bootc.log"
+check "  and the helper's update check knows that digest is the running one" \
+    grep -qx "$booted" "$work/helper-state/nvidia-digest"
 
 printf 'IMAGE=main\nIMAGE_REF=%s:main\n' "$repo" > "$work/os-release"
 status "$repo:main" registry "" false true
@@ -143,5 +146,12 @@ check "an OS marker without IMAGE_REF fails" run 1
 echo '{}' > "$work/status.json"
 printf 'IMAGE=main\nIMAGE_REF=%s:main\n' "$repo" > "$work/os-release"
 check "a bootc status without an image fails" run 1
+# A disk made straight from the image (image-builder, the CI boot test) follows no registry:
+# bootc shows a booted system with no image spec. That is not our image, not a failure.
+jq -n --arg d "$booted" '{spec: {image: null}, status: {booted: {image: {imageDigest: $d}}, staged: null, rollback: null}}' \
+    > "$work/status.json"
+check "a system that follows no image is left alone" run 0
+check "  no switch" test ! -s "$work/bootc.log"
+check "  and the state says not-our-image" test "$(state)" = not-our-image
 
 [ "$failures" = 0 ]

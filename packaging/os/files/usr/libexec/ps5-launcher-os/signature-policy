@@ -38,6 +38,8 @@
 set -uo pipefail
 os_release=/usr/lib/ps5-launcher/os-release
 state=/var/lib/ps5-launcher-os/signature-policy.json
+# The helper's "digest staged last" on the NVIDIA image (helper update-check compares with it).
+nvidia_digest=/var/lib/ps5-launcher/nvidia-digest
 lock_file=/run/ps5-launcher-os.lock
 lock_wait=60
 health_wait=190
@@ -73,6 +75,12 @@ fi
 
 json=$(status) || json=""
 if ! spec=$(jq -er '.spec.image | select(.image != null) | "\(.transport) \(.signature // "none") \(.image)"' <<<"$json" 2>/dev/null); then
+    # A booted system that follows no image (a disk made straight from the image, as in the CI
+    # boot test) is not ours to change. With no booted system at all, bootc is in trouble.
+    if jq -e '.status.booted != null and .spec.image == null' <<<"$json" >/dev/null 2>&1; then
+        record not-our-image "the system follows no image" ""
+        exit 0
+    fi
     record failed "bootc status gave no image" ""
     exit 1
 fi
@@ -133,5 +141,13 @@ fi
 if [ "$(status | jq -r '.spec.image.signature // "none"' 2>/dev/null)" != containerPolicy ]; then
     record failed "bootc switch ran, but bootc status shows no enforcement" "$target"
     exit 1
+fi
+if [ "$variant" = nvidia ]; then
+    # This digest is the running one: without the record, the helper's first update check would
+    # offer it as an update.
+    mkdir -p "${nvidia_digest%/*}"
+    tmp=$(mktemp "${nvidia_digest%/*}/.nvidia-digest.XXXXXX")
+    echo "$booted" > "$tmp"
+    mv -f "$tmp" "$nvidia_digest"
 fi
 record enforced "bootc enforces the signature policy from the next restart on" "$target"

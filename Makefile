@@ -13,10 +13,12 @@ VERSION := $(shell sed -n 's/^version = "\(.*\)"/\1/p' Cargo.toml | head -1)
 BINARY ?= target/release/ps5-launcher
 DIST ?= dist/packages
 
-SHELL_SCRIPTS := install.sh scripts/*.sh packaging/linux/*.sh packaging/linux/ps5-launcher-session \
-	packaging/os/*.sh packaging/os/boottest/*.sh packaging/os/boottest/check-system \
-	packaging/os/boottest/report packaging/os/files/usr/libexec/*/*
-OS_TESTS := packaging/os/test-helper.sh packaging/os/test-boot-health.sh packaging/os/test-recovery-menu.sh
+# Every shell script, chosen by its #! line (libexec also has a Python helper).
+SHELL_SCRIPTS := $(shell grep -lE '^\#!.*(ba)?sh' install.sh scripts/*.sh packaging/linux/*.sh \
+	packaging/linux/ps5-launcher-session packaging/os/*.sh packaging/os/boottest/* \
+	packaging/os/files/usr/libexec/*/* 2>/dev/null)
+OS_TESTS := packaging/os/test-helper.sh packaging/os/test-boot-health.sh packaging/os/test-recovery-menu.sh \
+	packaging/os/test-signature-policy.sh
 
 .PHONY: help build run run-session test check check-shell lint packages appimage os-image os-iso clean
 
@@ -43,7 +45,7 @@ check: ## Everything CI's Linux job checks: build, tests, smoke test, shell test
 
 check-shell: ## The session wrapper's tests here, and the OS tests in Fedora 44
 	packaging/linux/test-session.sh
-	$(DOCKER) run --rm -v "$(CURDIR):/repo:ro" -w /repo $(FEDORA) bash -c '\
+	$(DOCKER) run --rm -v "$(CURDIR):/repo:ro" -w /repo $(FEDORA) bash -o pipefail -c '\
 		dnf -y -q install jq python3 util-linux procps-ng findutils diffutils >/dev/null && \
 		for t in $(OS_TESTS); do echo "== $$t"; bash "$$t" | tail -1 || exit 1; done'
 
