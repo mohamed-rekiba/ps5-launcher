@@ -1,0 +1,138 @@
+// The Quick Menu: a drawer on the right edge over a dimmed screen (docs/plans/ps5-launcher-os.md,
+// Phase 3; the prototype's pick B). One focus style, the app's own: the focused card turns white.
+// A dangerous card only gets a red icon, never a red fill.
+
+import { S, Theme, Icons, QuickCard } from "theme.slint";
+import { KeyCap } from "widgets.slint";
+
+export component QuickMenu inherits Rectangle {
+    in property <[QuickCard]> cards;
+    in property <int> selected;
+    in property <string> clock;
+    // The running game's name, or empty.
+    in property <string> game;
+    // The names under the open card (the controllers).
+    in property <[string]> items;
+    in property <bool> pad;
+    callback choose(int);
+    callback close();
+    property <bool> entered: false;
+    init => { entered = true; }
+    background: entered ? #03050c99 : #03050c00;
+    animate background { duration: 200ms; }
+    TouchArea { clicked => { root.close(); } }
+    drawer := Rectangle {
+        width: (620px * S.k);
+        x: entered ? root.width - self.width : root.width;
+        animate x { duration: 280ms; easing: ease-out-expo; }
+        background: @linear-gradient(180deg, #111a33fa 0%, #0a1024fc 100%);
+        border-width: 1px;
+        border-color: Theme.line;
+        drop-shadow-blur: (60px * S.k);
+        drop-shadow-color: #000000aa;
+        TouchArea {}
+        VerticalLayout {
+            padding-top: (44px * S.k);
+            padding-left: (40px * S.k);
+            padding-right: (40px * S.k);
+            spacing: (10px * S.k);
+            alignment: start;
+            HorizontalLayout {
+                Text { text: "Quick Menu"; font-size: (36px * S.k); font-weight: 600; color: Theme.text; }
+                Text { text: root.clock; font-size: (22px * S.k); color: Theme.text3; horizontal-alignment: right; vertical-alignment: center; }
+            }
+            Text {
+                text: root.game != "" ? root.game + " is running" : "No game running";
+                font-size: (17px * S.k);
+                color: Theme.text3;
+                overflow: elide;
+            }
+            Rectangle { height: (12px * S.k); }
+            for card[i] in root.cards: VerticalLayout {
+                spacing: (4px * S.k);
+                if card.sep: Rectangle {
+                    height: (12px * S.k);
+                    Rectangle { y: (6px * S.k); height: 1px; background: Theme.line; }
+                }
+                Rectangle {
+                    property <bool> f: root.selected == i;
+                    height: (70px * S.k);
+                    border-radius: (14px * S.k);
+                    background: f ? #ffffff : card.open ? #ffffff1c : ta.has-hover ? #ffffff16 : #ffffff0b;
+                    animate background { duration: Theme.fast; }
+                    HorizontalLayout {
+                        padding-left: (18px * S.k);
+                        padding-right: (18px * S.k);
+                        spacing: (16px * S.k);
+                        Image {
+                            source: Icons.get(card.icon);
+                            colorize: card.danger ? (f ? Theme.danger : #ff8f9c) : f ? #0a0d18 : Theme.text;
+                            width: (28px * S.k);
+                            height: (28px * S.k);
+                            y: (21px * S.k);
+                        }
+                        Text {
+                            text: card.label;
+                            font-size: (20px * S.k);
+                            font-weight: 600;
+                            color: f ? #0a0d18 : Theme.text;
+                            vertical-alignment: center;
+                            horizontal-stretch: 1;
+                        }
+                        Text {
+                            text: card.status;
+                            font-size: (16px * S.k);
+                            color: f ? #33405e : Theme.text3;
+                            vertical-alignment: center;
+                            horizontal-alignment: right;
+                            overflow: elide;
+                            max-width: (300px * S.k);
+                        }
+                        if card.more: Image {
+                            source: card.open ? Icons.chevd : Icons.chevr;
+                            colorize: f ? #0a0d18 : Theme.text3;
+                            width: (20px * S.k);
+                            height: (20px * S.k);
+                            y: (25px * S.k);
+                        }
+                    }
+                    ta := TouchArea { mouse-cursor: pointer; clicked => { root.choose(i); } }
+                }
+                if card.open: VerticalLayout {
+                    padding-left: (24px * S.k);
+                    padding-bottom: (6px * S.k);
+                    for name in root.items: HorizontalLayout {
+                        height: (50px * S.k);
+                        padding-left: (14px * S.k);
+                        spacing: (12px * S.k);
+                        Image { source: Icons.pad; colorize: Theme.text2; width: (22px * S.k); height: (22px * S.k); y: (14px * S.k); }
+                        Text { text: name; font-size: (18px * S.k); color: Theme.text; vertical-alignment: center; overflow: elide; horizontal-stretch: 1; }
+                    }
+                    if root.items.length == 0: HorizontalLayout {
+                        height: (50px * S.k);
+                        padding-left: (14px * S.k);
+                        Text { text: "Connect a controller by USB or Bluetooth"; font-size: (18px * S.k); color: Theme.text3; vertical-alignment: center; }
+                    }
+                }
+            }
+        }
+        // Hints at the bottom, like the other overlays.
+        HorizontalLayout {
+            x: (40px * S.k);
+            y: root.height - self.height - (40px * S.k);
+            height: (50px * S.k);
+            spacing: (24px * S.k);
+            alignment: start;
+            for h in root.pad
+                ? (root.game != ""
+                    ? [{k: "✕", l: "Select", c: #8fb6ff, r: true}, {k: "○", l: "Close", c: #ff8f9c, r: true}, {k: "PS", l: "Back to game", c: #ffffff, r: false}]
+                    : [{k: "✕", l: "Select", c: #8fb6ff, r: true}, {k: "○", l: "Close", c: #ff8f9c, r: true}])
+                : [{k: "Enter", l: "Select", c: #ffffff, r: false}, {k: "Esc", l: "Close", c: #ffffff, r: false}]
+                : HorizontalLayout {
+                    spacing: (10px * S.k);
+                    KeyCap { text: h.k; round: h.r; fg: h.c; y: (10px * S.k); }
+                    Text { text: h.l; font-size: (17px * S.k); color: Theme.text2; vertical-alignment: center; }
+                }
+        }
+    }
+}

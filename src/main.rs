@@ -36,6 +36,7 @@ mod library_layout;
 mod hostos;
 mod present;
 mod power_ui;
+mod quick_ui;
 mod psn;
 mod sessions;
 mod settings;

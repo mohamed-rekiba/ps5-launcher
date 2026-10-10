@@ -42,6 +42,7 @@ pub const Z_DENSITY: i32 = 17;
 pub const Z_TRAILER: i32 = 18;
 pub const Z_CONTROLS: i32 = 19;
 pub const Z_POWER: i32 = 20;
+pub const Z_QUICK: i32 = 21;
 
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub enum Overlay {
@@ -58,6 +59,7 @@ pub enum Overlay {
     Power = 11,
     PowerCountdown = 12,
     PowerDialog = 13,
+    Quick = 14,
 }
 
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
@@ -275,6 +277,7 @@ pub struct App {
     /// more than one console, "PS5 games only" and "PS4 games only". Genres follow.
     pub status_count: usize,
     pub power: crate::power_ui::PowerUi,
+    pub quick: crate::quick_ui::QuickUi,
 }
 
 thread_local! {
@@ -429,6 +432,7 @@ pub fn run(ui: AppWindow, monitors: Vec<Monitor>, target_monitor: Option<Monitor
         status_count: 4,
         compat_checked: 0.0,
         power: Default::default(),
+        quick: Default::default(),
     };
     ui.set_grid_rows(ModelRc::from(app.grid_model.clone()));
     ui.set_tiles(ModelRc::from(app.tile_model.clone()));
@@ -1359,6 +1363,9 @@ impl App {
             self.clock = clock;
         }
         self.push_storage();
+        if self.overlay == Overlay::Quick {
+            self.push_quick();
+        }
         let pads = crate::gamepad::count();
         if pads != self.pad_count {
             ui.set_pad_count(pads as i32);
@@ -1380,8 +1387,7 @@ impl App {
 
     pub fn on_pad(&mut self, p: Pad) {
         if p == Pad::Ps {
-            self.sessions.toggle_focus();
-            return;
+            return self.ps_pressed();
         }
         if p == Pad::PsHold {
             // From anywhere, also during a game: bring the launcher forward first, as a press does.
@@ -1670,6 +1676,7 @@ impl App {
             Overlay::Power => self.act_power_menu(a),
             Overlay::PowerDialog => self.act_power_dialog(a),
             Overlay::PowerCountdown => self.act_power_countdown(a),
+            Overlay::Quick => self.act_quick(a),
             Overlay::None => self.act_main(a),
         }
     }
@@ -2087,6 +2094,7 @@ impl App {
             let (ov, zone, idx) = self.stack.pop().unwrap_or((Overlay::None, if self.view == 0 { Z_ROW } else { Z_GRID }, 0));
             self.overlay = ov;
             self.ui().set_overlay(ov as i32);
+            self.ui().set_quick_shown(self.quick_open());
             self.set_focus(zone, idx);
             if ov == Overlay::None {
                 self.ui().set_hub_open(false);
@@ -2126,6 +2134,7 @@ impl App {
         let ui = self.ui();
         ui.set_overlay(ov as i32);
         ui.set_hub_open(self.hub.is_some() && (ov == Overlay::Hub || self.stack.iter().any(|s| s.0 == Overlay::Hub)));
+        ui.set_quick_shown(self.quick_open());
         self.set_focus(zone, idx);
     }
 

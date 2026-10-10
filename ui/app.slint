@@ -1,8 +1,9 @@
-import { S, Theme, Icons, Zone, DownloadData, BootStep, ChipData, ActionData, TileData, HeroData, CardData, CardRow, GenreChip, Fact, FactRow, Shot, HubData, SettingData, ToastData, MenuItem, RunningData, PowerRow } from "theme.slint";
+import { S, Theme, Icons, Zone, DownloadData, BootStep, ChipData, ActionData, TileData, HeroData, CardData, CardRow, GenreChip, Fact, FactRow, Shot, HubData, SettingData, ToastData, MenuItem, RunningData, PowerRow, QuickCard } from "theme.slint";
 import { FocusRing, Chip, Btn, Kicker, Badge, Switch, KeyCap, BackButton, Shimmer, Cover } from "widgets.slint";
 import { DownloadsSheet, DownloadConsent } from "downloads.slint";
 import { LibraryFilter, LibrarySortPicker } from "library.slint";
 import { PowerMenu, PowerDialog, PowerCountdown } from "power.slint";
+import { QuickMenu } from "quick.slint";
 import { AboutSlint, Palette } from "std-widgets.slint";
 
 export { S, Theme, Zone }
@@ -146,7 +147,7 @@ export component AppWindow inherits Window {
 
     // ---------------------------------------------------------------- state from Rust
     in property <int> view;          // 0 home, 1 library
-    in property <int> overlay;       // 0 none, 1 hub, 2 settings, 3 viewer, 4 launch, 5 menu, 11-13 power (Overlay in app.rs)
+    in property <int> overlay;       // 0 none, 1 hub, 2 settings, 3 viewer, 4 launch, 5 menu, 11-13 power, 14 quick (Overlay in app.rs)
     in property <int> zone;
     in property <int> idx;
     in property <string> clock;
@@ -265,6 +266,11 @@ export component AppWindow inherits Window {
     in property <[PowerRow]> power-choices;
     in property <string> power-counting;
     in property <int> power-seconds;
+
+    in property <[QuickCard]> quick-cards;
+    in property <[string]> quick-items;
+    // The Quick Menu is open, also under a power overlay opened from it.
+    in property <bool> quick-shown;
 
     in property <bool> boot-first;
     in property <bool> boot-ready;
@@ -918,7 +924,7 @@ export component AppWindow inherits Window {
             border-width: 1px;
             border-color: Theme.line;
             // Hidden over the library grid so it never covers game titles.
-            visible: root.overlay != 4 && root.overlay != 3 && root.overlay != 6 && root.overlay != 7 && root.overlay != 12 && (root.view == 0 || root.overlay != 0);
+            visible: root.overlay != 4 && root.overlay != 3 && root.overlay != 6 && root.overlay != 7 && root.overlay != 12 && root.overlay != 14 && (root.view == 0 || root.overlay != 0);
             hints := HorizontalLayout {
                 padding-left: (20px * S.k);
                 padding-right: (22px * S.k);
@@ -1943,6 +1949,15 @@ export component AppWindow inherits Window {
             }
                 }
             }
+        }
+
+        // ------------------------------------------------------------ QUICK MENU
+        // It stays under the Power menu, dialog and countdown that open from it.
+        if root.quick-shown: QuickMenu {
+            cards: root.quick-cards; selected: root.zone == Zone.quick ? root.idx : -1; items: root.quick-items;
+            clock: root.clock; game: root.running.name; pad: root.pad-hints;
+            choose(i) => { root.click(Zone.quick, i); }
+            close => { root.click(Zone.quick, -1); }
         }
 
         // ------------------------------------------------------------ POWER

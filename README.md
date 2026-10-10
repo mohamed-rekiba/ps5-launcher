@@ -189,7 +189,8 @@ needs free space for the whole unpacked game, which can be several times the siz
 | Options for a game | Options | O |
 | Search | △ | / |
 | Switch Home ⇄ Library | L1 / R1 | Tab |
-| Switch between game and launcher | PS button | |
+| Quick Menu (controllers, downloads, power) | PS button, during a game or with no game running | |
+| Back to the game from the launcher | PS button | |
 | Power menu (close the game or the launcher, power off) | Hold the PS button for 2 seconds, or the power button at the top | |
 | Downloads | | Ctrl+D |
 

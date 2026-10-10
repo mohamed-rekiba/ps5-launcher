@@ -57,8 +57,16 @@ fn icon(action: PowerAction) -> &'static str {
     }
 }
 
+/// A row's label and icon, for the Power menu and the Quick Menu.
+pub fn label_icon(row: Row) -> (&'static str, &'static str) {
+    match row {
+        Row::CancelWait => ("Cancel power off", "close"),
+        Row::Action(a) => (a.label(), icon(a)),
+    }
+}
+
 /// A divider sits after Close game (and Cancel power off), and before Log out / Switch to desktop.
-fn divider(prev: Option<Row>, row: Row) -> bool {
+pub fn divider(prev: Option<Row>, row: Row) -> bool {
     let leaving = |r: Row| matches!(r, Row::Action(PowerAction::LogOut | PowerAction::SwitchToDesktop));
     match prev {
         None => false,
@@ -67,13 +75,13 @@ fn divider(prev: Option<Row>, row: Row) -> bool {
     }
 }
 
-fn is_power(ov: Overlay) -> bool {
+pub fn is_power(ov: Overlay) -> bool {
     matches!(ov, Overlay::Power | Overlay::PowerDialog | Overlay::PowerCountdown)
 }
 
 impl App {
     /// What a power action would interrupt now.
-    fn power_work(&self) -> Work {
+    pub fn power_work(&self) -> Work {
         let jobs = self.installer.snapshot().into_iter().filter(|r| r.state.active())
             .map(|r| system::Job { percent: (r.progress() * 100.0).round() as u8, id: r.key, name: r.name })
             .collect();
@@ -94,6 +102,15 @@ impl App {
         if self.boot.active || is_power(self.overlay) {
             return;
         }
+        self.end_editing();
+        audio::play(Sound::Select);
+        self.push_power_rows();
+        self.push_overlay(Overlay::Power, Z_POWER, 0);
+        self.check_sleep();
+    }
+
+    /// Before a menu opens over the screen: stop editing text there.
+    pub fn end_editing(&mut self) {
         if self.search_editing {
             self.stop_search_edit();
         }
@@ -103,14 +120,11 @@ impl App {
         if self.overlay == Overlay::Downloads && self.ui().get_download_editing() {
             self.ui().invoke_focus_root();
         }
-        audio::play(Sound::Select);
-        self.push_power_rows();
-        self.push_overlay(Overlay::Power, Z_POWER, 0);
-        self.check_sleep();
     }
 
-    /// Ask logind whether the PC can sleep; the rows follow the answer.
-    fn check_sleep(&self) {
+    /// Ask logind whether the PC can sleep; the rows of the Power menu and the Quick Menu follow
+    /// the answer.
+    pub fn check_sleep(&self) {
         if !cfg!(target_os = "linux") || Mode::current() == Mode::Desktop {
             return;
         }
@@ -127,24 +141,30 @@ impl App {
                     if app.overlay == Overlay::Power {
                         app.push_power_rows();
                         app.set_focus(Z_POWER, app.idx.min(app.power.rows.len() as i32 - 1).max(0));
+                    } else if app.overlay == Overlay::Quick {
+                        app.push_quick();
                     }
                 }
             });
         });
     }
 
-    fn push_power_rows(&mut self) {
+    /// The Power menu's rows, in order.
+    pub fn power_rows(&self) -> Vec<Row> {
         let mut rows: Vec<Row> = Vec::new();
         if self.power.wait.is_some() {
             rows.push(Row::CancelWait);
         }
         rows.extend(system::power_actions(Mode::current(), &self.power_work(), &self.power_caps()).into_iter().map(Row::Action));
+        rows
+    }
+
+    fn push_power_rows(&mut self) {
+        let rows = self.power_rows();
         let data = rows.iter().enumerate().map(|(i, r)| {
+            let (label, icon) = label_icon(*r);
             let sep = divider(i.checked_sub(1).map(|p| rows[p]), *r);
-            match r {
-                Row::CancelWait => PowerRow { label: "Cancel power off".into(), icon: "close".into(), danger: false, sep },
-                Row::Action(a) => PowerRow { label: a.label().into(), icon: icon(*a).into(), danger: *a == PowerAction::CloseGame, sep },
-            }
+            PowerRow { label: label.into(), icon: icon.into(), danger: *r == Row::Action(PowerAction::CloseGame), sep }
         }).collect();
         let ui = self.ui();
         ui.set_power_rows(model(data));
@@ -158,17 +178,25 @@ impl App {
             Act::Up if self.idx > 0 => self.move_focus(Z_POWER, self.idx - 1),
             Act::Down if self.idx + 1 < n => self.move_focus(Z_POWER, self.idx + 1),
             Act::Back => self.back(),
-            Act::Confirm => match self.power.rows.get(self.idx as usize).copied() {
-                Some(Row::CancelWait) => {
-                    self.power.wait = None;
-                    self.power.note.clear();
-                    self.close_power();
-                    self.toast("Power off cancelled", "The PC stays on after the install.", 0);
+            Act::Confirm => {
+                if let Some(row) = self.power.rows.get(self.idx as usize).copied() {
+                    self.choose_power_row(row);
                 }
-                Some(Row::Action(action)) => self.guard_power(action),
-                None => {}
-            },
+            }
             _ => {}
+        }
+    }
+
+    /// A row chosen in the Power menu or the Quick Menu.
+    pub fn choose_power_row(&mut self, row: Row) {
+        match row {
+            Row::CancelWait => {
+                self.power.wait = None;
+                self.power.note.clear();
+                self.close_power();
+                self.toast("Power off cancelled", "The PC stays on after the install.", 0);
+            }
+            Row::Action(action) => self.guard_power(action),
         }
     }
 
@@ -264,9 +292,10 @@ impl App {
         }
     }
 
-    /// Close the Power menu, its dialog and its countdown, back to where it was opened.
+    /// Close the Power menu, its dialog and its countdown, and the Quick Menu they came from, back
+    /// to where they were opened.
     fn close_power(&mut self) {
-        while is_power(self.overlay) {
+        while is_power(self.overlay) || self.overlay == Overlay::Quick {
             self.back();
         }
     }

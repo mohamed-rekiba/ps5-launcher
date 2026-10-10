@@ -422,14 +422,10 @@ impl Sessions {
         pids.into_iter().any(activate_pid_window)
     }
 
-    /// PS button: toggle between the game and the launcher.
-    pub fn toggle_focus(&self) {
+    /// A running game's window has focus (PS button: open the Quick Menu over it).
+    pub fn game_in_front(&self) -> bool {
         let pids: Vec<u32> = self.inner.lock().unwrap().live.iter().map(|s| s.pid).collect();
-        if pids.is_empty() || pids.contains(&active_window_pid()) {
-            show_launcher();
-        } else {
-            self.resume();
-        }
+        !pids.is_empty() && pids.contains(&active_window_pid())
     }
 
     /// Returns true if anything changed.

@@ -66,6 +66,7 @@ export global Icons {
     out property <image> update: @image-url("../assets/icons/update.svg");
     out property <image> logout: @image-url("../assets/icons/logout.svg");
     out property <image> desktop: @image-url("../assets/icons/desktop.svg");
+    out property <image> download: @image-url("../assets/icons/download.svg");
     out property <image> none;
 
     public pure function get(name: string) -> image {
@@ -75,7 +76,8 @@ export global Icons {
             : name == "power" ? power : name == "search" ? search : name == "gear" ? gear
             : name == "check" ? check : name == "folder" ? folder : name == "log" ? log
             : name == "close" ? close : name == "moon" ? moon : name == "restart" ? restart : name == "update" ? update
-            : name == "logout" ? logout : name == "desktop" ? desktop : none;
+            : name == "logout" ? logout : name == "desktop" ? desktop
+            : name == "pad" ? pad : name == "download" ? download : none;
     }
 }
 
@@ -102,6 +104,7 @@ export global Zone {
     out property <int> trailer: 18;
     out property <int> controls: 19;
     out property <int> power: 20;
+    out property <int> quick: 21;
 }
 
 // dot: KytyPS5 compatibility level (0 none, 1 in-game, 2 menus, 3 boots, 4 doesn't boot, 5 untested)
@@ -210,4 +213,7 @@ export struct ToastData { id: int, text: string, sub: string, kind: int, image: 
 export struct MenuItem { label: string, icon: string }
 // A Power menu row. sep: a thin divider above it. danger: the icon is red (focus stays white).
 export struct PowerRow { label: string, icon: string, danger: bool, sep: bool }
+// A Quick Menu card. status: one line on the right. more: a chevron (it opens something);
+// open: the chevron points down and the card's list shows below it.
+export struct QuickCard { label: string, status: string, icon: string, danger: bool, sep: bool, more: bool, open: bool }
 export struct RunningData { active: bool, name: string, time: string }
