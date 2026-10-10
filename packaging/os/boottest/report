@@ -1,0 +1,38 @@
+#!/usr/bin/bash
+# CI only (the boot test image). After boot, writes to the second serial port the checks of
+# check-system (they end with "RESULT: PASS" or "RESULT: FAIL"), then the real output of the
+# system tools the launcher reads (fixtures for its parsers) and the logs behind the result.
+# Each part starts with a "=====" line; the last one is "===== end".
+user=$(getent passwd 1000 | cut -d: -f1)
+home=$(getent passwd 1000 | cut -d: -f6)
+part() { printf '\n===== %s\n' "$*"; }
+# Every tool gets 10 seconds: bluetoothctl, for one, waits forever without a Bluetooth service.
+t() { timeout 10 "$@" || echo "(exit $?)"; }
+
+part "checks"
+/usr/libexec/ps5-boottest-check main --session
+part "session log"
+tail -80 "$home/.cache/ps5-launcher-session.log"
+part "sddm journal"
+journalctl -b --no-pager -u sddm | tail -60
+part "failed units"
+systemctl --failed --no-pager
+part "login sessions"
+loginctl list-sessions --no-pager
+for method in CanSuspend CanReboot CanPowerOff; do
+    part "fixture: busctl --system call org.freedesktop.login1 /org/freedesktop/login1 org.freedesktop.login1.Manager $method"
+    t busctl --system call org.freedesktop.login1 /org/freedesktop/login1 org.freedesktop.login1.Manager "$method"
+done
+part "fixture: nmcli -t -f DEVICE,TYPE,STATE,CONNECTION device"
+t nmcli -t -f DEVICE,TYPE,STATE,CONNECTION device
+part "fixture: nmcli -t -f IN-USE,SSID,SIGNAL,SECURITY device wifi list"
+t nmcli -t -f IN-USE,SSID,SIGNAL,SECURITY device wifi list
+part "fixture: bluetoothctl list"
+t bluetoothctl list
+part "fixture: wpctl status (as $user)"
+t runuser -u "$user" -- env XDG_RUNTIME_DIR=/run/user/1000 wpctl status
+part "fixture: bootc status --json"
+t bootc status --json
+part "fixture: lsblk --json -b -o NAME,PATH,SIZE,TYPE,FSTYPE,MOUNTPOINT,RM,HOTPLUG,LABEL,MODEL"
+t lsblk --json -b -o NAME,PATH,SIZE,TYPE,FSTYPE,MOUNTPOINT,RM,HOTPLUG,LABEL,MODEL
+part "end"

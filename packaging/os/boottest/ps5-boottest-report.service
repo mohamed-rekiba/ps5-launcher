@@ -1,0 +1,14 @@
+[Unit]
+Description=Boot test (CI only): check the system and report on the second serial port
+After=graphical.target
+
+[Service]
+Type=oneshot
+ExecStart=/usr/libexec/ps5-boottest-report
+StandardOutput=tty
+StandardError=tty
+TTYPath=/dev/ttyS1
+TimeoutStartSec=15min
+
+[Install]
+WantedBy=graphical.target

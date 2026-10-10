@@ -1,0 +1,554 @@
+name: PS5 Launcher OS (Fedora)
+
+# The Fedora bootc OS image (packaging/os/) and its installer ISO. It replaces the Bazzite image
+# of os.yml, which keeps running unchanged until the migration (Phase 8 of the OS plan). Never
+# push to the Bazzite repository ps5-launcher-os or its tags. packaging/os/README.md describes the
+# images, the gates and the owner's setup.
+#
+# Images: ghcr.io/<owner>/ps5-launcher-fedora
+#   :main, :nvidia                  release tags; installed PCs follow these
+#   :main-YYYYMMDD, :nvidia-YYYYMMDD  dated release tags
+#   :testing-main-<run id>, :testing-nvidia-<run id>   candidates of one run
+#   :testing-upgrade-<run id>       CI only: the install test's upgrade target
+#
+# Each run:
+# 1. prepare: resolves the inputs once: the launcher release (input, or the latest), the
+#    digest of fedora-bootc:44 (so daily builds pick up Fedora's updates), the image name and
+#    the Secure Boot certificate.
+# 2. main: checks the launcher tarball's checksum, builds its rpm, builds the main image, checks
+#    it, and pushes the candidate.
+# 3. nvidia: builds the NVIDIA image FROM that exact candidate digest, signed with the
+#    SECUREBOOT_KEY secret, checks it, checks that it shares every main layer, and pushes it.
+# 4. Gates, all on a runner with KVM (no KVM fails them):
+#    boot-test     a qcow2 of the main candidate boots, and its checks pass (session included)
+#    install-test  the netinstaller installs the candidate with no one at the keyboard, then
+#                  bootc upgrade, bootc rollback, and the switch to NVIDIA and back
+# 5. promote: copies the tested digests to the release tags. Only when asked (input promote),
+#    only from main, and only after the environment os-fedora-release approves it: its reviewers
+#    confirm the hardware tests in packaging/os/README.md, which CI cannot run (Secure Boot,
+#    real GPUs). Scheduled runs never promote.
+# 6. iso: after promotion, and only when asked (input attach_iso), attaches
+#    ps5-launcher-fedora-x86_64.iso to the launcher release.
+#
+# TODO(release): sign the images with sigstore/cosign and ship a containers policy that requires
+# the signature (/etc/containers/policy.json and registries.d), so bootc and the helper refuse
+# unsigned images. Until then the images are unsigned: this blocks a public release.
+# TODO: delete old testing-* tags from the registry.
+
+on:
+  schedule:
+    - cron: "45 4 * * *"
+  workflow_dispatch:
+    inputs:
+      launcher_tag:
+        description: Launcher release tag to put in the image (empty for the latest release)
+        type: string
+        default: ""
+      promote:
+        description: Promote the tested images to the release tags (needs the environment's approval)
+        type: boolean
+        default: false
+      attach_iso:
+        description: After promotion, attach the installer ISO to the launcher release
+        type: boolean
+        default: false
+  # For release.yml, after a launcher release. It must pass `secrets: inherit` (for SECUREBOOT_KEY).
+  workflow_call:
+    inputs:
+      launcher_tag:
+        type: string
+        default: ""
+      promote:
+        type: boolean
+        default: false
+      attach_iso:
+        type: boolean
+        default: false
+    secrets:
+      SECUREBOOT_KEY:
+        required: false
+
+permissions:
+  contents: read
+  packages: write
+
+concurrency:
+  group: ps5-launcher-fedora
+  cancel-in-progress: false
+
+env:
+  # The registry owner. A fork that sets the repository variable OS_IMAGE_OWNER to its own name
+  # tests under that name; by default it is the repository's owner.
+  IMAGE_OWNER: ${{ vars.OS_IMAGE_OWNER || github.repository_owner }}
+  FEDORA_BASE: quay.io/fedora/fedora-bootc:44
+  CERT: packaging/os/secureboot/public_key.der
+  RUN_ID: ${{ github.run_id }}
+
+defaults:
+  run:
+    shell: bash
+
+jobs:
+  prepare:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    outputs:
+      image: ${{ steps.resolve.outputs.image }}
+      base: ${{ steps.resolve.outputs.base }}
+      launcher_tag: ${{ steps.resolve.outputs.launcher_tag }}
+      cert_sha256: ${{ steps.resolve.outputs.cert_sha256 }}
+      date: ${{ steps.resolve.outputs.date }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - id: resolve
+        env:
+          GH_TOKEN: ${{ github.token }}
+          LAUNCHER_TAG: ${{ inputs.launcher_tag }}
+        run: |
+          if [ ! -f "$CERT" ]; then
+            echo "::error::No Secure Boot certificate at $CERT. The owner makes it once: see packaging/os/secureboot/README.md"
+            exit 1
+          fi
+          cert_sha256=$(sha256sum "$CERT" | cut -d' ' -f1)
+          owner=${IMAGE_OWNER,,}
+          image=ghcr.io/$owner/ps5-launcher-fedora
+          if ! [[ $owner =~ ^[a-z0-9][a-z0-9-]*$ ]]; then
+            echo "::error::Invalid image owner: $owner"
+            exit 1
+          fi
+          # The base: one digest for the whole run, recorded in the image's label.
+          digest=sha256:$(skopeo inspect --raw "docker://$FEDORA_BASE" | sha256sum | cut -d' ' -f1)
+          base=${FEDORA_BASE%:*}@$digest
+          # The launcher: the input, or the latest release, resolved once.
+          tag=${LAUNCHER_TAG:-$(gh release view --repo "$GITHUB_REPOSITORY" --json tagName --jq .tagName)}
+          if ! [[ $tag =~ ^v[0-9]+\.[0-9]+\.[0-9]+([-+.][0-9A-Za-z.-]+)?$ ]]; then
+            echo "::error::Invalid launcher tag: $tag"
+            exit 1
+          fi
+          {
+            echo "image=$image"
+            echo "base=$base"
+            echo "launcher_tag=$tag"
+            echo "cert_sha256=$cert_sha256"
+            echo "date=$(date -u +%Y%m%d)"
+          } | tee -a "$GITHUB_OUTPUT"
+          {
+            echo "### Inputs"
+            echo "| | |"
+            echo "|---|---|"
+            echo "| Image | \`$image\` |"
+            echo "| Fedora base | \`$base\` (from \`$FEDORA_BASE\`) |"
+            echo "| Launcher | \`$tag\` |"
+            echo "| Secure Boot certificate SHA-256 | \`$cert_sha256\` |"
+          } >> "$GITHUB_STEP_SUMMARY"
+
+  main:
+    needs: prepare
+    runs-on: ubuntu-24.04
+    timeout-minutes: 90
+    outputs:
+      digest: ${{ steps.push.outputs.digest }}
+    env:
+      IMAGE: ${{ needs.prepare.outputs.image }}
+      BASE: ${{ needs.prepare.outputs.base }}
+      LAUNCHER_TAG: ${{ needs.prepare.outputs.launcher_tag }}
+      CERT_SHA256: ${{ needs.prepare.outputs.cert_sha256 }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - name: Free disk space
+        run: sudo rm -rf /usr/share/dotnet /usr/local/lib/android /opt/ghc /opt/hostedtoolcache/CodeQL
+
+      - name: Unpack the launcher release, checked against its checksum
+        id: launcher
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          dir=$RUNNER_TEMP/release
+          gh release download "$LAUNCHER_TAG" --repo "$GITHUB_REPOSITORY" \
+            --pattern 'ps5-launcher-linux-x86_64.tar.gz*' --dir "$dir"
+          (cd "$dir" && sha256sum -c ps5-launcher-linux-x86_64.tar.gz.sha256)
+          tar -C "$dir" -xzf "$dir/ps5-launcher-linux-x86_64.tar.gz"
+          "$dir/ps5-launcher-linux-x86_64/ps5-launcher" --version
+          echo "binary=$dir/ps5-launcher-linux-x86_64/ps5-launcher" >> "$GITHUB_OUTPUT"
+          echo "version=${LAUNCHER_TAG#v}" >> "$GITHUB_OUTPUT"
+
+      # The rpm is built from this checkout's packaging files around the release binary.
+      - uses: ./.github/actions/linux-packages
+        with:
+          binary: ${{ steps.launcher.outputs.binary }}
+          version: ${{ steps.launcher.outputs.version }}
+          output: dist/packages
+          format: rpm
+
+      - name: Build the main image
+        env:
+          VERSION: ${{ steps.launcher.outputs.version }}
+        run: |
+          rpm=$(ls dist/packages/ps5-launcher-*.x86_64.rpm)
+          sudo env ENGINE=podman IMAGE=localhost/ps5-launcher-fedora IMAGE_REF="$IMAGE:main" \
+            BASE_IMAGE="$BASE" LAUNCHER_RPM="$rpm" LAUNCHER_VERSION="$VERSION" \
+            packaging/os/build-image.sh main 2>&1 | tee build-main.log
+
+      - name: Check the main image
+        run: |
+          sudo env ENGINE=podman packaging/os/check-image.sh main localhost/ps5-launcher-fedora:main \
+            "$IMAGE:main" "$CERT_SHA256" 2>&1 | tee check-main.log
+
+      - name: Push the candidate
+        id: push
+        run: |
+          echo "${{ github.token }}" | sudo podman login ghcr.io -u "${{ github.actor }}" --password-stdin
+          ref=$IMAGE:testing-main-$RUN_ID
+          for try in 1 2 3; do
+            sudo podman push --digestfile digest localhost/ps5-launcher-fedora:main "docker://$ref" && break
+            [ "$try" = 3 ] && exit 1
+            sleep 30
+          done
+          digest=$(cat digest)
+          echo "digest=$digest" >> "$GITHUB_OUTPUT"
+          size=$(sudo podman image inspect localhost/ps5-launcher-fedora:main --format '{{.Size}}' | numfmt --to=iec)
+          echo "Main candidate: \`$ref\` = \`$digest\` ($size uncompressed)" >> "$GITHUB_STEP_SUMMARY"
+
+      - if: always()
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: main-logs
+          path: "*.log"
+          if-no-files-found: ignore
+
+  nvidia:
+    needs: [prepare, main]
+    runs-on: ubuntu-24.04
+    timeout-minutes: 120
+    outputs:
+      digest: ${{ steps.push.outputs.digest }}
+    env:
+      IMAGE: ${{ needs.prepare.outputs.image }}
+      CERT_SHA256: ${{ needs.prepare.outputs.cert_sha256 }}
+      MAIN: ${{ needs.prepare.outputs.image }}@${{ needs.main.outputs.digest }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - name: Free disk space
+        run: sudo rm -rf /usr/share/dotnet /usr/local/lib/android /opt/ghc /opt/hostedtoolcache/CodeQL
+
+      - name: Check the signing key against the certificate
+        env:
+          SECUREBOOT_KEY: ${{ secrets.SECUREBOOT_KEY }}
+        run: |
+          if [ -z "$SECUREBOOT_KEY" ]; then
+            echo "::error::The SECUREBOOT_KEY secret is not set: see packaging/os/secureboot/README.md"
+            exit 1
+          fi
+          key=$RUNNER_TEMP/secureboot/private_key.priv
+          mkdir -m 700 "$(dirname "$key")"
+          (umask 077 && printf '%s\n' "$SECUREBOOT_KEY" > "$key")
+          cert_pub=$(openssl x509 -inform DER -in "$CERT" -noout -pubkey | openssl pkey -pubin -outform DER | sha256sum)
+          key_pub=$(openssl pkey -in "$key" -pubout -outform DER | sha256sum)
+          if [ "$cert_pub" != "$key_pub" ]; then
+            echo "::error::SECUREBOOT_KEY does not belong to $CERT: see packaging/os/secureboot/README.md"
+            exit 1
+          fi
+          echo "The key matches $CERT"
+
+      - name: Build the NVIDIA image FROM the main candidate
+        run: |
+          echo "${{ github.token }}" | sudo podman login ghcr.io -u "${{ github.actor }}" --password-stdin
+          sudo podman pull "$MAIN"
+          sudo env ENGINE=podman IMAGE=localhost/ps5-launcher-fedora IMAGE_REF="$IMAGE:nvidia" \
+            MAIN_IMAGE="$MAIN" SECUREBOOT_KEY_FILE="$RUNNER_TEMP/secureboot/private_key.priv" \
+            packaging/os/build-image.sh nvidia 2>&1 | tee build-nvidia.log
+
+      - name: Delete the signing key
+        if: always()
+        run: |
+          if [ -d "$RUNNER_TEMP/secureboot" ]; then
+            find "$RUNNER_TEMP/secureboot" -type f -exec shred -u {} +
+            rm -rf "$RUNNER_TEMP/secureboot"
+          fi
+
+      - name: Check the NVIDIA image
+        run: |
+          sudo env ENGINE=podman packaging/os/check-image.sh nvidia localhost/ps5-launcher-fedora:nvidia \
+            "$IMAGE:nvidia" "$CERT_SHA256" "$MAIN" 2>&1 | tee check-nvidia.log
+
+      - name: Push the candidate
+        id: push
+        run: |
+          ref=$IMAGE:testing-nvidia-$RUN_ID
+          for try in 1 2 3; do
+            sudo podman push --digestfile digest localhost/ps5-launcher-fedora:nvidia "docker://$ref" && break
+            [ "$try" = 3 ] && exit 1
+            sleep 30
+          done
+          digest=$(cat digest)
+          echo "digest=$digest" >> "$GITHUB_OUTPUT"
+          echo "NVIDIA candidate: \`$ref\` = \`$digest\`" >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Check that the NVIDIA image shares every main layer
+        env:
+          NVIDIA_DIGEST: ${{ steps.push.outputs.digest }}
+        run: |
+          # A switch from main downloads only the layers main does not have.
+          sudo skopeo inspect --raw "docker://$MAIN" | jq -r '.layers[].digest' > main-layers
+          sudo skopeo inspect --raw "docker://$IMAGE@$NVIDIA_DIGEST" | tee nvidia-manifest.json >/dev/null
+          jq -r '.layers[].digest' nvidia-manifest.json > nvidia-layers
+          n=$(wc -l < main-layers)
+          if ! head -n "$n" nvidia-layers | cmp -s - main-layers; then
+            echo "::error::The NVIDIA image does not start with the main image's layers"
+            exit 1
+          fi
+          extra=$(jq "[.layers[$n:][].size] | add" nvidia-manifest.json)
+          echo "The switch from main downloads $(numfmt --to=iec "$extra") (compressed) in $(( $(wc -l < nvidia-layers) - n )) layers" \
+            | tee -a "$GITHUB_STEP_SUMMARY"
+
+      - if: always()
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: nvidia-logs
+          path: "*.log"
+          if-no-files-found: ignore
+
+  boot-test:
+    needs: [prepare, main]
+    # A self-hosted runner with KVM can take over with the repository variable OS_VM_RUNNER.
+    runs-on: ${{ vars.OS_VM_RUNNER || 'ubuntu-24.04' }}
+    timeout-minutes: 60
+    env:
+      MAIN: ${{ needs.prepare.outputs.image }}@${{ needs.main.outputs.digest }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - name: Require KVM
+        run: |
+          if [ ! -e /dev/kvm ]; then
+            echo "::error::No /dev/kvm on this runner: the boot test cannot run, so this gate fails"
+            exit 1
+          fi
+          echo 'KERNEL=="kvm", GROUP="kvm", MODE="0666", OPTIONS+="static_node=kvm"' \
+            | sudo tee /etc/udev/rules.d/99-kvm4all.rules
+          sudo udevadm control --reload-rules
+          sudo udevadm trigger --name-match=kvm
+
+      - name: Free disk space
+        run: sudo rm -rf /usr/share/dotnet /usr/local/lib/android /opt/ghc /opt/hostedtoolcache/CodeQL
+
+      - name: Build the boot test image (CI only, never pushed)
+        run: |
+          echo "${{ github.token }}" | sudo podman login ghcr.io -u "${{ github.actor }}" --password-stdin
+          sudo podman pull "$MAIN"
+          sudo podman build --build-arg MAIN_IMAGE="$MAIN" -t localhost/ps5-launcher-fedora:boottest \
+            packaging/os/boottest
+
+      - name: Make a qcow2 with image-builder
+        run: |
+          mkdir -p out
+          sudo podman run --rm --privileged \
+            -v /var/lib/containers/storage:/var/lib/containers/storage \
+            -v "$PWD/out:/out" quay.io/fedora/fedora:44 bash -euxc '
+              dnf -y -q install image-builder
+              image-builder build --bootc-ref localhost/ps5-launcher-fedora:boottest \
+                --bootc-default-fs ext4 --output-dir /out qcow2' 2>&1 | tee image-builder.log
+          sudo find out -type f -exec ls -la {} +
+
+      - name: Boot it, and check the report
+        run: |
+          sudo apt-get update -qq
+          sudo apt-get install -y -qq qemu-system-x86 ovmf socat imagemagick >/dev/null
+          disk=$(sudo find out -name '*.qcow2' | head -1)
+          sudo chown "$(id -u)" "$disk"
+          cp /usr/share/OVMF/OVMF_VARS_4M.fd vars.fd
+          qemu-system-x86_64 -enable-kvm -machine q35 -m 6G -smp 4 -cpu host \
+            -drive if=pflash,format=raw,readonly=on,file=/usr/share/OVMF/OVMF_CODE_4M.fd \
+            -drive if=pflash,format=raw,file=vars.fd \
+            -drive file="$disk",if=virtio,format=qcow2 -device virtio-vga -display none \
+            -qmp unix:qmp.sock,server,nowait -serial file:serial.log -serial file:report.log \
+            -daemonize -pidfile qemu.pid
+          # The report (packaging/os/boottest/report) ends with "===== end".
+          for _ in $(seq 180); do
+            grep -q "===== end" report.log 2>/dev/null && break
+            sleep 5
+          done
+          printf '{"execute":"qmp_capabilities"}\n{"execute":"screendump","arguments":{"filename":"%s/boot.ppm"}}\n' "$PWD" \
+            | socat - UNIX-CONNECT:qmp.sock >/dev/null || true
+          sleep 2
+          convert boot.ppm boot.png || true
+          kill "$(cat qemu.pid)" || true
+          tr -d '\r' < report.log > boot.log
+          sed -n '/===== checks/,/RESULT:/p' boot.log | tee -a "$GITHUB_STEP_SUMMARY"
+          if ! grep -q "===== end" boot.log; then
+            echo "::error::The boot report did not finish within 15 minutes (see serial.log)"
+            exit 1
+          fi
+          grep -qx "RESULT: PASS" boot.log || { echo "::error::The boot test failed: see boot.log"; exit 1; }
+
+      - if: always()
+        run: sudo chown -R "$(id -u):$(id -g)" . || true
+      - if: always()
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: boot-test
+          path: |
+            *.log
+            boot.png
+          if-no-files-found: ignore
+
+  install-test:
+    needs: [prepare, main, nvidia]
+    runs-on: ${{ vars.OS_VM_RUNNER || 'ubuntu-24.04' }}
+    timeout-minutes: 180
+    env:
+      IMAGE: ${{ needs.prepare.outputs.image }}
+      MAIN_DIGEST: ${{ needs.main.outputs.digest }}
+      NVIDIA_DIGEST: ${{ needs.nvidia.outputs.digest }}
+      MAIN_TAG: testing-main-${{ github.run_id }}
+      NVIDIA_TAG: testing-nvidia-${{ github.run_id }}
+      UPGRADE_TAG: testing-upgrade-${{ github.run_id }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - name: Require KVM
+        run: |
+          if [ ! -e /dev/kvm ]; then
+            echo "::error::No /dev/kvm on this runner: the install test cannot run, so this gate fails"
+            exit 1
+          fi
+          echo 'KERNEL=="kvm", GROUP="kvm", MODE="0666", OPTIONS+="static_node=kvm"' \
+            | sudo tee /etc/udev/rules.d/99-kvm4all.rules
+          sudo udevadm control --reload-rules
+          sudo udevadm trigger --name-match=kvm
+
+      - name: Free disk space
+        run: sudo rm -rf /usr/share/dotnet /usr/local/lib/android /opt/ghc /opt/hostedtoolcache/CodeQL
+
+      - name: Check that the VM can pull the candidates
+        run: |
+          # The VM pulls without credentials, as installed PCs do.
+          for digest in "$MAIN_DIGEST" "$NVIDIA_DIGEST"; do
+            if ! skopeo inspect --no-creds --raw "docker://$IMAGE@$digest" >/dev/null; then
+              echo "::error::$IMAGE is not public. Make the package public in its GitHub settings (packaging/os/README.md)"
+              exit 1
+            fi
+          done
+
+      - name: Push the upgrade target (CI only)
+        id: upgrade
+        run: |
+          echo "${{ github.token }}" | sudo podman login ghcr.io -u "${{ github.actor }}" --password-stdin
+          sudo podman pull "$IMAGE@$MAIN_DIGEST"
+          sudo podman build --build-arg MAIN_IMAGE="$IMAGE@$MAIN_DIGEST" --build-arg MARKER="$GITHUB_RUN_ID" \
+            -f packaging/os/boottest/Containerfile.upgrade -t localhost/ps5-launcher-fedora:upgrade \
+            packaging/os/boottest
+          sudo podman push --digestfile digest localhost/ps5-launcher-fedora:upgrade "docker://$IMAGE:$UPGRADE_TAG"
+          echo "digest=$(cat digest)" >> "$GITHUB_OUTPUT"
+
+      - name: Install, upgrade, roll back, switch to NVIDIA and back
+        env:
+          UPGRADE_DIGEST: ${{ steps.upgrade.outputs.digest }}
+        run: |
+          sudo apt-get update -qq
+          sudo apt-get install -y -qq qemu-system-x86 qemu-utils ovmf socat jq >/dev/null
+          OUT=$PWD/install-test packaging/os/boottest/install-test.sh 2>&1 | tee install-test.log
+
+      # For the hardware tests before promotion: the installer ISO, set to install this run's
+      # candidates (and to follow the release tags afterwards).
+      - name: Build the candidate ISO
+        run: |
+          cat > candidate.ks <<EOF
+          # Candidate ISO: install this run's candidate of the chosen image (main or nvidia).
+          %pre --erroronfail --log=/tmp/ps5-launcher-os-candidate.log
+          tag=\$(cat /tmp/ps5-launcher-os-tag)
+          echo "bootc --source-imgref=registry:$IMAGE:testing-\$tag-$GITHUB_RUN_ID --target-imgref=$IMAGE:\$tag" > /tmp/ps5-launcher-os-source.ks
+          %end
+          EOF
+          docker run --rm --privileged -v "$PWD:/src" -w /src -e IMAGE="$IMAGE" -e ISO_CACHE=/src/install-test \
+            quay.io/fedora/fedora:44 packaging/os/build-iso.sh ps5-launcher-fedora-candidate-x86_64.iso candidate.ks
+
+      - if: always()
+        run: sudo chown -R "$(id -u):$(id -g)" . || true
+      - if: always()
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: install-test
+          path: |
+            *.log
+            install-test/*.log
+            install-test/*.ppm
+          if-no-files-found: ignore
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: candidate-iso
+          path: ps5-launcher-fedora-candidate-x86_64.iso
+          retention-days: 14
+
+  promote:
+    needs: [prepare, main, nvidia, boot-test, install-test]
+    if: inputs.promote && github.ref == 'refs/heads/main'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 20
+    # The owner adds required reviewers to this environment. They approve only after the
+    # hardware tests in packaging/os/README.md passed on the candidate ISO.
+    environment: os-fedora-release
+    env:
+      IMAGE: ${{ needs.prepare.outputs.image }}
+      DATE: ${{ needs.prepare.outputs.date }}
+      MAIN_DIGEST: ${{ needs.main.outputs.digest }}
+      NVIDIA_DIGEST: ${{ needs.nvidia.outputs.digest }}
+    steps:
+      # TODO(release): verify and attach the cosign signature here; see the top of this file.
+      - name: Copy the tested digests to the release tags
+        run: |
+          echo "${{ github.token }}" | skopeo login ghcr.io -u "${{ github.actor }}" --password-stdin
+          promote() { # DIGEST TAG
+            skopeo copy --preserve-digests "docker://$IMAGE@$1" "docker://$IMAGE:$2"
+            got=sha256:$(skopeo inspect --raw "docker://$IMAGE:$2" | sha256sum | cut -d' ' -f1)
+            [ "$got" = "$1" ] || { echo "::error::$IMAGE:$2 is $got, not $1"; exit 1; }
+            echo "\`$IMAGE:$2\` = \`$1\`" | tee -a "$GITHUB_STEP_SUMMARY"
+          }
+          # Main first: an NVIDIA PC that switches back must find the main image of its pair.
+          promote "$MAIN_DIGEST" "main-$DATE"
+          promote "$NVIDIA_DIGEST" "nvidia-$DATE"
+          promote "$MAIN_DIGEST" main
+          promote "$NVIDIA_DIGEST" nvidia
+
+  iso:
+    needs: [prepare, promote]
+    if: inputs.attach_iso
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+    permissions:
+      contents: write
+    env:
+      IMAGE: ${{ needs.prepare.outputs.image }}
+      LAUNCHER_TAG: ${{ needs.prepare.outputs.launcher_tag }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - name: Build the ISO
+        run: |
+          iso=ps5-launcher-fedora-x86_64.iso
+          docker run --rm --privileged -v "$PWD:/src" -w /src -e IMAGE="$IMAGE" -e ISO_CACHE=/src \
+            quay.io/fedora/fedora:44 packaging/os/build-iso.sh "$iso"
+          sha256sum "$iso" > "$iso.sha256"
+          size=$(stat -c %s "$iso")
+          echo "ISO: $size bytes"
+          # GitHub's limit for one release file is 2 GiB.
+          test "$size" -lt 2000000000
+      - name: Attach to the launcher release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          gh release upload "$LAUNCHER_TAG" --repo "$GITHUB_REPOSITORY" --clobber \
+            ps5-launcher-fedora-x86_64.iso ps5-launcher-fedora-x86_64.iso.sha256

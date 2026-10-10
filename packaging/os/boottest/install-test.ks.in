@@ -1,0 +1,20 @@
+# CI only: appended to packaging/os/ps5-launcher-os.ks by build-iso.sh for the unattended install
+# test (packaging/os/boottest/install-test.sh fills in the @...@ values). It answers what the
+# installer would ask, and installs the candidate image, not the release tag.
+text
+lang en_US.UTF-8
+timezone Etc/UTC --utc
+network --bootproto=dhcp --device=link --activate
+zerombr
+clearpart --all --initlabel --disklabel=gpt
+autopart --type=plain --nohome --noswap
+user --name=tester --groups=wheel --password=@PASSWORD@ --plaintext
+sshkey --username=tester "@SSHKEY@"
+services --enabled=sshd
+poweroff
+
+# Runs after the release kickstart's %pre (they run in file order), so this source wins: the
+# candidate by digest, following the test's upgrade tag.
+%pre --erroronfail --log=/tmp/ps5-launcher-os-test-pre.log
+echo "bootc --source-imgref=registry:@SOURCE@ --target-imgref=@TARGET@" > /tmp/ps5-launcher-os-source.ks
+%end

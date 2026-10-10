@@ -1,0 +1,18 @@
+#!/usr/bin/bash
+# Runs before the login screen at every start (ps5-launcher-os-autologin.service). It tells SDDM
+# which user to log in automatically: the installer creates that user, so the image cannot know
+# the name. If the installer finished without a user, it makes one, so the PC still logs in.
+# The session (PS5 Launcher) and Relogin come from /usr/lib/sddm/sddm.conf.d/.
+set -eu
+user=$(getent passwd | awk -F: '$3 >= 1000 && $3 < 60000 { print $1; exit }')
+if [ -z "$user" ]; then
+    useradd -m -G wheel -c "Player" player
+    passwd -d player
+    user=player
+    echo "created user 'player' for automatic login"
+fi
+mkdir -p /etc/sddm.conf.d
+printf '[Autologin]\nUser=%s\n' "$user" > /etc/sddm.conf.d/10-ps5-launcher-os-user.conf
+# "Switch to desktop" leaves a one-time choice of Plasma here; Plasma deletes it at login. If the
+# PC restarted before that, delete it, so the PC never stays in the desktop by accident.
+rm -f /etc/sddm.conf.d/90-ps5-launcher-os-next-session.conf

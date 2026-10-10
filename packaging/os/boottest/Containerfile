@@ -1,0 +1,11 @@
+# CI only, never published: the boot test image (the "boot-test" job in
+# .github/workflows/os-fedora.yml). The candidate main image plus a report on the second serial
+# port (ttyS1; the first one is the login console). MAIN_IMAGE is the candidate, by digest.
+ARG MAIN_IMAGE=localhost/ps5-launcher-fedora:main
+FROM ${MAIN_IMAGE}
+COPY report /usr/libexec/ps5-boottest-report
+COPY check-system /usr/libexec/ps5-boottest-check
+COPY ps5-boottest-report.service /usr/lib/systemd/system/
+RUN printf 'kargs = ["audit=0", "console=ttyS0,115200"]\n' > /usr/lib/bootc/kargs.d/90-boottest.toml && \
+    chmod 0755 /usr/libexec/ps5-boottest-report /usr/libexec/ps5-boottest-check && \
+    systemctl enable ps5-boottest-report.service

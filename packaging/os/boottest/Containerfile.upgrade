@@ -1,0 +1,7 @@
+# CI only, pushed only to a testing tag: the "newer" image for the install test's upgrade
+# (.github/workflows/os-fedora.yml). The candidate main image plus one marker file, so the test
+# can tell which deployment is running after bootc upgrade and bootc rollback.
+ARG MAIN_IMAGE=localhost/ps5-launcher-fedora:main
+FROM ${MAIN_IMAGE}
+ARG MARKER=upgrade
+RUN echo "$MARKER" > /usr/lib/ps5-launcher/upgrade-test

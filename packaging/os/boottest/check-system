@@ -1,0 +1,111 @@
+#!/usr/bin/bash
+# CI only. Checks a booted PS5 Launcher OS, as root, and prints one "ok" or "FAIL" line for
+# each check, then "RESULT: PASS" or "RESULT: FAIL". It exits non-zero on any failure.
+#
+#   check-system main|nvidia [--session]
+#
+# main or nvidia: the image that must be running. --session also checks the login: SDDM logs the
+# user in to the PS5 Launcher session, and either the launcher runs, or (in a VM without a GPU)
+# gamescope failed only because Vulkan has no usable device, and the session wrapper fell back to
+# Plasma through the root helper, whose one-time login Plasma then cleared.
+#
+# The boot test image runs it from ps5-boottest-report.service; the install test runs it over SSH.
+set -u
+want=${1:?main or nvidia}
+session=${2:-}
+failures=0
+
+ok() { echo "ok   $*"; }
+bad() { echo "FAIL $*"; failures=$((failures + 1)); }
+check() { # NAME, then a command that must succeed
+    local name=$1
+    shift
+    if "$@" >/dev/null 2>&1; then ok "$name"; else bad "$name"; fi
+}
+not() { ! "$@"; }
+
+marker=/usr/lib/ps5-launcher/os-release
+check "the OS marker says IMAGE=$want" grep -qx "IMAGE=$want" "$marker"
+check "the OS marker names the $want channel" grep -Eqx "IMAGE_REF=[a-z0-9./_-]+:$want" "$marker"
+check "bootc's own update timer is masked" \
+    test "$(systemctl is-enabled bootc-fetch-apply-updates.timer 2>/dev/null)" = masked
+check "the launcher runs (--version)" /usr/bin/ps5-launcher --version
+for tool in skopeo mokutil pkexec bootc; do
+    check "$tool is installed" command -v "$tool"
+done
+certs=0
+for cert in /usr/share/ps5-launcher/secureboot/*.der; do
+    [ -f "$cert" ] || continue
+    certs=$((certs + 1))
+    check "$(basename "$cert") is named by its SHA-256" \
+        test "$(sha256sum "$cert" | cut -d' ' -f1).der" = "$(basename "$cert")"
+done
+check "the image ships the Secure Boot certificate" test "$certs" -ge 1
+
+kver=$(uname -r)
+case $want in
+nvidia)
+    check "kernel argument nvidia-drm.modeset=1" grep -qw nvidia-drm.modeset=1 /proc/cmdline
+    check "kernel argument modprobe.blacklist=nouveau" grep -qw modprobe.blacklist=nouveau /proc/cmdline
+    check "the nouveau block is installed" test -f /usr/lib/modprobe.d/ps5-launcher-os-nvidia.conf
+    check "the NVIDIA module is built for the running kernel" modinfo -k "$kver" nvidia
+    ;;
+main)
+    # Also after switching back from the NVIDIA image: nothing of it may stay behind.
+    check "no NVIDIA or nouveau kernel arguments" not grep -Eq 'nvidia|nouveau' /proc/cmdline
+    check "no nouveau block" test ! -e /usr/lib/modprobe.d/ps5-launcher-os-nvidia.conf
+    check "no NVIDIA kernel module" not modinfo -k "$kver" nvidia
+    ;;
+*)
+    bad "unknown image $want"
+    ;;
+esac
+
+if [ "$session" = --session ]; then
+    user=$(sed -n 's/^User=//p' /etc/sddm.conf.d/10-ps5-launcher-os-user.conf 2>/dev/null)
+    check "SDDM logs a user in automatically (${user:-none})" test -n "$user"
+    check "SDDM runs" systemctl is-active sddm.service
+    home=$(getent passwd "${user:-nobody}" | cut -d: -f6)
+    log="$home/.cache/ps5-launcher-session.log"
+    next=/etc/sddm.conf.d/90-ps5-launcher-os-next-session.conf
+    # Wait up to 5 minutes for the session to settle: the launcher runs, or the desktop runs
+    # after the fallback.
+    outcome=""
+    for _ in $(seq 60); do
+        if pgrep -u "$user" -x ps5-launcher >/dev/null; then
+            outcome=launcher
+            break
+        fi
+        if grep -q "starting the desktop instead" "$log" 2>/dev/null &&
+            pgrep -u "$user" -x plasmashell >/dev/null && [ ! -e "$next" ]; then
+            outcome=desktop
+            break
+        fi
+        sleep 5
+    done
+    check "the session started" grep -q "session starting" "$log"
+    case $outcome in
+    launcher)
+        ok "the session reached the launcher"
+        check "the launcher did not crash" not grep -q "the launcher crashed" "$log"
+        ;;
+    desktop)
+        # No GPU in the VM: fine only when that is the one reason the session ended.
+        check "gamescope failed only because there is no GPU (Vulkan has no usable device)" \
+            grep -q "Failed to initialize Vulkan" "$log"
+        check "gamescope reported no valid Vulkan device" grep -q "not a valid physical device" "$log"
+        check "the launcher itself did not crash" not grep -q "the launcher crashed" "$log"
+        ok "the wrapper fell back to Plasma through the helper, and Plasma cleared the one-time login"
+        ;;
+    *)
+        bad "the session reached neither the launcher nor the Plasma fallback"
+        ;;
+    esac
+fi
+
+if [ "$failures" = 0 ]; then
+    echo "RESULT: PASS"
+else
+    echo "RESULT: FAIL ($failures)"
+fi
+[ "$failures" = 0 ]
