@@ -8,9 +8,10 @@ use super::lifecycle::{self, FileOps, RealFiles};
 use super::registry::Registry;
 use super::Problem;
 use std::path::{Path, PathBuf};
+use std::sync::OnceLock;
 
 /// What one start found.
-#[derive(Debug)]
+#[derive(Clone, Debug)]
 pub struct Loaded {
     /// The snapshot every later question goes to; it never changes.
     pub registry: Registry,
@@ -35,9 +36,23 @@ pub fn root() -> PathBuf {
     crate::util::data_dir()
 }
 
-/// `load` for the app: the data folder, the defaults in this binary, the real file system.
+static SHARED: OnceLock<Loaded> = OnceLock::new();
+
+/// `load` for the app (the data folder, the defaults in this binary, the real file system),
+/// once per run: every caller gets the same snapshot. The first call loads; a call while it
+/// loads waits for it. `main` starts it on its own thread.
+pub fn shared() -> &'static Loaded {
+    SHARED.get_or_init(|| load(&root(), &Embedded, &RealFiles::default(), Version::current()))
+}
+
+/// The run's registry once `shared` has loaded it; None before. Never waits.
+pub fn snapshot() -> Option<&'static Registry> {
+    SHARED.get().map(|l| &l.registry)
+}
+
+/// A copy of `shared`.
 pub fn load_for_app() -> Loaded {
-    load(&root(), &Embedded, &RealFiles::default(), Version::current())
+    shared().clone()
 }
 
 #[cfg(test)]

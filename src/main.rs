@@ -27,7 +27,7 @@ mod config;
 mod display;
 mod download_ui;
 mod downloads;
-#[allow(dead_code, reason = "phase 1 of docs/plans/addons.md: a read-only addon loader the app does not call until phase 2")]
+#[allow(dead_code, reason = "docs/plans/data-driven-emulators.md: the app loads the addons, the catalog and preferences use them; resolution and the rest wait for phases 3 to 7")]
 mod emulators;
 mod gamepad;
 mod gpu;
@@ -114,15 +114,23 @@ fn main() -> std::process::ExitCode {
             }
         }
     }
+    // Bring the emulator addons up to date and scan them on their own thread, so the window never
+    // waits for it. The catalog shares the same snapshot (startup::shared); from phase 3 the
+    // launch flow does too (startup::snapshot).
+    let addons = std::thread::Builder::new().name("addons".into()).spawn(|| {
+        for problem in &emulators::startup::shared().problems {
+            crate::log!("Addon: {problem}");
+        }
+    });
+    if let Err(e) = addons {
+        crate::log!("could not start the addon thread: {e}");
+    }
     if force_sync {
         // Keep the last-known-good cache if an external snapshot is invalid.
         if let Err(error) = catalog::sync(&|message| eprintln!("{message}")) {
             eprintln!("Could not reload RuTracker catalog: {error}");
         }
     }
-
-    // Catalog loading reconciles and reads the addons lazily. Phase 2 will share the
-    // startup registry here with the remaining emulator consumers.
 
     let cfg = config::Config::load();
     let mons = display::monitors();
