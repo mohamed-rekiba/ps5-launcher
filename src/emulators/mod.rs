@@ -6,6 +6,7 @@
 pub mod bundle;
 pub mod discovery;
 pub mod document;
+pub mod lifecycle;
 pub mod manifest;
 pub mod registry;
 pub mod schema;
@@ -13,3 +14,27 @@ mod yaml;
 
 #[cfg(test)]
 mod tests;
+#[cfg(test)]
+mod lifecycle_tests;
+
+use std::fmt;
+
+/// Something the launcher could not do or use, or that the user should know, for the app to
+/// show: what it is about ("emulators/kyty", "addons-state.yaml") and what happened.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct Problem {
+    pub subject: String,
+    pub message: String,
+}
+
+impl Problem {
+    pub fn new(subject: impl Into<String>, message: impl Into<String>) -> Problem {
+        Problem { subject: subject.into(), message: message.into() }
+    }
+}
+
+impl fmt::Display for Problem {
+    fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
+        write!(f, "{}: {}", self.subject, self.message)
+    }
+}
