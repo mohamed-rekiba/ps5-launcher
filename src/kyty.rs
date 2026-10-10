@@ -18,7 +18,7 @@ use std::io::{Read, Write};
 use std::path::{Path, PathBuf};
 use std::process::Command;
 
-const REPO: &str = "KytyPS5/KytyPS5";
+pub(crate) const REPO: &str = "KytyPS5/KytyPS5";
 /// Folders Kyty writes relative to its working directory.
 pub const DATA_DIRS: [&str; 6] = ["_SaveData", "_PipelineCache", "_DownloadData", "_TempData", "_Textures", "_Patches"];
 pub const CHECK_INTERVAL: f64 = 6.0 * 3600.0;
@@ -95,7 +95,7 @@ pub fn tag_commit(tag: &str) -> &str {
 /// Linux builds are named like "...Linux...x86_64....tar.gz". KytyPS5 ships macOS as an
 /// x86-64 build that runs under Rosetta 2, so on macOS the architecture isn't checked and any
 /// archive whose name says macOS (or Darwin/OSX) matches.
-fn asset_matches(name: &str, os: &str) -> bool {
+pub(crate) fn asset_matches(name: &str, os: &str) -> bool {
     if os == "macos" {
         let n = name.to_ascii_lowercase();
         return ["macos", "darwin", "osx"].iter().any(|k| n.contains(k)) && [".tar.gz", ".tgz", ".zip"].iter().any(|e| n.ends_with(e));

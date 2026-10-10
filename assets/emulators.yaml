@@ -1,0 +1,313 @@
+# yaml-language-server: $schema=./emulators.schema.json
+#
+# The emulators PS5 Launcher knows, built into the app. To change them on your computer, do not
+# edit this file: write ~/.config/ps5-launcher/emulators.yaml with `operations` (add, replace,
+# disable) and optional `defaults`. See docs/plans/data-driven-emulators.md.
+#
+# Every value here matches what the launcher's code does today (src/kyty.rs, src/shad.rs,
+# src/sessions.rs, src/config.rs, src/compat.rs); the tests in src/emulators compare them.
+
+schema_version: 1
+
+defaults:
+  ps5: kyty
+  ps4: shadps4
+
+emulators:
+  - id: kyty
+    display_name: KytyPS5
+    consoles: [ps5]
+    enabled: true
+
+    release:
+      kind: github_latest
+      repo: KytyPS5/KytyPS5
+      asset_selection: first_match
+      targets:
+        # "KytyPS5-2026-10-01-4479808-Linux-x86_64.tar.gz"
+        - os: linux
+          host_arch: legacy_any
+          name_all: [Linux, x86_64]
+          name_suffixes: [.tar.gz]
+          case_sensitive: true
+        # An x86-64 build that runs under Rosetta 2: the architecture is not checked.
+        - os: macos
+          host_arch: legacy_any
+          name_any: [macos, darwin, osx]
+          name_suffixes: [.tar.gz, .tgz, .zip]
+          case_sensitive: false
+      allowed_hosts:
+        - api.github.com
+        - github.com
+        - release-assets.githubusercontent.com
+        - objects.githubusercontent.com
+      integrity:
+        kind: github_asset_sha256
+        required: false
+
+    install:
+      kind: archive_flat_or_one_child
+      root: {base: launcher_data, relative: kyty}
+      versions: versions
+      current: current
+      state: state.json
+      format_detection: zip_magic_else_tar
+      executable:
+        linux: kyty_emulator
+        macos: kyty_emulator
+      shared_data:
+        kind: cwd_symlinks
+        directory: data
+        entries: [_SaveData, _PipelineCache, _DownloadData, _TempData, _Textures, _Patches]
+        archive_merge: copy_missing
+        custom_import: copy_into_empty
+      probe:
+        kind: kyty_help_git_date
+        args: [--help]
+        timeout_seconds: 3
+        cwd: executable_parent
+
+    custom_build:
+      allowed: true
+      empty_path: legacy_kyty_detection
+      discovery: legacy_kyty_locations_v1
+      version: kyty_help_git_date
+
+    launch:
+      cwd: executable_parent
+      inherit_environment: true
+      env: {}
+      env_remove: []
+      # Extra arguments come last, so they can override the rest.
+      arguments:
+        - {kind: literal, text: --game}
+        - {kind: value, from: game.path, type: path}
+        - {kind: literal, text: --screen-width}
+        - {kind: value, from: settings.width, type: u32}
+        - {kind: literal, text: --screen-height}
+        - {kind: value, from: settings.height, type: u32}
+        - {kind: literal, text: --present-mode}
+        - {kind: value, from: settings.present_mode, type: string}
+        - {kind: literal, text: --video-out-resolution}
+        - {kind: value, from: settings.video_out, type: enum}
+        - {kind: when, condition: playing.fullscreen, emit: [--fullscreen]}
+        - {kind: when, condition: settings.amd_cpu, emit: [--amd-cpu]}
+        - {kind: spread, from: settings.extra_args}
+
+    settings:
+      backend: launcher_cli
+      definitions:
+        - {type: u32, key: width, default: 1920, min: 0, max: 4294967295}
+        - {type: u32, key: height, default: 1080, min: 0, max: 4294967295}
+        - type: string
+          key: present_mode
+          default: Mailbox
+          choices:
+            - {value: Mailbox, label: Mailbox (low latency)}
+            - {value: Fifo, label: Fifo (V-Sync)}
+            - {value: Immediate, label: Immediate (uncapped)}
+          allow_existing_other: true
+          label: Present mode
+          hint: Try V-Sync if the picture tears
+        - type: enum
+          key: video_out
+          default: Title
+          choices:
+            - {value: Title, label: Game default}
+            - {value: FullHd, label: 1080p (Full HD)}
+            - {value: Uhd, label: 4K (Ultra HD)}
+          invalid_effective_value: default
+          label: Game output resolution
+          hint: The screen resolution the game is told it runs on. The game renders at this size.
+        - type: bool
+          key: amd_cpu
+          default: false
+          label: AMD CPU patches
+          hint: Only for AMD processors
+        - type: argv
+          key: extra_args
+          default: []
+          editor: legacy_quoted_arguments
+          label: Extra KytyPS5 arguments
+          hint: For example --vblank-frequency 60 --tessellation
+      composite_rows:
+        - kind: resolution_pair
+          id: resolution
+          width: width
+          height: height
+          label: Resolution
+          hint: The size of the window. What the game is told is Game output resolution
+          choices: [[1280, 720], [1600, 900], [1920, 1080], [2560, 1440], [3840, 2160]]
+      rows: [update, custom_executable, resolution, video_out, present_mode, amd_cpu, extra_args, rollback]
+
+    compatibility:
+      parser: kyty_json_v1
+      url: https://kytyps5.github.io/data/compatibility.json
+      list_page: https://kytyps5.github.io/
+      cache: compatibility.json
+      refresh_seconds: 21600
+      selection: legacy_linux_else_best
+      report:
+        kind: kyty_issue_v1
+        url: https://github.com/KytyPS5/KytyPS5/issues/new?template=kytyps5-game-emulation.yaml
+      allowed_hosts: [kytyps5.github.io, github.com]
+
+    content:
+      metadata: ps5_param_json
+      layout: {kind: plain_folder}
+
+    session:
+      # One list for every emulator today (sessions.rs EMULATOR_NAMES), so shadps4 is here too.
+      process_names: [kyty_emulator, kyty_emulator.exe, shadps4]
+      include_custom_basename: true
+      # Linux reads either option on any emulator; macOS reads only --game.
+      game_flags:
+        linux: [--game, -g]
+        macos: [--game]
+      error_parser: kyty_error_block
+      controls_profile: kyty_keyboard_v1
+
+    update:
+      policy: legacy_kyty_v1
+      check_seconds: 21600
+      poll_seconds: 1800
+      automatic_default: true
+      compare: tag_commit
+      display_version: kyty_date_commit
+      install_priority: 0
+      defer: any_live_game
+      keep_versions: 2
+      rollback: swap_current_previous_and_skip_departed
+
+    macos:
+      managed_support: macos_asset
+      custom_support: executable_check
+      rosetta: required_for_x86_64_on_arm64
+      moltenvk: bundled
+      modify_quarantine: false
+      environment_changes: {}
+
+  - id: shadps4
+    display_name: shadPS4
+    consoles: [ps4]
+    enabled: true
+
+    release:
+      kind: github_latest
+      repo: shadps4-emu/shadPS4
+      asset_selection: first_match
+      targets:
+        - os: linux
+          host_arch: legacy_any
+          name_prefix: shadps4-linux
+          name_suffixes: [.zip]
+          case_sensitive: true
+        # macOS takes the Linux build too (it does not run there).
+        - os: macos
+          host_arch: legacy_any
+          name_prefix: shadps4-linux
+          name_suffixes: [.zip]
+          case_sensitive: true
+          support: legacy_attempt_only
+      allowed_hosts:
+        - api.github.com
+        - github.com
+        - release-assets.githubusercontent.com
+        - objects.githubusercontent.com
+      integrity:
+        kind: github_asset_sha256
+        required: false
+
+    install:
+      kind: zip_appimage
+      root: {base: launcher_data, relative: shadps4}
+      versions: versions
+      current: current
+      state: state.json
+      zip_member_suffix: .AppImage
+      member_selection: first_match
+      extracted_name: shadps4.AppImage
+      executable:
+        linux: squashfs-root/AppRun
+        macos: squashfs-root/AppRun
+      shared_data:
+        kind: external
+        root: {base: xdg_data, relative: shadPS4}
+      probe:
+        kind: shad_help_banner
+        args: [--help]
+        timeout_seconds: 10
+        cwd: inherit
+        stdout_contains: shadPS4
+
+    custom_build:
+      allowed: true
+      empty_path: managed
+      discovery: none
+      version: custom_build_label
+
+    launch:
+      cwd: executable_parent
+      inherit_environment: true
+      env: {}
+      env_remove: []
+      arguments:
+        - {kind: literal, text: -g}
+        - {kind: value, from: game.path, type: path}
+        - {kind: literal, text: -f}
+        - {kind: value, from: playing.fullscreen, type: bool_string}
+
+    settings:
+      backend: external
+      definitions: []
+      composite_rows: []
+      rows: [update, custom_executable, rollback]
+
+    compatibility:
+      parser: shad_json_v1
+      url: https://github.com/shadps4-compatibility/shadps4-game-compatibility/releases/latest/download/compatibility_data.json
+      list_page: https://github.com/shadps4-compatibility/shadps4-game-compatibility/issues
+      cache: compatibility-shadps4.json
+      refresh_seconds: 21600
+      selection: legacy_linux_else_best
+      report:
+        kind: shad_issue_v1
+        url: https://github.com/shadps4-compatibility/shadps4-game-compatibility/issues/new?template=game_compatibility.yml
+      allowed_hosts:
+        - github.com
+        - release-assets.githubusercontent.com
+        - objects.githubusercontent.com
+
+    content:
+      metadata: ps4_param_sfo
+      layout:
+        kind: shad_ps4
+        patch_suffix: -patch
+        addons_root: {base: xdg_data, relative: shadPS4/addcont}
+
+    session:
+      process_names: [kyty_emulator, kyty_emulator.exe, shadps4]
+      include_custom_basename: false
+      game_flags:
+        linux: [--game, -g]
+        macos: [--game]
+      error_parser: kyty_error_block
+      controls_profile: shad_keyboard_v1
+
+    update:
+      policy: legacy_shad_v1
+      check_seconds: 21600
+      poll_seconds: 1800
+      automatic_default: true
+      compare: tag_equality
+      display_version: strip_v_then_dot
+      install_priority: 1
+      defer: any_live_game_except_install_then_launch
+      keep_versions: 2
+      rollback: swap_current_previous_and_skip_departed
+
+    macos:
+      managed_support: legacy_linux_asset_attempt
+      custom_support: executable_check
+      modify_quarantine: false
+      environment_changes: {}

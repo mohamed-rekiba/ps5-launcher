@@ -11,7 +11,7 @@ use std::process::{Child, Command, Stdio};
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
-const EMULATOR_NAMES: [&str; 3] = ["kyty_emulator", "kyty_emulator.exe", "shadps4"];
+pub(crate) const EMULATOR_NAMES: [&str; 3] = ["kyty_emulator", "kyty_emulator.exe", "shadps4"];
 
 // ------------------------------------------------------------------ X11 helpers (xdotool)
 
@@ -147,7 +147,7 @@ fn parse_ps_line(line: &str) -> Option<(u32, f64, &str)> {
 /// The command line KytyPS5 gets for a game. The window size (--screen-width and --screen-height)
 /// only sizes the window; --video-out-resolution is what the game is told its screen is. Extra
 /// arguments come last, so they can override the rest.
-fn kyty_args(cfg: &Config, game: &str) -> Vec<String> {
+pub(crate) fn kyty_args(cfg: &Config, game: &str) -> Vec<String> {
     let mut args: Vec<String> = vec![
         "--game".into(),
         game.to_string(),

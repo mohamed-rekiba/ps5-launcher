@@ -4,17 +4,17 @@
 use crate::util::{atomic_write, cache_dir, http_get};
 use std::collections::HashMap;
 
-const URL: &str = "https://kytyps5.github.io/data/compatibility.json";
+pub(crate) const URL: &str = "https://kytyps5.github.io/data/compatibility.json";
 pub const LIST_PAGE: &str = "https://kytyps5.github.io/";
 pub const REFRESH: f64 = 6.0 * 3600.0;
 /// KytyPS5's "Game Emulation Status Report" form; reports there feed the list above.
-const REPORT_FORM: &str = "https://github.com/KytyPS5/KytyPS5/issues/new?template=kytyps5-game-emulation.yaml";
+pub(crate) const REPORT_FORM: &str = "https://github.com/KytyPS5/KytyPS5/issues/new?template=kytyps5-game-emulation.yaml";
 /// shadPS4's community list for PS4 games, published as one file per update.
-const SHAD_URL: &str = "https://github.com/shadps4-compatibility/shadps4-game-compatibility/releases/latest/download/compatibility_data.json";
+pub(crate) const SHAD_URL: &str = "https://github.com/shadps4-compatibility/shadps4-game-compatibility/releases/latest/download/compatibility_data.json";
 pub const SHAD_LIST_PAGE: &str = "https://github.com/shadps4-compatibility/shadps4-game-compatibility/issues";
 /// The system the report comes from, as the shadPS4 form's "Operating System" list spells it.
 const THIS_OS: &str = if cfg!(target_os = "macos") { "macOS" } else { "Linux" };
-const SHAD_REPORT_FORM: &str = "https://github.com/shadps4-compatibility/shadps4-game-compatibility/issues/new?template=game_compatibility.yml";
+pub(crate) const SHAD_REPORT_FORM: &str = "https://github.com/shadps4-compatibility/shadps4-game-compatibility/issues/new?template=game_compatibility.yml";
 
 /// The community list page for a console's emulator.
 pub fn list_page(platform: crate::platform::Platform) -> &'static str {

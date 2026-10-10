@@ -27,6 +27,8 @@ mod config;
 mod display;
 mod download_ui;
 mod downloads;
+#[allow(dead_code, reason = "phase 1 of docs/plans/data-driven-emulators.md: a read-only registry the app does not call yet")]
+mod emulators;
 mod gamepad;
 mod gpu;
 mod health;

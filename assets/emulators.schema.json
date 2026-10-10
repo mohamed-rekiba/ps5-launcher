@@ -1,0 +1,1814 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "Manifest",
+  "description": "The embedded manifest (assets/emulators.yaml).",
+  "type": "object",
+  "properties": {
+    "defaults": {
+      "description": "The emulator that runs each console's games when a game has no choice of its own.",
+      "$ref": "#/$defs/Defaults"
+    },
+    "emulators": {
+      "type": "array",
+      "items": {
+        "$ref": "#/$defs/Emulator"
+      }
+    },
+    "schema_version": {
+      "description": "The format's version. This launcher reads version 1.",
+      "type": "integer",
+      "format": "uint32",
+      "minimum": 0
+    }
+  },
+  "additionalProperties": false,
+  "required": [
+    "schema_version",
+    "defaults",
+    "emulators"
+  ],
+  "$defs": {
+    "ArchiveMerge": {
+      "oneOf": [
+        {
+          "description": "A folder the archive ships is copied into the shared one without overwriting.",
+          "type": "string",
+          "const": "copy_missing"
+        }
+      ]
+    },
+    "ArgType": {
+      "description": "How a value becomes an argument.",
+      "oneOf": [
+        {
+          "type": "string",
+          "enum": [
+            "path",
+            "u32",
+            "string",
+            "enum"
+          ]
+        },
+        {
+          "description": "A switch as \"true\" or \"false\".",
+          "type": "string",
+          "const": "bool_string"
+        }
+      ]
+    },
+    "ArgvEditor": {
+      "oneOf": [
+        {
+          "description": "One line of text, split like a shell does with quotes (no shell runs).",
+          "type": "string",
+          "const": "legacy_quoted_arguments"
+        }
+      ]
+    },
+    "AssetSelection": {
+      "oneOf": [
+        {
+          "description": "The first asset, in the release's order, that a target for this host matches.",
+          "type": "string",
+          "const": "first_match"
+        }
+      ]
+    },
+    "AssetTarget": {
+      "description": "Which release assets suit one host. A name matches when it contains every `name_all`\nword, at least one `name_any` word (when there are any), starts with `name_prefix` (when\nset) and ends with one of `name_suffixes`.",
+      "type": "object",
+      "properties": {
+        "case_sensitive": {
+          "type": "boolean"
+        },
+        "host_arch": {
+          "$ref": "#/$defs/HostArch"
+        },
+        "name_all": {
+          "type": "array",
+          "default": [],
+          "items": {
+            "type": "string"
+          }
+        },
+        "name_any": {
+          "type": "array",
+          "default": [],
+          "items": {
+            "type": "string"
+          }
+        },
+        "name_prefix": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "name_suffixes": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        },
+        "os": {
+          "$ref": "#/$defs/Os"
+        },
+        "support": {
+          "$ref": "#/$defs/TargetSupport"
+        }
+      },
+      "additionalProperties": false,
+      "required": [
+        "os",
+        "host_arch",
+        "name_suffixes",
+        "case_sensitive"
+      ]
+    },
+    "Choice": {
+      "description": "A value and the name Settings shows for it.",
+      "type": "object",
+      "properties": {
+        "label": {
+          "type": "string"
+        },
+        "value": {
+          "type": "string"
+        }
+      },
+      "additionalProperties": false,
+      "required": [
+        "value",
+        "label"
+      ]
+    },
+    "CompatibilityParser": {
+      "description": "Where the community's compatibility list comes from, and how it is read.",
+      "oneOf": [
+        {
+          "description": "kytyps5.github.io's list: { \"PPSA…\": { \"status\", \"platforms\": { \"linux\": … } } }.",
+          "type": "object",
+          "properties": {
+            "allowed_hosts": {
+              "description": "The hosts `url`, `list_page` and the report form may use.",
+              "type": "array",
+              "items": {
+                "$ref": "#/$defs/Host"
+              }
+            },
+            "cache": {
+              "description": "The cached copy's file name in the launcher's cache folder.",
+              "$ref": "#/$defs/RelPath"
+            },
+            "list_page": {
+              "description": "The page the launcher opens to show the whole list.",
+              "$ref": "#/$defs/HttpsUrl"
+            },
+            "parser": {
+              "type": "string",
+              "const": "kyty_json_v1"
+            },
+            "refresh_seconds": {
+              "type": "integer",
+              "format": "uint32",
+              "minimum": 0
+            },
+            "report": {
+              "$ref": "#/$defs/ReportStrategy"
+            },
+            "selection": {
+              "$ref": "#/$defs/CompatibilitySelection"
+            },
+            "url": {
+              "$ref": "#/$defs/HttpsUrl"
+            }
+          },
+          "additionalProperties": false,
+          "required": [
+            "parser",
+            "url",
+            "list_page",
+            "cache",
+            "refresh_seconds",
+            "selection",
+            "report",
+            "allowed_hosts"
+          ]
+        },
+        {
+          "description": "shadPS4's list: { \"CUSA…\": { \"os-linux\": { \"status\": \"status-ingame\" } } }.",
+          "type": "object",
+          "properties": {
+            "allowed_hosts": {
+              "description": "The hosts `url`, `list_page` and the report form may use.",
+              "type": "array",
+              "items": {
+                "$ref": "#/$defs/Host"
+              }
+            },
+            "cache": {
+              "description": "The cached copy's file name in the launcher's cache folder.",
+              "$ref": "#/$defs/RelPath"
+            },
+            "list_page": {
+              "description": "The page the launcher opens to show the whole list.",
+              "$ref": "#/$defs/HttpsUrl"
+            },
+            "parser": {
+              "type": "string",
+              "const": "shad_json_v1"
+            },
+            "refresh_seconds": {
+              "type": "integer",
+              "format": "uint32",
+              "minimum": 0
+            },
+            "report": {
+              "$ref": "#/$defs/ReportStrategy"
+            },
+            "selection": {
+              "$ref": "#/$defs/CompatibilitySelection"
+            },
+            "url": {
+              "$ref": "#/$defs/HttpsUrl"
+            }
+          },
+          "additionalProperties": false,
+          "required": [
+            "parser",
+            "url",
+            "list_page",
+            "cache",
+            "refresh_seconds",
+            "selection",
+            "report",
+            "allowed_hosts"
+          ]
+        },
+        {
+          "description": "No list.",
+          "type": "object",
+          "properties": {
+            "parser": {
+              "type": "string",
+              "const": "none"
+            }
+          },
+          "additionalProperties": false,
+          "required": [
+            "parser"
+          ]
+        }
+      ]
+    },
+    "CompatibilitySelection": {
+      "oneOf": [
+        {
+          "description": "The Linux result when there is one (on macOS too), else the best result elsewhere.",
+          "type": "string",
+          "const": "legacy_linux_else_best"
+        }
+      ]
+    },
+    "CompositeRow": {
+      "description": "A row that edits more than one setting.",
+      "oneOf": [
+        {
+          "description": "Width and height, chosen from a list.",
+          "type": "object",
+          "properties": {
+            "choices": {
+              "type": "array",
+              "items": {
+                "type": "array",
+                "maxItems": 2,
+                "minItems": 2,
+                "prefixItems": [
+                  {
+                    "type": "integer",
+                    "format": "uint32",
+                    "minimum": 0
+                  },
+                  {
+                    "type": "integer",
+                    "format": "uint32",
+                    "minimum": 0
+                  }
+                ]
+              }
+            },
+            "height": {
+              "$ref": "#/$defs/SettingKey"
+            },
+            "hint": {
+              "type": [
+                "string",
+                "null"
+              ]
+            },
+            "id": {
+              "$ref": "#/$defs/SettingKey"
+            },
+            "kind": {
+              "type": "string",
+              "const": "resolution_pair"
+            },
+            "label": {
+              "type": "string"
+            },
+            "width": {
+              "$ref": "#/$defs/SettingKey"
+            }
+          },
+          "additionalProperties": false,
+          "required": [
+            "kind",
+            "id",
+            "width",
+            "height",
+            "label",
+            "choices"
+          ]
+        }
+      ]
+    },
+    "Console": {
+      "type": "string",
+      "enum": [
+        "ps5",
+        "ps4"
+      ]
+    },
+    "Content": {
+      "description": "How games for this emulator are recognized and where their updates and add-ons go.",
+      "type": "object",
+      "properties": {
+        "layout": {
+          "$ref": "#/$defs/ContentLayout"
+        },
+        "metadata": {
+          "$ref": "#/$defs/Metadata"
+        }
+      },
+      "additionalProperties": false,
+      "required": [
+        "metadata",
+        "layout"
+      ]
+    },
+    "ContentLayout": {
+      "oneOf": [
+        {
+          "description": "The game's folder only.",
+          "type": "object",
+          "properties": {
+            "kind": {
+              "type": "string",
+              "const": "plain_folder"
+            }
+          },
+          "additionalProperties": false,
+          "required": [
+            "kind"
+          ]
+        },
+        {
+          "description": "A game update beside the game as \"<folder><patch_suffix>\"; add-ons under `addons_root`.",
+          "type": "object",
+          "properties": {
+            "addons_root": {
+              "$ref": "#/$defs/DataRoot"
+            },
+            "kind": {
+              "type": "string",
+              "const": "shad_ps4"
+            },
+            "patch_suffix": {
+              "type": "string"
+            }
+          },
+          "additionalProperties": false,
+          "required": [
+            "kind",
+            "patch_suffix",
+            "addons_root"
+          ]
+        }
+      ]
+    },
+    "ControlsProfile": {
+      "type": "string",
+      "enum": [
+        "kyty_keyboard_v1",
+        "shad_keyboard_v1",
+        "none"
+      ]
+    },
+    "CustomBuild": {
+      "description": "The user's own build of the emulator.",
+      "type": "object",
+      "properties": {
+        "allowed": {
+          "type": "boolean"
+        },
+        "discovery": {
+          "$ref": "#/$defs/Discovery"
+        },
+        "empty_path": {
+          "description": "What an empty executable path means.",
+          "$ref": "#/$defs/EmptyPath"
+        },
+        "version": {
+          "$ref": "#/$defs/VersionStrategy"
+        }
+      },
+      "additionalProperties": false,
+      "required": [
+        "allowed",
+        "empty_path",
+        "discovery",
+        "version"
+      ]
+    },
+    "CustomImport": {
+      "oneOf": [
+        {
+          "description": "On the switch from a custom build: its data is copied into shared folders still empty.",
+          "type": "string",
+          "const": "copy_into_empty"
+        }
+      ]
+    },
+    "DataBase": {
+      "oneOf": [
+        {
+          "description": "The launcher's data folder: $XDG_DATA_HOME/ps5-launcher, or ~/.local/share/ps5-launcher.",
+          "type": "string",
+          "const": "launcher_data"
+        },
+        {
+          "description": "$XDG_DATA_HOME, or ~/.local/share.",
+          "type": "string",
+          "const": "xdg_data"
+        }
+      ]
+    },
+    "DataRoot": {
+      "description": "A folder under one of the user's data folders.",
+      "type": "object",
+      "properties": {
+        "base": {
+          "$ref": "#/$defs/DataBase"
+        },
+        "relative": {
+          "$ref": "#/$defs/RelPath"
+        }
+      },
+      "additionalProperties": false,
+      "required": [
+        "base",
+        "relative"
+      ]
+    },
+    "Defaults": {
+      "description": "The default emulator for each console.",
+      "type": "object",
+      "properties": {
+        "ps4": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/EmulatorId"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "ps5": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/EmulatorId"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        }
+      },
+      "additionalProperties": false
+    },
+    "Defer": {
+      "oneOf": [
+        {
+          "description": "An update found during a game installs when the game ends.",
+          "type": "string",
+          "const": "any_live_game"
+        },
+        {
+          "description": "The same, except the install that starts a game the player chose.",
+          "type": "string",
+          "const": "any_live_game_except_install_then_launch"
+        }
+      ]
+    },
+    "Discovery": {
+      "oneOf": [
+        {
+          "type": "string",
+          "enum": [
+            "none"
+          ]
+        },
+        {
+          "description": "PATH, then KytyPS5's usual build folders.",
+          "type": "string",
+          "const": "legacy_kyty_locations_v1"
+        }
+      ]
+    },
+    "DisplayVersion": {
+      "oneOf": [
+        {
+          "description": "\"KytyPS5-2026-09-29-59a1760\" shows as \"2026-09-29 · 59a1760\".",
+          "type": "string",
+          "const": "kyty_date_commit"
+        },
+        {
+          "description": "\"v.0.18.0\" shows as \"0.18.0\".",
+          "type": "string",
+          "const": "strip_v_then_dot"
+        }
+      ]
+    },
+    "EmptyPath": {
+      "oneOf": [
+        {
+          "description": "The managed build when it is installed, else a build found on this computer.",
+          "type": "string",
+          "const": "legacy_kyty_detection"
+        },
+        {
+          "description": "The managed build.",
+          "type": "string",
+          "const": "managed"
+        },
+        {
+          "description": "No emulator: the game does not start.",
+          "type": "string",
+          "const": "error"
+        }
+      ]
+    },
+    "Emulator": {
+      "description": "One emulator.",
+      "type": "object",
+      "properties": {
+        "compatibility": {
+          "$ref": "#/$defs/CompatibilityParser"
+        },
+        "consoles": {
+          "description": "The consoles whose games it runs.",
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/Console"
+          }
+        },
+        "content": {
+          "$ref": "#/$defs/Content"
+        },
+        "custom_build": {
+          "$ref": "#/$defs/CustomBuild"
+        },
+        "display_name": {
+          "description": "The name the launcher shows.",
+          "type": "string"
+        },
+        "enabled": {
+          "description": "A disabled emulator keeps its settings but runs no games.",
+          "type": "boolean"
+        },
+        "id": {
+          "$ref": "#/$defs/EmulatorId"
+        },
+        "install": {
+          "description": "How a managed build is installed. Required with a `github_latest` release.",
+          "anyOf": [
+            {
+              "$ref": "#/$defs/Installer"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "launch": {
+          "$ref": "#/$defs/Launch"
+        },
+        "macos": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/Macos"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "release": {
+          "$ref": "#/$defs/ReleaseSource"
+        },
+        "session": {
+          "$ref": "#/$defs/Session"
+        },
+        "settings": {
+          "$ref": "#/$defs/Settings"
+        },
+        "update": {
+          "description": "Automatic updates. Required with a `github_latest` release.",
+          "anyOf": [
+            {
+              "$ref": "#/$defs/Update"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        }
+      },
+      "additionalProperties": false,
+      "required": [
+        "id",
+        "display_name",
+        "consoles",
+        "enabled",
+        "release",
+        "custom_build",
+        "launch",
+        "settings",
+        "compatibility",
+        "content",
+        "session"
+      ]
+    },
+    "EmulatorId": {
+      "type": "string",
+      "pattern": "^[a-z0-9][a-z0-9_-]{0,31}$"
+    },
+    "EnvName": {
+      "type": "string",
+      "pattern": "^[A-Za-z_][A-Za-z0-9_]{0,127}$"
+    },
+    "ErrorParser": {
+      "oneOf": [
+        {
+          "type": "string",
+          "enum": [
+            "none"
+          ]
+        },
+        {
+          "description": "The text under \"--- Error ---\" in the log.",
+          "type": "string",
+          "const": "kyty_error_block"
+        }
+      ]
+    },
+    "FormatDetection": {
+      "oneOf": [
+        {
+          "description": "A zip by its first bytes, else a tar archive.",
+          "type": "string",
+          "const": "zip_magic_else_tar"
+        }
+      ]
+    },
+    "GithubRepo": {
+      "type": "string",
+      "pattern": "^[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+$"
+    },
+    "Host": {
+      "type": "string",
+      "pattern": "^[a-z0-9]([a-z0-9-]{0,61}[a-z0-9])?(\\.[a-z0-9]([a-z0-9-]{0,61}[a-z0-9])?)+$"
+    },
+    "HostArch": {
+      "description": "The host architectures a target is for.",
+      "oneOf": [
+        {
+          "type": "string",
+          "enum": [
+            "x86_64",
+            "aarch64"
+          ]
+        },
+        {
+          "description": "Any architecture: the selector ignores it, as today's code does. It does not claim the\nasset runs everywhere.",
+          "type": "string",
+          "const": "legacy_any"
+        }
+      ]
+    },
+    "HttpsUrl": {
+      "type": "string",
+      "pattern": "^https://[^\\s@]+$"
+    },
+    "Installer": {
+      "description": "How a managed build is unpacked and laid out.",
+      "oneOf": [
+        {
+          "description": "An archive (zip or tar) whose executable is at its root or in one top-level folder.",
+          "type": "object",
+          "properties": {
+            "current": {
+              "description": "The link to the active version.",
+              "$ref": "#/$defs/RelPath"
+            },
+            "executable": {
+              "description": "The executable, inside a version folder.",
+              "$ref": "#/$defs/PerOs"
+            },
+            "format_detection": {
+              "$ref": "#/$defs/FormatDetection"
+            },
+            "kind": {
+              "type": "string",
+              "const": "archive_flat_or_one_child"
+            },
+            "probe": {
+              "$ref": "#/$defs/Probe"
+            },
+            "root": {
+              "$ref": "#/$defs/DataRoot"
+            },
+            "shared_data": {
+              "$ref": "#/$defs/SharedData"
+            },
+            "state": {
+              "$ref": "#/$defs/RelPath"
+            },
+            "versions": {
+              "description": "One folder per release under the root.",
+              "$ref": "#/$defs/RelPath"
+            }
+          },
+          "additionalProperties": false,
+          "required": [
+            "kind",
+            "root",
+            "versions",
+            "current",
+            "state",
+            "format_detection",
+            "executable",
+            "shared_data",
+            "probe"
+          ]
+        },
+        {
+          "description": "A zip that holds an AppImage, unpacked with `--appimage-extract` so no FUSE is needed.",
+          "type": "object",
+          "properties": {
+            "current": {
+              "$ref": "#/$defs/RelPath"
+            },
+            "executable": {
+              "$ref": "#/$defs/PerOs"
+            },
+            "extracted_name": {
+              "description": "The AppImage's name in the version folder while it unpacks.",
+              "$ref": "#/$defs/RelPath"
+            },
+            "kind": {
+              "type": "string",
+              "const": "zip_appimage"
+            },
+            "member_selection": {
+              "$ref": "#/$defs/MemberSelection"
+            },
+            "probe": {
+              "$ref": "#/$defs/Probe"
+            },
+            "root": {
+              "$ref": "#/$defs/DataRoot"
+            },
+            "shared_data": {
+              "$ref": "#/$defs/SharedData"
+            },
+            "state": {
+              "$ref": "#/$defs/RelPath"
+            },
+            "versions": {
+              "$ref": "#/$defs/RelPath"
+            },
+            "zip_member_suffix": {
+              "description": "The zip member to take: the first whose name ends with this.",
+              "type": "string"
+            }
+          },
+          "additionalProperties": false,
+          "required": [
+            "kind",
+            "root",
+            "versions",
+            "current",
+            "state",
+            "zip_member_suffix",
+            "member_selection",
+            "extracted_name",
+            "executable",
+            "shared_data",
+            "probe"
+          ]
+        }
+      ]
+    },
+    "Integrity": {
+      "description": "How a download is checked.",
+      "oneOf": [
+        {
+          "description": "The SHA-256 digest GitHub lists for the asset. `required: false`: an asset without a\ndigest still installs; a wrong digest never does.",
+          "type": "object",
+          "properties": {
+            "kind": {
+              "type": "string",
+              "const": "github_asset_sha256"
+            },
+            "required": {
+              "type": "boolean"
+            }
+          },
+          "additionalProperties": false,
+          "required": [
+            "kind",
+            "required"
+          ]
+        }
+      ]
+    },
+    "InvalidValue": {
+      "oneOf": [
+        {
+          "description": "The setting's default.",
+          "type": "string",
+          "const": "default"
+        }
+      ]
+    },
+    "Launch": {
+      "description": "How a game starts. The launcher runs the executable directly, never through a shell.",
+      "type": "object",
+      "properties": {
+        "arguments": {
+          "description": "The arguments, in order.",
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/LaunchArg"
+          }
+        },
+        "cwd": {
+          "$ref": "#/$defs/LaunchCwd"
+        },
+        "env": {
+          "type": "object",
+          "additionalProperties": false,
+          "patternProperties": {
+            "^[A-Za-z_][A-Za-z0-9_]{0,127}$": {
+              "type": "string"
+            }
+          }
+        },
+        "env_remove": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/EnvName"
+          }
+        },
+        "inherit_environment": {
+          "type": "boolean"
+        }
+      },
+      "additionalProperties": false,
+      "required": [
+        "cwd",
+        "inherit_environment",
+        "arguments"
+      ]
+    },
+    "LaunchArg": {
+      "description": "One part of the command line.",
+      "oneOf": [
+        {
+          "description": "This text, as one argument.",
+          "type": "object",
+          "properties": {
+            "kind": {
+              "type": "string",
+              "const": "literal"
+            },
+            "text": {
+              "type": "string"
+            }
+          },
+          "additionalProperties": false,
+          "required": [
+            "kind",
+            "text"
+          ]
+        },
+        {
+          "description": "A value as one argument. `type` must suit the value: a path for game.path, bool_string\nfor a switch (\"true\" or \"false\"), or the setting's own type.",
+          "type": "object",
+          "properties": {
+            "from": {
+              "$ref": "#/$defs/Placeholder"
+            },
+            "kind": {
+              "type": "string",
+              "const": "value"
+            },
+            "type": {
+              "$ref": "#/$defs/ArgType"
+            }
+          },
+          "additionalProperties": false,
+          "required": [
+            "kind",
+            "from",
+            "type"
+          ]
+        },
+        {
+          "description": "These arguments when a switch is on.",
+          "type": "object",
+          "properties": {
+            "condition": {
+              "$ref": "#/$defs/Placeholder"
+            },
+            "emit": {
+              "type": "array",
+              "items": {
+                "type": "string"
+              }
+            },
+            "kind": {
+              "type": "string",
+              "const": "when"
+            }
+          },
+          "additionalProperties": false,
+          "required": [
+            "kind",
+            "condition",
+            "emit"
+          ]
+        },
+        {
+          "description": "Every item of a list setting, each as one argument.",
+          "type": "object",
+          "properties": {
+            "from": {
+              "$ref": "#/$defs/Placeholder"
+            },
+            "kind": {
+              "type": "string",
+              "const": "spread"
+            }
+          },
+          "additionalProperties": false,
+          "required": [
+            "kind",
+            "from"
+          ]
+        }
+      ]
+    },
+    "LaunchCwd": {
+      "type": "string",
+      "enum": [
+        "executable_parent"
+      ]
+    },
+    "MacCustomSupport": {
+      "oneOf": [
+        {
+          "description": "A custom build is used when the file is executable.",
+          "type": "string",
+          "const": "executable_check"
+        }
+      ]
+    },
+    "MacManagedSupport": {
+      "oneOf": [
+        {
+          "description": "The release has a macOS asset.",
+          "type": "string",
+          "const": "macos_asset"
+        },
+        {
+          "description": "Today's code downloads the Linux asset on macOS too; it does not run there.",
+          "type": "string",
+          "const": "legacy_linux_asset_attempt"
+        }
+      ]
+    },
+    "Macos": {
+      "description": "What is different on macOS.",
+      "type": "object",
+      "properties": {
+        "custom_support": {
+          "$ref": "#/$defs/MacCustomSupport"
+        },
+        "environment_changes": {
+          "type": "object",
+          "additionalProperties": false,
+          "patternProperties": {
+            "^[A-Za-z_][A-Za-z0-9_]{0,127}$": {
+              "type": "string"
+            }
+          }
+        },
+        "managed_support": {
+          "$ref": "#/$defs/MacManagedSupport"
+        },
+        "modify_quarantine": {
+          "description": "Whether the launcher removes the quarantine flag from downloads. It does not today.",
+          "type": "boolean"
+        },
+        "moltenvk": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/MoltenVk"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "rosetta": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/Rosetta"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        }
+      },
+      "additionalProperties": false,
+      "required": [
+        "managed_support",
+        "custom_support",
+        "modify_quarantine"
+      ]
+    },
+    "MemberSelection": {
+      "type": "string",
+      "enum": [
+        "first_match"
+      ]
+    },
+    "Metadata": {
+      "oneOf": [
+        {
+          "description": "sce_sys/param.json",
+          "type": "string",
+          "const": "ps5_param_json"
+        },
+        {
+          "description": "sce_sys/param.sfo",
+          "type": "string",
+          "const": "ps4_param_sfo"
+        }
+      ]
+    },
+    "MoltenVk": {
+      "oneOf": [
+        {
+          "description": "The release ships MoltenVK.",
+          "type": "string",
+          "const": "bundled"
+        }
+      ]
+    },
+    "Os": {
+      "type": "string",
+      "enum": [
+        "linux",
+        "macos"
+      ]
+    },
+    "PerOs": {
+      "description": "One value for each host OS.",
+      "type": "object",
+      "properties": {
+        "linux": {
+          "$ref": "#/$defs/RelPath"
+        },
+        "macos": {
+          "$ref": "#/$defs/RelPath"
+        }
+      },
+      "additionalProperties": false,
+      "required": [
+        "linux",
+        "macos"
+      ]
+    },
+    "PerOs2": {
+      "description": "One value for each host OS.",
+      "type": "object",
+      "properties": {
+        "linux": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        },
+        "macos": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        }
+      },
+      "additionalProperties": false,
+      "required": [
+        "linux",
+        "macos"
+      ]
+    },
+    "Placeholder": {
+      "description": "game.path, playing.fullscreen or settings.<key>",
+      "type": "string",
+      "pattern": "^(game\\.path|playing\\.fullscreen|settings\\.[a-z][a-z0-9_]{0,31})$"
+    },
+    "Probe": {
+      "description": "The check that a freshly unpacked build runs on this host.",
+      "type": "object",
+      "properties": {
+        "args": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        },
+        "cwd": {
+          "$ref": "#/$defs/ProbeCwd"
+        },
+        "kind": {
+          "$ref": "#/$defs/VersionStrategy"
+        },
+        "stdout_contains": {
+          "description": "The probe passes only when the output contains this text.",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "timeout_seconds": {
+          "type": "integer",
+          "format": "uint32",
+          "minimum": 0
+        }
+      },
+      "additionalProperties": false,
+      "required": [
+        "kind",
+        "args",
+        "timeout_seconds",
+        "cwd"
+      ]
+    },
+    "ProbeCwd": {
+      "oneOf": [
+        {
+          "type": "string",
+          "enum": [
+            "executable_parent"
+          ]
+        },
+        {
+          "description": "The launcher's own working folder.",
+          "type": "string",
+          "const": "inherit"
+        }
+      ]
+    },
+    "RelPath": {
+      "type": "string",
+      "pattern": "^[^/\\u0000]+(/[^/\\u0000]+)*$"
+    },
+    "ReleaseSource": {
+      "description": "Where managed builds come from.",
+      "oneOf": [
+        {
+          "description": "The latest release of a GitHub repository.",
+          "type": "object",
+          "properties": {
+            "allowed_hosts": {
+              "description": "The hosts downloads may use, redirects included.",
+              "type": "array",
+              "items": {
+                "$ref": "#/$defs/Host"
+              }
+            },
+            "asset_selection": {
+              "$ref": "#/$defs/AssetSelection"
+            },
+            "integrity": {
+              "$ref": "#/$defs/Integrity"
+            },
+            "kind": {
+              "type": "string",
+              "const": "github_latest"
+            },
+            "repo": {
+              "$ref": "#/$defs/GithubRepo"
+            },
+            "targets": {
+              "description": "Which release asset each host takes.",
+              "type": "array",
+              "items": {
+                "$ref": "#/$defs/AssetTarget"
+              }
+            }
+          },
+          "additionalProperties": false,
+          "required": [
+            "kind",
+            "repo",
+            "asset_selection",
+            "targets",
+            "allowed_hosts",
+            "integrity"
+          ]
+        },
+        {
+          "description": "No managed builds: the user sets the executable.",
+          "type": "object",
+          "properties": {
+            "kind": {
+              "type": "string",
+              "const": "manual"
+            }
+          },
+          "additionalProperties": false,
+          "required": [
+            "kind"
+          ]
+        }
+      ]
+    },
+    "ReportStrategy": {
+      "description": "The form a player's result goes to, pre-filled.",
+      "oneOf": [
+        {
+          "type": "object",
+          "properties": {
+            "kind": {
+              "type": "string",
+              "const": "kyty_issue_v1"
+            },
+            "url": {
+              "$ref": "#/$defs/HttpsUrl"
+            }
+          },
+          "additionalProperties": false,
+          "required": [
+            "kind",
+            "url"
+          ]
+        },
+        {
+          "type": "object",
+          "properties": {
+            "kind": {
+              "type": "string",
+              "const": "shad_issue_v1"
+            },
+            "url": {
+              "$ref": "#/$defs/HttpsUrl"
+            }
+          },
+          "additionalProperties": false,
+          "required": [
+            "kind",
+            "url"
+          ]
+        },
+        {
+          "type": "object",
+          "properties": {
+            "kind": {
+              "type": "string",
+              "const": "none"
+            }
+          },
+          "additionalProperties": false,
+          "required": [
+            "kind"
+          ]
+        }
+      ]
+    },
+    "Rollback": {
+      "oneOf": [
+        {
+          "description": "Swap the current and previous builds; automatic updates skip the build left behind.",
+          "type": "string",
+          "const": "swap_current_previous_and_skip_departed"
+        }
+      ]
+    },
+    "Rosetta": {
+      "oneOf": [
+        {
+          "description": "An x86-64 build: Apple Silicon needs Rosetta 2.",
+          "type": "string",
+          "const": "required_for_x86_64_on_arm64"
+        }
+      ]
+    },
+    "RowRef": {
+      "description": "update, custom_executable, rollback, a setting's key or a composite row's id",
+      "type": "string",
+      "pattern": "^[a-z][a-z0-9_]{0,31}$"
+    },
+    "Session": {
+      "description": "How a running game is recognized and read.",
+      "type": "object",
+      "properties": {
+        "controls_profile": {
+          "$ref": "#/$defs/ControlsProfile"
+        },
+        "error_parser": {
+          "$ref": "#/$defs/ErrorParser"
+        },
+        "game_flags": {
+          "description": "The options a game's path follows on a running emulator's command line.",
+          "$ref": "#/$defs/PerOs2"
+        },
+        "include_custom_basename": {
+          "description": "The custom build's file name counts too.",
+          "type": "boolean"
+        },
+        "process_names": {
+          "description": "Executable names whose processes count as this emulator.",
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        }
+      },
+      "additionalProperties": false,
+      "required": [
+        "process_names",
+        "include_custom_basename",
+        "game_flags",
+        "error_parser",
+        "controls_profile"
+      ]
+    },
+    "Setting": {
+      "description": "One setting. Width and height have no limits beyond u32 today: the resolutions in a\ncomposite row are choices, not limits.",
+      "oneOf": [
+        {
+          "type": "object",
+          "properties": {
+            "default": {
+              "type": "integer",
+              "format": "uint32",
+              "minimum": 0
+            },
+            "hint": {
+              "type": [
+                "string",
+                "null"
+              ]
+            },
+            "key": {
+              "$ref": "#/$defs/SettingKey"
+            },
+            "label": {
+              "type": [
+                "string",
+                "null"
+              ]
+            },
+            "max": {
+              "type": "integer",
+              "format": "uint32",
+              "minimum": 0
+            },
+            "min": {
+              "type": "integer",
+              "format": "uint32",
+              "minimum": 0
+            },
+            "type": {
+              "type": "string",
+              "const": "u32"
+            }
+          },
+          "additionalProperties": false,
+          "required": [
+            "type",
+            "key",
+            "default",
+            "min",
+            "max"
+          ]
+        },
+        {
+          "type": "object",
+          "properties": {
+            "allow_existing_other": {
+              "description": "A stored value that is not one of the choices is kept and used.",
+              "type": "boolean"
+            },
+            "choices": {
+              "type": "array",
+              "items": {
+                "$ref": "#/$defs/Choice"
+              }
+            },
+            "default": {
+              "type": "string"
+            },
+            "hint": {
+              "type": [
+                "string",
+                "null"
+              ]
+            },
+            "key": {
+              "$ref": "#/$defs/SettingKey"
+            },
+            "label": {
+              "type": [
+                "string",
+                "null"
+              ]
+            },
+            "type": {
+              "type": "string",
+              "const": "string"
+            }
+          },
+          "additionalProperties": false,
+          "required": [
+            "type",
+            "key",
+            "default",
+            "allow_existing_other"
+          ]
+        },
+        {
+          "type": "object",
+          "properties": {
+            "choices": {
+              "type": "array",
+              "items": {
+                "$ref": "#/$defs/Choice"
+              }
+            },
+            "default": {
+              "type": "string"
+            },
+            "hint": {
+              "type": [
+                "string",
+                "null"
+              ]
+            },
+            "invalid_effective_value": {
+              "description": "What a stored value that is not one of the choices becomes.",
+              "$ref": "#/$defs/InvalidValue"
+            },
+            "key": {
+              "$ref": "#/$defs/SettingKey"
+            },
+            "label": {
+              "type": [
+                "string",
+                "null"
+              ]
+            },
+            "type": {
+              "type": "string",
+              "const": "enum"
+            }
+          },
+          "additionalProperties": false,
+          "required": [
+            "type",
+            "key",
+            "default",
+            "choices",
+            "invalid_effective_value"
+          ]
+        },
+        {
+          "type": "object",
+          "properties": {
+            "default": {
+              "type": "boolean"
+            },
+            "hint": {
+              "type": [
+                "string",
+                "null"
+              ]
+            },
+            "key": {
+              "$ref": "#/$defs/SettingKey"
+            },
+            "label": {
+              "type": [
+                "string",
+                "null"
+              ]
+            },
+            "type": {
+              "type": "string",
+              "const": "bool"
+            }
+          },
+          "additionalProperties": false,
+          "required": [
+            "type",
+            "key",
+            "default"
+          ]
+        },
+        {
+          "description": "A list of arguments.",
+          "type": "object",
+          "properties": {
+            "default": {
+              "type": "array",
+              "items": {
+                "type": "string"
+              }
+            },
+            "editor": {
+              "$ref": "#/$defs/ArgvEditor"
+            },
+            "hint": {
+              "type": [
+                "string",
+                "null"
+              ]
+            },
+            "key": {
+              "$ref": "#/$defs/SettingKey"
+            },
+            "label": {
+              "type": [
+                "string",
+                "null"
+              ]
+            },
+            "type": {
+              "type": "string",
+              "const": "argv"
+            }
+          },
+          "additionalProperties": false,
+          "required": [
+            "type",
+            "key",
+            "default",
+            "editor"
+          ]
+        }
+      ]
+    },
+    "SettingKey": {
+      "type": "string",
+      "pattern": "^[a-z][a-z0-9_]{0,31}$"
+    },
+    "Settings": {
+      "description": "The emulator's settings and their rows in Settings.",
+      "type": "object",
+      "properties": {
+        "backend": {
+          "$ref": "#/$defs/SettingsBackend"
+        },
+        "composite_rows": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/CompositeRow"
+          }
+        },
+        "definitions": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/Setting"
+          }
+        },
+        "rows": {
+          "description": "The rows, in order: update, custom_executable, rollback, a setting's key or a composite\nrow's id.",
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/RowRef"
+          }
+        }
+      },
+      "additionalProperties": false,
+      "required": [
+        "backend",
+        "rows"
+      ]
+    },
+    "SettingsBackend": {
+      "oneOf": [
+        {
+          "description": "The launcher stores the settings and passes them on the command line.",
+          "type": "string",
+          "const": "launcher_cli"
+        },
+        {
+          "description": "The emulator keeps its own settings.",
+          "type": "string",
+          "const": "external"
+        }
+      ]
+    },
+    "SharedData": {
+      "description": "Where an emulator keeps saves and caches, which every version shares.",
+      "oneOf": [
+        {
+          "description": "The emulator writes these folders in its working folder; each version folder gets links\nto one shared copy under the install root.",
+          "type": "object",
+          "properties": {
+            "archive_merge": {
+              "$ref": "#/$defs/ArchiveMerge"
+            },
+            "custom_import": {
+              "$ref": "#/$defs/CustomImport"
+            },
+            "directory": {
+              "$ref": "#/$defs/RelPath"
+            },
+            "entries": {
+              "type": "array",
+              "items": {
+                "$ref": "#/$defs/RelPath"
+              }
+            },
+            "kind": {
+              "type": "string",
+              "const": "cwd_symlinks"
+            }
+          },
+          "additionalProperties": false,
+          "required": [
+            "kind",
+            "directory",
+            "entries",
+            "archive_merge",
+            "custom_import"
+          ]
+        },
+        {
+          "description": "The emulator keeps its data in a folder of its own, outside the install.",
+          "type": "object",
+          "properties": {
+            "kind": {
+              "type": "string",
+              "const": "external"
+            },
+            "root": {
+              "$ref": "#/$defs/DataRoot"
+            }
+          },
+          "additionalProperties": false,
+          "required": [
+            "kind",
+            "root"
+          ]
+        }
+      ]
+    },
+    "TargetSupport": {
+      "oneOf": [
+        {
+          "type": "string",
+          "enum": [
+            "supported"
+          ]
+        },
+        {
+          "description": "Today's code tries this asset although it is not built for the host.",
+          "type": "string",
+          "const": "legacy_attempt_only"
+        }
+      ]
+    },
+    "Update": {
+      "description": "Automatic updates of the managed build.",
+      "type": "object",
+      "properties": {
+        "automatic_default": {
+          "type": "boolean"
+        },
+        "check_seconds": {
+          "description": "How old the last check may be before the next one.",
+          "type": "integer",
+          "format": "uint32",
+          "minimum": 0
+        },
+        "compare": {
+          "$ref": "#/$defs/VersionCompare"
+        },
+        "defer": {
+          "$ref": "#/$defs/Defer"
+        },
+        "display_version": {
+          "$ref": "#/$defs/DisplayVersion"
+        },
+        "install_priority": {
+          "description": "Lower installs first; a higher one waits for it.",
+          "type": "integer",
+          "format": "uint8",
+          "maximum": 255,
+          "minimum": 0
+        },
+        "keep_versions": {
+          "description": "The installed and the previous version.",
+          "type": "integer",
+          "format": "uint8",
+          "maximum": 255,
+          "minimum": 0
+        },
+        "policy": {
+          "$ref": "#/$defs/UpdatePolicy"
+        },
+        "poll_seconds": {
+          "description": "How often the launcher looks whether a check is due.",
+          "type": "integer",
+          "format": "uint32",
+          "minimum": 0
+        },
+        "rollback": {
+          "$ref": "#/$defs/Rollback"
+        }
+      },
+      "additionalProperties": false,
+      "required": [
+        "policy",
+        "check_seconds",
+        "poll_seconds",
+        "automatic_default",
+        "compare",
+        "display_version",
+        "install_priority",
+        "defer",
+        "keep_versions",
+        "rollback"
+      ]
+    },
+    "UpdatePolicy": {
+      "type": "string",
+      "enum": [
+        "legacy_kyty_v1",
+        "legacy_shad_v1"
+      ]
+    },
+    "VersionCompare": {
+      "oneOf": [
+        {
+          "description": "The commit at the end of the tag (\"…-59a1760\") against the running build's commit.",
+          "type": "string",
+          "const": "tag_commit"
+        },
+        {
+          "description": "The tag against the installed tag.",
+          "type": "string",
+          "const": "tag_equality"
+        }
+      ]
+    },
+    "VersionStrategy": {
+      "description": "How a build's version is found.",
+      "oneOf": [
+        {
+          "description": "The first line of `--help`: \"git = 6799ecb, date = 2026.09.29\".",
+          "type": "string",
+          "const": "kyty_help_git_date"
+        },
+        {
+          "description": "`--help` prints a banner with the emulator's name; it gives no version.",
+          "type": "string",
+          "const": "shad_help_banner"
+        },
+        {
+          "description": "No probe: a custom build shows as \"Own build\".",
+          "type": "string",
+          "const": "custom_build_label"
+        }
+      ]
+    }
+  }
+}

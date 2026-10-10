@@ -15,7 +15,7 @@ use std::io::Read;
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
 
-const REPO: &str = "shadps4-emu/shadPS4";
+pub(crate) const REPO: &str = "shadps4-emu/shadPS4";
 pub const CHECK_INTERVAL: f64 = 6.0 * 3600.0;
 
 #[derive(Clone, Debug)]
@@ -80,7 +80,7 @@ pub fn latest_release() -> Result<Release, String> {
         .as_array()
         .into_iter()
         .flatten()
-        .find(|a| a["name"].as_str().is_some_and(|n| n.starts_with("shadps4-linux") && n.ends_with(".zip")))
+        .find(|a| a["name"].as_str().is_some_and(asset_matches))
         .ok_or("this release has no Linux build")?;
     Ok(Release {
         tag,
@@ -88,6 +88,11 @@ pub fn latest_release() -> Result<Release, String> {
         size: asset["size"].as_u64().unwrap_or(0),
         sha256: asset["digest"].as_str().and_then(|d| d.strip_prefix("sha256:")).unwrap_or("").to_string(),
     })
+}
+
+/// Whether a release asset is the official Linux build (taken on every OS).
+pub(crate) fn asset_matches(name: &str) -> bool {
+    name.starts_with("shadps4-linux") && name.ends_with(".zip")
 }
 
 /// Pull the one file whose name ends with `suffix` out of a zip (stored or deflated).
