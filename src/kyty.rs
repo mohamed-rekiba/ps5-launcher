@@ -56,7 +56,12 @@ pub fn managed_emulator() -> PathBuf {
 }
 
 pub fn is_managed(emulator: &Path) -> bool {
-    emulator.starts_with(root())
+    is_managed_in(emulator, &root())
+}
+
+/// Whether `emulator` is inside the managed folder `root`.
+pub fn is_managed_in(emulator: &Path, root: &Path) -> bool {
+    emulator.starts_with(root)
 }
 
 pub fn load_state() -> State {

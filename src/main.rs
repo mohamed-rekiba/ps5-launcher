@@ -46,6 +46,7 @@ mod notice;
 mod nvidia;
 mod nvidia_ids;
 mod osupdate;
+mod preferences;
 mod hostos;
 mod present;
 mod osk_ui;

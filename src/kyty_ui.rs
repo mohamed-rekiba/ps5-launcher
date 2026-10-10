@@ -200,7 +200,7 @@ impl App {
                     Ok(()) => {
                         {
                             let mut c = app.cfg.lock().unwrap();
-                            c.emulator = kyty::managed_emulator().to_string_lossy().into_owned();
+                            c.set_kyty_executable(&kyty::managed_emulator().to_string_lossy());
                             c.save();
                         }
                         let sub = if imported > 0 { "Your saves and shader caches were copied over.".to_string() } else { String::new() };

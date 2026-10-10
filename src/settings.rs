@@ -1168,13 +1168,13 @@ impl App {
         let t = text.trim().to_string();
         match id {
             SId::Emulator => {
-                self.save_cfg(|c| c.emulator = t);
+                self.save_cfg(|c| c.set_kyty_executable(&t));
                 self.kyty_refresh_version();
                 let ok = self.cfg.lock().unwrap().emulator_ok();
                 if ok { self.toast("Emulator path saved", "Games will start with this KytyPS5.", 1) } else { self.toast("Emulator not found", "There's no runnable kyty_emulator at that path.", 2) }
             }
             SId::ShadEmulator => {
-                self.save_cfg(|c| c.shad_emulator = t);
+                self.save_cfg(|c| c.set_shad_executable(&t));
                 let source = self.cfg.lock().unwrap().shad_source();
                 match source {
                     ShadSource::Managed => self.toast("shadPS4 location cleared", "PS4 games use the shadPS4 the launcher installs.", 1),
