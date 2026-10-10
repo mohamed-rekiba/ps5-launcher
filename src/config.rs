@@ -96,6 +96,10 @@ pub(crate) struct Read {
     /// Why this run must not save over the file (it cannot be read, or a newer launcher wrote
     /// it); None to save normally.
     keep_file: Option<String>,
+    /// Why the last save failed; None after a save that worked.
+    save_error: Option<String>,
+    /// `save_error` is new: the app has not told the user yet.
+    save_error_new: bool,
 }
 
 /// The old fields that are KytyPS5 settings.
@@ -193,6 +197,7 @@ impl Config {
     ///
     /// A file that cannot be read, or one from a newer launcher, is read as well as it can be,
     /// and this run never saves over it.
+    #[cfg_attr(not(test), allow(dead_code, reason = "the tests read configs from literals; the app reads the file through load_from"))]
     pub fn from_json_with(bytes: &[u8], kyty_root: &Path) -> Config {
         Config::read_bytes(bytes, kyty_root, None)
     }
@@ -268,7 +273,7 @@ impl Config {
             shad.source.get_or_insert(shad_source);
         }
         self.apply_to_old_fields(kyty_root);
-        self.read = Some(Read { version: self.config_version, kyty_root: kyty_root.to_path_buf(), synced: self.kyty_fields(), keep_file: None });
+        self.read = Some(Read { version: self.config_version, kyty_root: kyty_root.to_path_buf(), synced: self.kyty_fields(), keep_file: None, save_error: None, save_error_new: false });
         // A newer version keeps its number: it is never saved over.
         self.config_version = self.config_version.max(CONFIG_VERSION);
     }
@@ -406,8 +411,25 @@ impl Config {
 impl Config {
     /// What Settings tells the user when its changes cannot be kept; None when they are saved.
     pub fn save_notice(&self) -> Option<String> {
-        let why = self.read.as_ref()?.keep_file.as_ref()?;
-        Some(format!("Settings can't be saved: config.json {why}. Changes last until the launcher closes."))
+        let read = self.read.as_ref()?;
+        match (&read.keep_file, &read.save_error) {
+            (Some(why), _) => Some(format!("Settings can't be saved: config.json {why}. Changes last until the launcher closes.")),
+            (None, Some(e)) => Some(format!("Settings couldn't be saved: {e}. Changes last until the launcher closes.")),
+            (None, None) => None,
+        }
+    }
+
+    /// A save failure the user has not been told about yet, once.
+    pub fn take_save_failure(&mut self) -> Option<String> {
+        let read = self.read.as_mut()?;
+        std::mem::take(&mut read.save_error_new).then(|| read.save_error.clone()).flatten()
+    }
+
+    fn saved(&mut self, result: Result<(), String>) {
+        if let Some(read) = self.read.as_mut() {
+            read.save_error_new = result.is_err();
+            read.save_error = result.err();
+        }
     }
 
     pub fn save(&mut self) {
@@ -435,13 +457,15 @@ impl Config {
             if let Err(e) = keep_backup(path, &backup) {
                 // The old file stays as it is; the next save tries again.
                 crate::log!("config not saved: could not keep the old config as {}: {e}", backup.display());
-                return;
+                return self.saved(Err(format!("the old settings could not be kept as {} ({e})", backup.display())));
             }
             read.version = CONFIG_VERSION;
         }
-        if let Err(e) = atomic_write(path, &json) {
+        let written = atomic_write(path, &json);
+        if let Err(e) = &written {
             crate::log!("could not save config: {e}");
         }
+        self.saved(written.map_err(|e| e.to_string()));
     }
 
     pub fn emulator_path(&self) -> PathBuf {
@@ -978,6 +1002,28 @@ mod tests {
         assert!(path.is_dir() && path.join("keep").is_file());
         let notice = c.save_notice().expect("the user is told");
         assert!(notice.starts_with("Settings can't be saved: config.json can't be read ("), "{notice}");
+    }
+
+    #[test]
+    fn a_failed_save_is_shown_until_a_save_works_and_toasted_once() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(dir.path().join("not-a-folder"), b"").unwrap();
+        let bad = dir.path().join("not-a-folder/config.json");
+        let good = dir.path().join("config.json");
+        let mut c = read("{}");
+        c.save_at(&bad);
+        let notice = c.save_notice().expect("the user is told");
+        assert!(notice.starts_with("Settings couldn't be saved: ") && notice.ends_with(". Changes last until the launcher closes."), "{notice}");
+        assert!(c.take_save_failure().is_some(), "one toast");
+        assert_eq!(c.take_save_failure(), None, "not twice");
+        c.save_at(&good);
+        assert_eq!(c.save_notice(), None, "a save that works clears it");
+    }
+
+    #[test]
+    fn a_config_from_a_newer_launcher_says_so_in_settings() {
+        let c = read(r#"{"config_version": 2}"#);
+        assert_eq!(c.save_notice().as_deref(), Some("Settings can't be saved: config.json is from a newer launcher (version 2). Changes last until the launcher closes."));
     }
 
     #[test]

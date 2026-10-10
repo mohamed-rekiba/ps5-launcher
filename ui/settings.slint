@@ -490,6 +490,8 @@ export component SettingsSheet inherits Rectangle {
     in property <PairCard> pair;
     in property <string> version;
     in property <string> mode;
+    // Why changes are not saved (config.json cannot be written); empty when they are.
+    in property <string> warning;
     in property <bool> pad;
     // The on-screen keyboard is open: it edits the search field or a row instead of them.
     in property <bool> osk;
@@ -538,7 +540,8 @@ export component SettingsSheet inherits Rectangle {
                     BackButton { pad: root.pad; clicked => { root.back(); } }
                 }
                 Text { text: root.sub ? root.title : "Settings"; font-size: (44px * S.k); font-weight: 600; color: Theme.text; }
-                Text { text: root.sub ? "System" : "Changes are saved automatically"; font-size: (18px * S.k); color: Theme.text3; }
+                if root.warning == "": Text { text: root.sub ? "System" : "Changes are saved automatically"; font-size: (18px * S.k); color: Theme.text3; }
+                if root.warning != "": Text { text: root.warning; font-size: (18px * S.k); color: Theme.danger; wrap: word-wrap; width: root.inner; }
 
                 // The search field, and its hits under it while it or a hit has focus.
                 if !root.sub: VerticalLayout {

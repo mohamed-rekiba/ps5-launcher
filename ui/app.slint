@@ -264,6 +264,8 @@ export component AppWindow inherits Window {
     // The sheet shows the About card (About's sub-sheet; the root sheet on a desktop), and the mode it names.
     in property <bool> settings-about;
     in property <string> settings-mode;
+    // Settings' changes are not saved, and why (Config::save_notice); empty when they are.
+    in property <string> settings-warning;
     // Updates (OS) and Display: the digits of the Secure Boot key's password, with its steps.
     in property <[string]> settings-key;
     // The key's last step: what happens back in the launcher (Updates or Display).
@@ -1217,6 +1219,7 @@ export component AppWindow inherits Window {
             rows: root.settings; edit-index: root.edit-index; edit-text <=> root.edit-text;
             scroll-y <=> root.settings-y; query <=> root.settings-query; find-editing: root.settings-find-editing;
             hits: root.settings-hits; about: root.settings-about; version: root.app-version; mode: root.settings-mode;
+            warning: root.settings-warning;
             key: root.settings-key; key-last: root.settings-key-last; nv: root.settings-nv; pair: root.settings-pair;
             pad: root.pad-hints; osk: root.osk-open; caret: root.edit-caret;
             click(zone, i) => { root.click(zone, i); }

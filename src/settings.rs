@@ -910,6 +910,7 @@ impl App {
         ui.set_settings_nv(if sub == Some(Cat::Display) { self.nv_card() } else { crate::NvCard::default() });
         ui.set_settings_pair(if sub == Some(Cat::Controllers) { self.pair_card() } else { crate::PairCard::default() });
         ui.set_settings_mode(mode_label(Mode::current()).into());
+        ui.set_settings_warning(self.cfg.lock().unwrap().save_notice().unwrap_or_default().into());
         ui.set_settings(model(self.settings_rows.clone()));
         ui.set_edit_index(self.edit_index);
         self.push_setup();
@@ -965,9 +966,15 @@ impl App {
     }
 
     pub(crate) fn save_cfg(&mut self, f: impl FnOnce(&mut crate::config::Config)) {
-        let mut c = self.cfg.lock().unwrap();
-        f(&mut c);
-        c.save();
+        let failed = {
+            let mut c = self.cfg.lock().unwrap();
+            f(&mut c);
+            c.save();
+            c.take_save_failure()
+        };
+        if let Some(e) = failed {
+            self.toast("Settings couldn't be saved", &format!("{e}. Changes last until the launcher closes."), 2);
+        }
     }
 
     pub fn refresh_settings(&mut self) {
