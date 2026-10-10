@@ -180,7 +180,7 @@ impl Config {
     }
 
     pub fn load() -> Config {
-        let mut cfg = Config::from_json_with(&std::fs::read(Self::path()).unwrap_or_default(), &crate::kyty::root());
+        let mut cfg = Config::load_from(&Self::path(), &crate::kyty::root());
         cfg.use_fallback_emulator(|| {
             let managed = crate::kyty::managed_emulator();
             if managed.is_file() { Some(managed) } else { detect_emulator() }
@@ -194,19 +194,36 @@ impl Config {
     /// A file that cannot be read, or one from a newer launcher, is read as well as it can be,
     /// and this run never saves over it.
     pub fn from_json_with(bytes: &[u8], kyty_root: &Path) -> Config {
+        Config::read_bytes(bytes, kyty_root, None)
+    }
+
+    /// The settings in the file at `path`, as `from_json_with` reads them. Only a missing file is
+    /// a first start; an empty file, or one that cannot be read, is never saved over.
+    pub fn load_from(path: &Path, kyty_root: &Path) -> Config {
+        let (bytes, keep_file) = match std::fs::read(path) {
+            Ok(bytes) if bytes.is_empty() => (bytes, Some("is empty".to_string())),
+            Ok(bytes) => (bytes, None),
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => (Vec::new(), None),
+            Err(e) => (Vec::new(), Some(format!("can't be read ({e})"))),
+        };
+        Config::read_bytes(&bytes, kyty_root, keep_file)
+    }
+
+    /// `keep_file`: why this run must not save over the file, known before reading its bytes.
+    fn read_bytes(bytes: &[u8], kyty_root: &Path, keep_file: Option<String>) -> Config {
         let (mut cfg, mut keep_file) = match serde_json::from_slice::<Config>(bytes) {
-            Ok(cfg) => (cfg, None),
-            // No file yet.
-            Err(_) if bytes.is_empty() => (Config::default(), None),
-            Err(e) => (Config::default(), Some(format!("it cannot be read ({e})"))),
+            Ok(cfg) => (cfg, keep_file),
+            // No file yet, or one already refused.
+            Err(_) if bytes.is_empty() => (Config::default(), keep_file),
+            Err(e) => (Config::default(), Some(format!("can't be read ({e})"))),
         };
         if cfg.config_version > CONFIG_VERSION {
-            keep_file = Some(format!("it is from a newer launcher (version {})", cfg.config_version));
+            keep_file = Some(format!("is from a newer launcher (version {})", cfg.config_version));
         }
         cfg.one_update_switch();
         cfg.migrate(kyty_root);
         if let (Some(why), Some(read)) = (keep_file, cfg.read.as_mut()) {
-            crate::log!("config.json: {why}; this run uses what it can and does not save over it");
+            crate::log!("config.json {why}; this run uses what it can and does not save over it");
             read.keep_file = Some(why);
         }
         cfg
@@ -387,6 +404,12 @@ impl Config {
 }
 
 impl Config {
+    /// What Settings tells the user when its changes cannot be kept; None when they are saved.
+    pub fn save_notice(&self) -> Option<String> {
+        let why = self.read.as_ref()?.keep_file.as_ref()?;
+        Some(format!("Settings can't be saved: config.json {why}. Changes last until the launcher closes."))
+    }
+
     pub fn save(&mut self) {
         self.save_at(&Self::path());
     }
@@ -928,6 +951,44 @@ mod tests {
         assert_eq!(c.game_dirs, ["/g"]);
         c.save_at(&path);
         assert_eq!(std::fs::read(&path).unwrap(), text);
+    }
+
+    #[test]
+    fn an_empty_config_file_is_not_saved_over() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("config.json");
+        std::fs::write(&path, b"").unwrap();
+        let mut c = Config::load_from(&path, Path::new(KYTY_ROOT));
+        c.width = 640;
+        c.save_at(&path);
+        assert_eq!(std::fs::read(&path).unwrap(), b"");
+        assert!(!dir.path().join("config.json.legacy").exists());
+    }
+
+    #[test]
+    fn a_config_file_that_cannot_be_read_is_not_saved_over() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("config.json");
+        // A read error that is not "no such file": here, a folder in its place.
+        std::fs::create_dir(&path).unwrap();
+        std::fs::write(path.join("keep"), b"x").unwrap();
+        let mut c = Config::load_from(&path, Path::new(KYTY_ROOT));
+        assert_eq!(c.game_dirs, Config::default().game_dirs, "this run uses the defaults");
+        c.save_at(&path);
+        assert!(path.is_dir() && path.join("keep").is_file());
+        let notice = c.save_notice().expect("the user is told");
+        assert!(notice.starts_with("Settings can't be saved: config.json can't be read ("), "{notice}");
+    }
+
+    #[test]
+    fn a_missing_config_file_is_a_first_start_and_is_saved() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("config.json");
+        let mut c = Config::load_from(&path, Path::new(KYTY_ROOT));
+        c.width = 640;
+        c.save_at(&path);
+        assert_eq!(Config::load_from(&path, Path::new(KYTY_ROOT)).width, 640);
+        assert_eq!(c.save_notice(), None);
     }
 
     #[test]
