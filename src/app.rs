@@ -354,7 +354,6 @@ pub fn run(ui: AppWindow, monitors: Vec<Monitor>, target_monitor: Option<Monitor
     let pool = images::Pool::new(4, 16, Arc::new(|key, buf| post(move |app| app.on_image(key, buf))));
 
     let genre_res = GENRES.iter().map(|(n, re)| (*n, regex::Regex::new(re).unwrap())).collect();
-    let catalog = CatalogFile::load();
     let mut app = App {
         ui: ui.as_weak(),
         cfg: cfg.clone(),
@@ -412,7 +411,7 @@ pub fn run(ui: AppWindow, monitors: Vec<Monitor>, target_monitor: Option<Monitor
         toast_seq: 0,
         status: String::new(),
         status_busy: false,
-        catalog_updated: catalog.updated,
+        catalog_updated: 0.0,
         syncing: false,
         enriching: false,
         pad_hints: false,
@@ -467,40 +466,27 @@ pub fn run(ui: AppWindow, monitors: Vec<Monitor>, target_monitor: Option<Monitor
     ui.set_grid_rows(ModelRc::from(app.grid_model.clone()));
     ui.set_tiles(ModelRc::from(app.tile_model.clone()));
     ui.set_downloads(ModelRc::from(app.download_model.clone()));
-    app.set_catalog(catalog.games.clone());
     app.relayout();
     app.push_all();
-    let stale = catalog.stale();
-    let first_run = catalog.games.is_empty() || !Config::path().exists();
-    if !Config::path().exists() {
+    // The welcome screen is up, and holds input, until the catalog is read.
+    app.boot.active = true;
+    ui.set_overlay(crate::boot::OVERLAY_BOOT);
+    let new_config = !Config::path().exists();
+    if new_config {
         // Remember detected defaults, the KytyPS5 found as the user's choice.
         let mut c = cfg.lock().unwrap();
         c.remember_found_emulator();
         c.save();
     }
     APP.with(|a| *a.borrow_mut() = Some(app));
-    with_app(move |app| app.boot_start(first_run));
-    with_app(|app| {
-        let n = app.downloads.take_resumed();
-        if n > 0 {
-            app.toast(&format!("{n} download{} continued", if n == 1 { "" } else { "s" }), "They were running when the launcher last closed.", 0);
-        }
-    });
-    with_app(|app| app.kyty_start());
-    with_app(|app| app.shad_start());
-    with_app(|app| app.app_update_start());
-    with_app(|app| app.compat_start());
-    // The Quick Menu's Sound card is there from its first opening.
-    if crate::system::Mode::current() != crate::system::Mode::Desktop {
-        with_app(|app| app.sound_load(false));
-    }
-    // PS5 Launcher OS: resume the NVIDIA driver's install after a restart, and compare the
-    // screen's card with the image.
-    with_app(|app| app.nvidia_start());
-    // PS5 Launcher OS: read what the first-start setup needs while the welcome screen shows, and
-    // the boot health check's notice. Both show once the welcome screen is done.
-    with_app(|app| app.setup_start());
-    with_app(|app| app.notice_start());
+    // Reading the catalog reads the emulator addons, which can take a while: never on the UI
+    // thread. The window shows meanwhile, with the welcome screen; the start goes on when the
+    // catalog is there (`App::start`).
+    util::in_background("catalog", || {
+        let catalog = CatalogFile::load();
+        let stale = catalog.stale();
+        (catalog, stale)
+    }, move |(catalog, stale)| post(move |app| app.start(catalog, stale, new_config)));
 
     wire_callbacks(&ui);
     crate::gamepad::spawn(|p| post(move |app| app.on_pad(p)));
@@ -517,14 +503,6 @@ pub fn run(ui: AppWindow, monitors: Vec<Monitor>, target_monitor: Option<Monitor
     let tick = slint::Timer::default();
     tick.start(slint::TimerMode::Repeated, Duration::from_secs(1), || with_app(|app| app.tick()));
     with_app(|app| app.tick());
-
-    with_app(move |app| {
-        if stale {
-            app.start_sync();
-        } else {
-            app.start_enrich();
-        }
-    });
 
     ui.show().expect("could not open window");
     crate::display::place_window(&ui, target_monitor.as_ref(), windowed);
@@ -651,6 +629,41 @@ impl App {
             }
             i
         })
+    }
+
+    /// The rest of the start, once `run` has read the catalog off the UI thread: the catalog,
+    /// the welcome screen, then the background checks, in the order they always ran.
+    fn start(&mut self, catalog: CatalogFile, stale: bool, new_config: bool) {
+        let first_run = catalog.games.is_empty() || new_config;
+        self.catalog_updated = catalog.updated;
+        self.set_catalog(catalog.games);
+        self.relayout();
+        self.push_all();
+        self.boot_start(first_run);
+        let n = self.downloads.take_resumed();
+        if n > 0 {
+            self.toast(&format!("{n} download{} continued", if n == 1 { "" } else { "s" }), "They were running when the launcher last closed.", 0);
+        }
+        self.kyty_start();
+        self.shad_start();
+        self.app_update_start();
+        self.compat_start();
+        // The Quick Menu's Sound card is there from its first opening.
+        if crate::system::Mode::current() != crate::system::Mode::Desktop {
+            self.sound_load(false);
+        }
+        // PS5 Launcher OS: resume the NVIDIA driver's install after a restart, and compare the
+        // screen's card with the image.
+        self.nvidia_start();
+        // PS5 Launcher OS: read what the first-start setup needs while the welcome screen shows,
+        // and the boot health check's notice. Both show once the welcome screen is done.
+        self.setup_start();
+        self.notice_start();
+        if stale {
+            self.start_sync();
+        } else {
+            self.start_enrich();
+        }
     }
 
     pub fn set_catalog(&mut self, games: Vec<Game>) {

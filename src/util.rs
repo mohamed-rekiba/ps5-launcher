@@ -77,6 +77,24 @@ pub fn atomic_write(path: &Path, data: &[u8]) -> std::io::Result<()> {
     std::fs::rename(&tmp, path)
 }
 
+/// Run `work` on a thread named `name`, then hand its result to `deliver` on that thread (to
+/// post it to the UI, for example). Returns at once. If no thread can be made, both run here.
+pub fn in_background<T: 'static>(name: &str, work: impl FnOnce() -> T + Send + 'static, deliver: impl FnOnce(T) + Send + 'static) {
+    let job = std::sync::Arc::new(std::sync::Mutex::new(Some((work, deliver))));
+    let in_thread = job.clone();
+    let spawned = std::thread::Builder::new().name(name.into()).spawn(move || {
+        if let Some((work, deliver)) = in_thread.lock().unwrap_or_else(|e| e.into_inner()).take() {
+            deliver(work());
+        }
+    });
+    if let Err(e) = spawned {
+        crate::log!("could not start the {name} thread ({e}); doing it here");
+        if let Some((work, deliver)) = job.lock().unwrap_or_else(|e| e.into_inner()).take() {
+            deliver(work());
+        }
+    }
+}
+
 pub fn sha1_hex(s: &str) -> String {
     sha1_smol::Sha1::from(s).digest().to_string()
 }
@@ -315,6 +333,18 @@ pub fn civil_from_days(z: i64) -> (i32, u32, u32) {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn slow_work_in_the_background_never_holds_the_caller() {
+        // A slow addon load behind the catalog: the caller (the UI thread) goes on at once,
+        // and the result arrives when the work is done.
+        let (tx, rx) = std::sync::mpsc::channel();
+        let start = std::time::Instant::now();
+        in_background("slow", || { std::thread::sleep(Duration::from_millis(1500)); 42 }, move |v| tx.send(v).unwrap());
+        assert!(start.elapsed() < Duration::from_millis(200), "returned after {:?}", start.elapsed());
+        assert_eq!(rx.recv_timeout(Duration::from_secs(10)), Ok(42));
+        assert!(start.elapsed() >= Duration::from_millis(1500));
+    }
     #[test]
     fn dates_roundtrip() {
         let d = days_from_civil(2026, 9, 29);
