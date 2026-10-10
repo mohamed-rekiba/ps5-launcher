@@ -56,6 +56,10 @@ Result: **Pass**, **Fail** or **Skipped** (say why). The stage name is the argum
 | 5a | **Upgrade.** `sudo bootc switch "$IMAGE@$UPGRADE_DIGEST"`, then restart. | The launcher starts. Booted digest = `UPGRADE_DIGEST`, and `/usr/lib/ps5-launcher/upgrade-test` exists. | `upgrade` | | |
 | 5b | **Rollback.** `sudo bootc rollback`, then restart. | The launcher starts. Booted digest = `MAIN_DIGEST`; `sudo bootc status` shows the image as `$IMAGE:main` again. | `rollback` | | |
 | 6 | **Switch to desktop and back.** In the launcher's Power menu, choose "Switch to desktop". Log out of Plasma. | Plasma starts; after the log out, the launcher starts again. | `desktop` | | |
+| 6a | **Boot health check after a good start.** Three minutes after test 2 (or 5a, 5b), run `sudo cat /var/lib/ps5-launcher-os/health/last-good` and `journalctl -b -u ps5-boot-health`. | `last-good` names the booted digest; the journal says "healthy". No `transaction` file in that folder. | `health` | | |
+| 6b | **The GRUB menu.** Restart and watch the screen after the firmware logo. | The GRUB menu shows for 5 seconds before it starts the system. | `grub` | | |
+| 6c | **Recovery mode.** With a USB keyboard: restart; in the GRUB menu press `e`; at the end of the line that starts with `linux` add ` systemd.unit=ps5-recovery.target`; press `Ctrl-X` or `F10`. Choose 3 (roll back), answer `n`; choose 1 (switch to main) with a network cable, answer `n`; then choose 4. | A text menu with four choices shows on the screen, without a login. Errors show in the menu. After choice 4 the PC restarts. Then run `sudo bootc status` and undo what you staged: `sudo bootc rollback` if the rollback is queued. | `recovery` | | |
+| 6d | **Power key.** In the launcher, press the PC's power key once, briefly. Then, in a terminal in Plasma, run `systemd-analyze cat-config systemd/logind.conf \| grep HandlePowerKey`. | In the launcher: its Power menu opens, and the PC stays on. The command prints `HandlePowerKey=suspend`. (In Plasma, Plasma's own power settings handle the key.) | `power-key` | | |
 
 On a PC with an **NVIDIA** card (RTX 20 or newer), also:
 
@@ -67,6 +71,10 @@ On a PC with an **NVIDIA** card (RTX 20 or newer), also:
 | 10 | **Switch to the NVIDIA candidate.** `sudo bootc switch "$IMAGE@$NVIDIA_DIGEST"`, then restart. (`helper switch nvidia` stages the release tag, not this candidate.) | Booted digest = `NVIDIA_DIGEST`. `nvidia-smi` shows the card; `lsmod` lists `nvidia`, not `nouveau`; the launcher shows. Note the download size `bootc switch` printed. | `nvidia` | | |
 | 11 | **Switch back.** `sudo bootc switch "$IMAGE@$MAIN_DIGEST"`, then restart. | Booted digest = `MAIN_DIGEST`. `cat /proc/cmdline` has no `nvidia` or `nouveau` argument; `lsmod` lists `nouveau`; the launcher shows. | `main-again` | | |
 | 12 | **"Install with the NVIDIA driver" from the ISO** (Secure Boot on if you can). Boot the stick, choose that entry, install. On the blue screen, enroll with password **12345678**. | Booted digest = `NVIDIA_DIGEST`. `nvidia-smi` works; the launcher shows. | `iso-nvidia` | | |
+
+On the NVIDIA PC, also run test 6c with choice 2 after test 9 (key enrolled): it stages the
+release tag `nvidia`, as `helper switch nvidia` does; with the key not enrolled it must show
+`key-required` and the steps, and switch nothing.
 
 Tests 10 and 11 pin the PC to a digest. Afterwards, run `sudo bootc switch "$IMAGE:main"` (or
 reinstall) so the PC follows the release tag again.
