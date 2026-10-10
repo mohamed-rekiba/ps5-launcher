@@ -1,0 +1,20 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE policyconfig PUBLIC "-//freedesktop//DTD PolicyKit Policy Configuration 1.0//EN"
+  "http://www.freedesktop.org/standards/PolicyKit/1/policyconfig.dtd">
+<!-- PS5 Launcher OS: the user at the PC may run the launcher's root helper through pkexec
+     without a password (there is nothing to type it with on a controller). Users logged in
+     remotely or in an inactive session may not. -->
+<policyconfig>
+  <vendor>PS5 Launcher</vendor>
+  <vendor_url>https://github.com/MohamedAliRashad/ps5-launcher</vendor_url>
+  <action id="io.github.ps5launcher.helper">
+    <description>Run PS5 Launcher's system tasks</description>
+    <message>PS5 Launcher needs to change a system setting</message>
+    <defaults>
+      <allow_any>no</allow_any>
+      <allow_inactive>no</allow_inactive>
+      <allow_active>yes</allow_active>
+    </defaults>
+    <annotate key="org.freedesktop.policykit.exec.path">/usr/libexec/ps5-launcher/helper</annotate>
+  </action>
+</policyconfig>

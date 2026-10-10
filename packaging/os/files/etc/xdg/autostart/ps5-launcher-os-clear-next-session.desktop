@@ -1,0 +1,8 @@
+[Desktop Entry]
+Type=Application
+Name=PS5 Launcher OS: back to the launcher next time
+Comment="Switch to desktop" chose Plasma for one login only; the next login is PS5 Launcher again
+Exec=pkexec /usr/libexec/ps5-launcher/helper clear-next-session
+OnlyShowIn=KDE;
+NoDisplay=true
+X-KDE-autostart-phase=1

@@ -1,0 +1,52 @@
+#!/bin/sh
+# PS5 Launcher OS's root helper: the few system tasks the launcher may do, and nothing else.
+# The launcher runs it through pkexec; polkit allows it for the user at the PC without a
+# password (/usr/share/polkit-1/actions/io.github.ps5launcher.helper.policy). Its paths are
+# fixed, so nothing in the caller's environment can redirect it; test-helper.sh tests a copy
+# with these two lines changed.
+#
+#   helper set-next-session plasma   log in to Plasma once, at the next automatic login
+#   helper clear-next-session        forget that (Plasma's autostart, and every boot)
+#   helper update-check              is a system update available?
+#   helper update                    download a system update; it installs at the next restart
+#   helper rollback                  start the previous system at the next restart
+set -eu
+sddm_dir=/etc/sddm.conf.d
+PATH=/usr/sbin:/usr/bin
+export PATH
+next_session="$sddm_dir/90-ps5-launcher-os-next-session.conf"
+
+usage() {
+    echo "usage: helper set-next-session plasma | clear-next-session | update-check | update | rollback" >&2
+    exit 2
+}
+
+[ $# -ge 1 ] || usage
+task=$1
+shift
+case "$task $#" in
+"set-next-session 1")
+    [ "$1" = plasma ] || usage
+    # Only a real folder that no one else can write to, and never through a symlink: the file
+    # is written aside, the old name is deleted (rm removes a symlink itself, not its target),
+    # then the file is renamed into place.
+    if [ -L "$sddm_dir" ] || [ ! -d "$sddm_dir" ] ||
+        [ -z "$(find "$sddm_dir" -maxdepth 0 -user "$(id -u)" ! -perm -g+w ! -perm -o+w)" ]; then
+        echo "helper: $sddm_dir is not a folder only this user can write to" >&2
+        exit 1
+    fi
+    tmp=$(mktemp "$sddm_dir/.next-session.XXXXXX")
+    printf '# Written by "Switch to desktop"; deleted when Plasma starts.\n[Autologin]\nSession=plasma.desktop\n' \
+        > "$tmp"
+    chmod 644 "$tmp"
+    rm -f "$next_session"
+    mv -f "$tmp" "$next_session"
+    ;;
+"clear-next-session 0") rm -f "$next_session" ;;
+"update-check 0") exec bootc upgrade --check ;;
+# TODO(Phase 1): on the NVIDIA image, refuse to stage an image whose signing key is not
+# enrolled (its label against mokutil --list-enrolled), and queue the key instead.
+"update 0") exec bootc upgrade ;;
+"rollback 0") exec bootc rollback ;;
+*) usage ;;
+esac
