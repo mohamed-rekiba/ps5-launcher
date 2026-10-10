@@ -6,12 +6,16 @@ use crate::audio::{self, Sound};
 use crate::system::{self, Can, Choice, Guard, JobEnd, Mode, PowerAction, PowerCaps, WaitState, Work};
 use crate::PowerRow;
 use std::process::Command;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 /// Installed when Plasma is there to switch to ("Switch to desktop").
 const DESKTOP_SESSION: &str = "/usr/share/wayland-sessions/plasma.desktop";
 /// Root helper of PS5 Launcher OS (packaging/os/); it does not exist yet.
 const HELPER: &str = "/usr/libexec/ps5-launcher/helper";
+/// systemd sends SIGTERM to the session within its stop timeout (90 s by default). A launcher
+/// still running after this did not go down, so its resume intent goes: a crash later must not
+/// resume downloads.
+const RESUME_GRACE: Duration = Duration::from_secs(120);
 
 /// A row of the Power menu.
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
@@ -33,11 +37,13 @@ pub struct PowerUi {
     /// "Power off when done": the install ids it waits for.
     pub wait: Option<Vec<String>>,
     pub note: String,
+    /// When the downloads' resume intent was written for the action that runs now.
+    pub resume_written: Option<Instant>,
 }
 
 impl Default for PowerUi {
     fn default() -> Self {
-        Self { rows: Vec::new(), can_sleep: Can::Na, action: None, choices: Vec::new(), seconds: 0, timer: None, wait: None, note: String::new() }
+        Self { rows: Vec::new(), can_sleep: Can::Na, action: None, choices: Vec::new(), seconds: 0, timer: None, wait: None, note: String::new(), resume_written: None }
     }
 }
 
@@ -77,6 +83,13 @@ pub fn keep_selection(old: &[Row], new: &[Row], idx: usize) -> usize {
 /// next login. On another Linux PC there is no helper, so the row would only fail.
 pub fn can_switch_to_desktop(desktop_session: bool, helper: bool) -> bool {
     desktop_session && helper
+}
+
+/// The planned actions that end the launcher: the running downloads resume at the next start.
+/// Sleep keeps the process and its downloads running. Close launcher (desktop) is quitting an
+/// app, which stops its work, as Pause does; the window's close button quits the same way.
+pub fn resumes_downloads(action: PowerAction) -> bool {
+    matches!(action, PowerAction::Restart { .. } | PowerAction::PowerOff | PowerAction::LogOut | PowerAction::SwitchToDesktop)
 }
 
 pub fn divider(prev: Option<Row>, row: Row) -> bool {
@@ -322,11 +335,18 @@ impl App {
     /// Do it. System commands run off the UI thread; a failure shows as a toast and the
     /// launcher stays open.
     fn run_power(&mut self, action: PowerAction) {
+        if resumes_downloads(action) {
+            match self.downloads.keep_running_after_restart() {
+                Ok(n) => self.power.resume_written = (n > 0).then(Instant::now),
+                Err(e) => crate::log!("Could not save the downloads to resume: {e}"),
+            }
+        }
         let (program, args): (&str, &[&str]) = match action {
             PowerAction::CloseGame => return self.stop_game(None),
             // The normal quit path: downloads and installs shut down, and the process exits 0,
             // which ends ps5-launcher-session (Log out).
             PowerAction::CloseLauncher | PowerAction::LogOut => {
+                // Log out keeps its resume intent: the process ends now.
                 let _ = slint::quit_event_loop();
                 return;
             }
@@ -341,16 +361,35 @@ impl App {
             post(move |app| match result {
                 // The next login goes to the desktop: end this session.
                 Ok(()) if action == PowerAction::SwitchToDesktop => {
+                    // pkexec can wait on a password for longer than RESUME_GRACE: save it again.
+                    if let Err(e) = app.downloads.keep_running_after_restart() {
+                        crate::log!("Could not save the downloads to resume: {e}");
+                    }
                     let _ = slint::quit_event_loop();
                 }
                 Ok(()) => {}
                 Err(e) => {
+                    app.forget_resume();
                     crate::log!("{}: {e}", action.label());
                     audio::play(Sound::Error);
                     app.toast(&format!("Couldn't {}", action.label().to_lowercase()), &e, 2);
                 }
             });
         });
+    }
+
+    fn forget_resume(&mut self) {
+        if self.power.resume_written.take().is_some() {
+            self.downloads.forget_resume();
+        }
+    }
+
+    /// Every second: a planned action that did not end the launcher leaves no resume intent.
+    pub fn expire_resume(&mut self) {
+        if self.power.resume_written.is_some_and(|t| t.elapsed() > RESUME_GRACE) {
+            crate::log!("still running after a power action: downloads will not resume");
+            self.forget_resume();
+        }
     }
 
     /// "Power off when done": every second, check the installs it waits for.
@@ -421,6 +460,16 @@ mod tests {
         assert!(can_switch_to_desktop(true, true));
         assert!(!can_switch_to_desktop(true, false), "a normal Linux PC: no helper");
         assert!(!can_switch_to_desktop(false, true));
+    }
+
+    #[test]
+    fn only_actions_that_end_the_launcher_on_purpose_resume_downloads() {
+        for action in [Restart { update: false }, Restart { update: true }, PowerOff, LogOut, SwitchToDesktop] {
+            assert!(resumes_downloads(action), "{action:?}");
+        }
+        assert!(!resumes_downloads(Sleep), "the launcher keeps running, and so do its downloads");
+        assert!(!resumes_downloads(CloseLauncher), "quitting the app stops its downloads");
+        assert!(!resumes_downloads(CloseGame));
     }
 
     #[test]

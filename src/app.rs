@@ -458,6 +458,12 @@ pub fn run(ui: AppWindow, monitors: Vec<Monitor>, target_monitor: Option<Monitor
     }
     APP.with(|a| *a.borrow_mut() = Some(app));
     with_app(move |app| app.boot_start(first_run));
+    with_app(|app| {
+        let n = app.downloads.take_resumed();
+        if n > 0 {
+            app.toast(&format!("{n} download{} continued", if n == 1 { "" } else { "s" }), "They were running when the launcher last closed.", 0);
+        }
+    });
     with_app(|app| app.kyty_start());
     with_app(|app| app.shad_start());
     with_app(|app| app.app_update_start());
@@ -1365,6 +1371,7 @@ impl App {
     pub fn tick(&mut self) {
         self.push_installs();
         self.check_power_wait();
+        self.expire_resume();
         self.push_downloads();
         let tm = util::local_time();
         let (h, m) = (tm.tm_hour, tm.tm_min);

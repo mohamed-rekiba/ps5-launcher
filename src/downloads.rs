@@ -3,7 +3,9 @@
 //! setting turns seeding off for good (Stop seeding on one transfer lasts until the next launch).
 //! Magnet lookup can use DHT/trackers before metadata (including its private flag) is known.
 //! A dedicated Tokio worker owns the engine; the UI reads bounded snapshots once per second.
-//! Our manifest restores unfinished transfers paused, not via rqbit's session persistence.
+//! Our manifest restores unfinished transfers paused, not via rqbit's session persistence. The
+//! ones that were running at a planned Restart, Power off, Log out or Switch to desktop resume
+//! (`resume.json`); after a crash they stay paused.
 
 use anyhow::{bail, ensure, Context, Result};
 use librqbit::{AddTorrent, AddTorrentOptions, AddTorrentResponse, ManagedTorrent, Session, SessionOptions, TorrentStatsState};
@@ -115,6 +117,9 @@ pub struct Manager {
     jobs: Arc<Mutex<Vec<Job>>>,
     tx: mpsc::Sender<Command>,
     thread: Option<std::thread::JoinHandle<()>>,
+    store: PathBuf,
+    /// How many downloads this start resumed from the intent, until the UI asks.
+    resumed: usize,
 }
 
 impl Manager {
@@ -124,19 +129,35 @@ impl Manager {
 
     fn new(store: PathBuf, policy: Policy) -> Self {
         let jobs = load_manifest(&store);
+        let resume = keys_to_resume(&jobs, &take_resume(&store, unix_now()));
         let jobs = Arc::new(Mutex::new(jobs));
         let (tx, rx) = mpsc::channel(64);
+        // Queued before the worker starts; it runs them after seeding, in order.
+        let resumed = resume.into_iter().filter(|key| tx.try_send(Command::Start(key.clone())).is_ok()).count();
         let shared = jobs.clone();
+        let worker_store = store.clone();
         let thread = std::thread::Builder::new().name("torrent-worker".into()).spawn(move || {
             let runtime = match tokio::runtime::Builder::new_multi_thread().worker_threads(2).enable_all().build() {
                 Ok(runtime) => runtime,
                 Err(error) => { crate::log!("Could not create download runtime: {error}"); return; }
             };
-            runtime.block_on(Worker::new(store, shared, policy).run(rx));
+            runtime.block_on(Worker::new(worker_store, shared, policy).run(rx));
             runtime.shutdown_timeout(Duration::from_secs(2));
         }).expect("could not create download worker");
-        Self { jobs, tx, thread: Some(thread) }
+        Self { jobs, tx, thread: Some(thread), store, resumed }
     }
+
+    /// How many downloads this start resumed, once: the "N downloads continued" toast.
+    pub fn take_resumed(&mut self) -> usize { std::mem::take(&mut self.resumed) }
+
+    /// Before a planned Restart, Power off, Log out or Switch to desktop: resume the running
+    /// downloads at the next start. Returns how many.
+    pub fn keep_running_after_restart(&self) -> Result<usize> {
+        write_resume(&self.store, &self.snapshot(), unix_now())
+    }
+
+    /// The planned action failed, or did not happen: the launcher stays open.
+    pub fn forget_resume(&self) { clear_resume(&self.store); }
 
     pub fn snapshot(&self) -> Vec<Job> { self.jobs.lock().unwrap().clone() }
 
@@ -208,6 +229,68 @@ fn load_manifest(store: &Path) -> Vec<Job> {
         job.clear_runtime();
         job
     }).collect()
+}
+
+/// The downloads that were running at a planned Restart, Power off, Log out or Switch to desktop.
+/// The next start resumes them. A crash writes no intent, so its downloads stay paused.
+const RESUME_FILE: &str = "resume.json";
+/// The intent bridges one shutdown and the next start. A week away still counts; after that,
+/// downloads starting by themselves would be a surprise, not a continuation.
+const RESUME_MAX_AGE: u64 = 7 * 24 * 60 * 60;
+
+#[derive(Serialize, Deserialize)]
+struct ResumeIntent { schema: u32, written: u64, keys: Vec<String> }
+
+/// The keys that go into the intent: the transfers a power action interrupts (`State::active`,
+/// as `App::power_work` counts them).
+fn running_keys(jobs: &[Job]) -> Vec<String> {
+    jobs.iter().filter(|job| job.state.active()).map(|job| job.key.clone()).collect()
+}
+
+/// The keys of a saved intent, or none when it is unreadable or older than `RESUME_MAX_AGE`.
+/// A time ahead of `now` (the clock went back) gets the same limit.
+fn read_intent(bytes: &[u8], now: u64) -> Vec<String> {
+    match serde_json::from_slice::<ResumeIntent>(bytes) {
+        Ok(intent) if intent.schema == 1 && intent.written.abs_diff(now) <= RESUME_MAX_AGE => intent.keys.into_iter().take(MAX_JOBS).collect(),
+        _ => vec![],
+    }
+}
+
+/// The restored transfers to resume: in the intent and paused by the restore. A transfer the
+/// user paused is not in the intent, and one that is gone is skipped.
+fn keys_to_resume(restored: &[Job], intent: &[String]) -> Vec<String> {
+    restored.iter().filter(|job| job.state == State::Paused && intent.contains(&job.key)).map(|job| job.key.clone()).collect()
+}
+
+/// Save the intent for `jobs` and return how many it lists. With none running, remove the file.
+fn write_resume(store: &Path, jobs: &[Job], now: u64) -> Result<usize> {
+    let keys = running_keys(jobs);
+    if keys.is_empty() {
+        clear_resume(store);
+        return Ok(0);
+    }
+    let n = keys.len();
+    secure_write(&store.join(RESUME_FILE), &serde_json::to_vec(&ResumeIntent { schema: 1, written: now, keys })?)?;
+    Ok(n)
+}
+
+fn clear_resume(store: &Path) {
+    let _ = std::fs::remove_file(store.join(RESUME_FILE));
+}
+
+/// Read the intent once: it is removed, so a crash later in this run resumes nothing.
+fn take_resume(store: &Path, now: u64) -> Vec<String> {
+    use std::io::Read;
+    let path = store.join(RESUME_FILE);
+    let mut bytes = Vec::new();
+    let Ok(file) = std::fs::File::open(&path) else { return vec![] };
+    let _ = file.take(64 * 1024).read_to_end(&mut bytes);
+    clear_resume(store);
+    read_intent(&bytes, now)
+}
+
+fn unix_now() -> u64 {
+    std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map(|d| d.as_secs()).unwrap_or(0)
 }
 
 /// Reject ambiguous hashes, huge file-selection ranges and unsupported sources.
@@ -1099,7 +1182,7 @@ mod tests {
             assert_eq!(handles.len(), 2);
             // Exercise the production bounded command dispatch, without production test hooks.
             let (tx, rx) = mpsc::channel(64);
-            let mut manager = Manager { jobs: worker.jobs.clone(), tx, thread: None };
+            let mut manager = Manager { jobs: worker.jobs.clone(), tx, thread: None, store: worker.store.clone(), resumed: 0 };
             let running = tokio::spawn(worker.run(rx));
             manager.set_seed_after_download(false).unwrap();
             wait_job(&manager, &key, |job| !job.seeding).await;
@@ -1134,7 +1217,7 @@ mod tests {
                 let handle = worker.handles[&key].clone();
                 let payload = worker.job(&key).unwrap().folder.join("public-domain-fixture.bin");
                 let (tx, rx) = mpsc::channel(64);
-                let manager = Manager { jobs: worker.jobs.clone(), tx, thread: None };
+                let manager = Manager { jobs: worker.jobs.clone(), tx, thread: None, store: worker.store.clone(), resumed: 0 };
                 let running = tokio::spawn(worker.run(rx));
                 if stop_first {
                     manager.action(&key, "stop_seed").unwrap();
@@ -1218,7 +1301,7 @@ mod tests {
         assert!(!restored[0].seeding);
         assert_eq!(restored[0].upload_speed, 0.0);
         let (tx, mut rx) = mpsc::channel(1);
-        let manager = Manager { jobs: Arc::new(Mutex::new(restored)), tx, thread: None };
+        let manager = Manager { jobs: Arc::new(Mutex::new(restored)), tx, thread: None, store: temp.path().to_path_buf(), resumed: 0 };
         manager.set_seed_after_download(false).unwrap();
         assert!(manager.set_seed_after_download(true).is_err(), "full channel must report busy, not block UI");
         assert!(matches!(rx.try_recv(), Ok(Command::SetSeedAfterDownload(false))));
@@ -1454,6 +1537,86 @@ mod tests {
         assert!(worker.handles.is_empty());
         assert!(worker.resolving.is_empty());
         assert!(!temp.path().join(format!("torrent-{key}")).exists());
+    }
+
+    #[test]
+    fn the_resume_intent_lists_the_running_downloads_only() {
+        let base = Path::new("/downloads");
+        let states = [State::Resolving, State::Ready, State::Checking, State::Downloading, State::Paused, State::Complete, State::Failed, State::Cancelled];
+        let jobs: Vec<Job> = states.iter().enumerate().map(|(i, state)| {
+            let mut job = job(base, &format!("{i:040x}"));
+            job.state = *state;
+            job
+        }).collect();
+        assert_eq!(running_keys(&jobs), [format!("{:040x}", 0), format!("{:040x}", 2), format!("{:040x}", 3)]);
+        assert!(running_keys(&[]).is_empty());
+    }
+
+    #[test]
+    fn a_resume_intent_expires_and_rejects_bad_files() {
+        let now = 1_800_000_000;
+        let keys = vec!["a".repeat(40), "b".repeat(40)];
+        let intent = |schema: u32, written: u64| serde_json::to_vec(&ResumeIntent { schema, written, keys: keys.clone() }).unwrap();
+        assert_eq!(read_intent(&intent(1, now - 60), now), keys);
+        assert_eq!(read_intent(&intent(1, now - RESUME_MAX_AGE), now), keys, "the last second still counts");
+        assert!(read_intent(&intent(1, now - RESUME_MAX_AGE - 1), now).is_empty(), "too old");
+        assert_eq!(read_intent(&intent(1, now + 3600), now), keys, "the clock went back a little");
+        assert!(read_intent(&intent(1, now + RESUME_MAX_AGE + 1), now).is_empty(), "far in the future");
+        assert!(read_intent(&intent(2, now), now).is_empty(), "unknown schema");
+        assert!(read_intent(b"not json", now).is_empty());
+        let many: Vec<String> = (0..100).map(|i| format!("{i:040x}")).collect();
+        let bytes = serde_json::to_vec(&ResumeIntent { schema: 1, written: now, keys: many }).unwrap();
+        assert_eq!(read_intent(&bytes, now).len(), MAX_JOBS);
+    }
+
+    #[test]
+    fn only_restored_paused_downloads_in_the_intent_resume() {
+        let base = Path::new("/downloads");
+        let with = |key: &str, state: State| { let mut job = job(base, key); job.state = state; job };
+        let restored = [
+            with(&"a".repeat(40), State::Paused),   // was running: resumes
+            with(&"b".repeat(40), State::Paused),   // paused by the user: not in the intent
+            with(&"c".repeat(40), State::Complete), // finished meanwhile: seeding decides
+            with(&"d".repeat(40), State::Failed),
+        ];
+        let intent = ["a".repeat(40), "c".repeat(40), "d".repeat(40), "e".repeat(40)];
+        assert_eq!(keys_to_resume(&restored, &intent), ["a".repeat(40)]);
+        assert!(keys_to_resume(&restored, &[]).is_empty(), "a crash leaves no intent");
+    }
+
+    #[test]
+    fn the_intent_resumes_once_at_the_next_start_and_a_crash_resumes_nothing() {
+        let temp = crate::hostos::real_tempdir();
+        let store = temp.path();
+        let running = "0123456789abcdef0123456789abcdef01234567";
+        let paused = "89abcdef0123456789abcdef0123456789abcdef";
+        let mut a = job(store, running);
+        a.state = State::Downloading;
+        let mut b = job(store, paused);
+        b.state = State::Paused;
+        // The running launcher's jobs, and the manifest it last saved.
+        let live = vec![a, b];
+        secure_write(&store.join("jobs.json"), &serde_json::to_vec(&Manifest { schema: 1, jobs: live.clone() }).unwrap()).unwrap();
+        let now = 1_800_000_000;
+
+        // A crash: no intent, so everything stays paused.
+        assert!(take_resume(store, now).is_empty());
+
+        assert_eq!(write_resume(store, &live, now).unwrap(), 1);
+        // The manifest of the stopped launcher still says Downloading; the restore pauses it.
+        assert_eq!(keys_to_resume(&load_manifest(store), &take_resume(store, now + 30)), [running]);
+        assert!(!store.join(RESUME_FILE).exists(), "the intent is read once");
+        assert!(take_resume(store, now + 60).is_empty());
+
+        // The action failed: the intent is cleared and the launcher stays open.
+        write_resume(store, &live, now).unwrap();
+        clear_resume(store);
+        assert!(take_resume(store, now).is_empty());
+
+        // Nothing running: no file at all, and an older intent is removed.
+        write_resume(store, &live, now).unwrap();
+        assert_eq!(write_resume(store, &[], now).unwrap(), 0);
+        assert!(!store.join(RESUME_FILE).exists());
     }
 
     #[test]
