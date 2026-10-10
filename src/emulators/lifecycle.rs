@@ -545,8 +545,10 @@ impl Run<'_> {
             Ok(j) => j,
             Err(e) => return self.stop(Problem::new(JOURNAL, format!("the file cannot be read, so the launcher left the addon folders as they are ({e})"))),
         };
-        let Ok(id) = EmulatorId::try_from(journal.id.clone()).map(|id| id.to_string()) else {
-            return self.stop(Problem::new(JOURNAL, "the file names no valid addon, so the launcher left the addon folders as they are"));
+        let revision_ok = journal.revision.len() == 64 && journal.revision.bytes().all(|b| b.is_ascii_digit() || (b'a'..=b'f').contains(&b));
+        let id = match EmulatorId::try_from(journal.id.clone()) {
+            Ok(id) if revision_ok => id.to_string(),
+            _ => return self.stop(Problem::new(JOURNAL, "the file names no valid change, so the launcher left the addon folders as they are")),
         };
         let mut state = match records(self.root) {
             Ok(state) => state,

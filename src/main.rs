@@ -27,7 +27,7 @@ mod config;
 mod display;
 mod download_ui;
 mod downloads;
-#[allow(dead_code, reason = "phase 1 of docs/plans/data-driven-emulators.md: a read-only registry the app does not call yet")]
+#[allow(dead_code, reason = "phase 1 of docs/plans/addons.md: main only loads the addons; resolution and the Settings actions have no caller yet")]
 mod emulators;
 mod gamepad;
 mod gpu;
@@ -119,6 +119,16 @@ fn main() -> std::process::ExitCode {
             eprintln!("Could not reload RuTracker catalog: {error}");
         }
     }
+
+    // Emulator addons, phase 1 (docs/plans/addons.md): copy or update the default addons in the
+    // data folder and check every addon. Nothing uses the result yet; games still launch through
+    // kyty.rs, shad.rs and sessions.rs. Problems only go to the log.
+    let addons = emulators::startup::load_for_app();
+    log!("emulator addons: {} found, {} problems", addons.registry.emulators().len(), addons.problems.len());
+    for problem in &addons.problems {
+        log!("emulator addons: {problem}");
+    }
+    drop(addons);
 
     let cfg = config::Config::load();
     let mons = display::monitors();

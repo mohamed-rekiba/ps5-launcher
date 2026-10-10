@@ -509,3 +509,16 @@ fn an_interrupted_reset_leaves_the_edit_or_the_default() {
     }
 }
 
+#[test]
+fn a_damaged_journal_leaves_every_folder_as_it_is() {
+    for journal in ["step: offer\nid: kyty\nrevision: \"ééééééééééééééééé\"\n", "step: copy\nid: ../kyty\nrevision: aaaa\n", "step: [\n"] {
+        let r = root();
+        run(r.path(), &[kyty_v1()]);
+        fs::write(r.path().join("addons-journal.yaml"), journal).unwrap();
+        let problems = run(r.path(), &[kyty_v2()]);
+        assert_eq!(problems.len(), 1, "{journal}");
+        assert_eq!(problems[0].subject, "addons-journal.yaml");
+        assert!(problems[0].message.contains("the launcher left the addon folders as they are"), "{}", problems[0].message);
+        assert_eq!(read(r.path(), "emulators/kyty/emulator.yaml"), "kyty v1\n");
+    }
+}
