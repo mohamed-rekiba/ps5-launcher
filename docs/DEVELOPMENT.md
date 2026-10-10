@@ -311,6 +311,12 @@ workflows from the workflow token's events); the release workflow runs the tests
 
 ## Tests
 
+`make` lists the common tasks. `make check` runs what CI's Linux job checks: the build, the
+Rust tests, the smoke test, and the shell tests (`make check-shell`; the OS ones run in a
+Fedora 44 container, so they work on macOS too). `make lint` runs shellcheck on every script
+and actionlint on the workflows. `make run` opens the launcher in a window; `make run-session`
+opens it as in the PS5 Launcher session, where the System pages act on this PC.
+
 `cargo test --offline` runs the launcher unit tests; this is a binary crate,
 so do not use `--lib`. After a release build, run
 `node scripts/test-catalog.mjs` for native Linux smoke tests. The test requires

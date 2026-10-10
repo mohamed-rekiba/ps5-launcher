@@ -92,6 +92,7 @@ output "a size that is not a number is ignored" "" WIDTH=abc HEIGHT=1080 REFRESH
 output "a size out of range is ignored" "" WIDTH=99999 HEIGHT=1080
 output "a size with a leading zero is ignored" "" WIDTH=01920 HEIGHT=1080
 output "a size with extra words is ignored" "" "WIDTH=1920 -O DP-1" HEIGHT=1080
+# shellcheck disable=SC2016 # the literal $(...) and `...` must stay unexpanded: the test proves they are never run
 output "the file is read, never run" "" 'WIDTH=$(touch pwned)' 'HEIGHT=`touch pwned`'
 if [ -e "$work/pwned" ]; then
     echo "FAIL session.conf ran a command"
