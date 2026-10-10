@@ -47,6 +47,19 @@ pub struct Boot {
     pub kyty_note: String,
 }
 
+impl Boot {
+    /// The welcome screen while the catalog is read, before `boot_start`: up, holding input,
+    /// with nothing started.
+    pub fn before_start() -> Boot {
+        Boot { active: true, ..Boot::default() }
+    }
+
+    /// Confirm dismisses the welcome screen: on a first start, or once it is ready.
+    pub fn confirm_allowed(&self) -> bool {
+        self.first || self.ready
+    }
+}
+
 fn parse_fraction(s: &str) -> Option<f32> {
     let (a, b) = s.rsplit_once(' ')?.1.split_once('/')?;
     let (a, b): (f32, f32) = (a.parse().ok()?, b.parse().ok()?);
@@ -380,7 +393,7 @@ impl App {
             return;
         }
         if !self.boot.ready {
-            if !self.boot.first {
+            if !self.boot.confirm_allowed() {
                 return;
             }
             // Skip waiting: downloads keep going in the background (shown in the status line).

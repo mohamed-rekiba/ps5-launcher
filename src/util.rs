@@ -77,20 +77,33 @@ pub fn atomic_write(path: &Path, data: &[u8]) -> std::io::Result<()> {
     std::fs::rename(&tmp, path)
 }
 
-/// Run `work` on a thread named `name`, then hand its result to `deliver` on that thread (to
-/// post it to the UI, for example). Returns at once. If no thread can be made, both run here.
-pub fn in_background<T: 'static>(name: &str, work: impl FnOnce() -> T + Send + 'static, deliver: impl FnOnce(T) + Send + 'static) {
-    let job = std::sync::Arc::new(std::sync::Mutex::new(Some((work, deliver))));
-    let in_thread = job.clone();
-    let spawned = std::thread::Builder::new().name(name.into()).spawn(move || {
-        if let Some((work, deliver)) = in_thread.lock().unwrap_or_else(|e| e.into_inner()).take() {
-            deliver(work());
+/// Run `work` on a thread named `name`, then hand `Ok(result)` to `deliver` on that thread (to
+/// post it to the UI, for example). Returns at once. When no thread can be made, `work` does not
+/// run: `deliver` gets `Err` here, so the caller can go on without it.
+pub fn in_background<T: 'static>(name: &str, work: impl FnOnce() -> T + Send + 'static, deliver: impl FnOnce(Result<T, String>) + Send + 'static) {
+    let spawn = |job: Box<dyn FnOnce() + Send>| std::thread::Builder::new().name(name.into()).spawn(job).map(drop);
+    in_background_with(spawn, work, deliver);
+}
+
+/// `in_background` with the thread maker given (a test makes one that fails).
+fn in_background_with<T: 'static>(
+    spawn: impl FnOnce(Box<dyn FnOnce() + Send>) -> std::io::Result<()>,
+    work: impl FnOnce() -> T + Send + 'static,
+    deliver: impl FnOnce(Result<T, String>) + Send + 'static,
+) {
+    // The thread takes `deliver` from here; if it never starts, this does.
+    let slot = std::sync::Arc::new(std::sync::Mutex::new(Some(deliver)));
+    let in_thread = slot.clone();
+    let spawned = spawn(Box::new(move || {
+        let result = work();
+        if let Some(deliver) = in_thread.lock().unwrap_or_else(|e| e.into_inner()).take() {
+            deliver(Ok(result));
         }
-    });
+    }));
     if let Err(e) = spawned {
-        crate::log!("could not start the {name} thread ({e}); doing it here");
-        if let Some((work, deliver)) = job.lock().unwrap_or_else(|e| e.into_inner()).take() {
-            deliver(work());
+        crate::log!("could not start a background thread ({e})");
+        if let Some(deliver) = slot.lock().unwrap_or_else(|e| e.into_inner()).take() {
+            deliver(Err(format!("could not start a thread for it ({e})")));
         }
     }
 }
@@ -340,10 +353,24 @@ mod tests {
         // and the result arrives when the work is done.
         let (tx, rx) = std::sync::mpsc::channel();
         let start = std::time::Instant::now();
-        in_background("slow", || { std::thread::sleep(Duration::from_millis(1500)); 42 }, move |v| tx.send(v).unwrap());
+        in_background("slow", || { std::thread::sleep(Duration::from_millis(1500)); 42 }, move |r| tx.send(r).unwrap());
         assert!(start.elapsed() < Duration::from_millis(200), "returned after {:?}", start.elapsed());
-        assert_eq!(rx.recv_timeout(Duration::from_secs(10)), Ok(42));
+        assert_eq!(rx.recv_timeout(Duration::from_secs(10)), Ok(Ok(42)));
         assert!(start.elapsed() >= Duration::from_millis(1500));
+    }
+
+    #[test]
+    fn without_a_thread_the_work_never_runs_on_the_caller() {
+        let ran = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let (tx, rx) = std::sync::mpsc::channel();
+        let flag = ran.clone();
+        in_background_with(
+            |_job| Err(std::io::Error::other("no threads left")),
+            move || flag.store(true, std::sync::atomic::Ordering::SeqCst),
+            move |r| tx.send(r).unwrap(),
+        );
+        assert_eq!(rx.try_recv(), Ok(Err("could not start a thread for it (no threads left)".to_string())), "a failure the caller can recover from");
+        assert!(!ran.load(std::sync::atomic::Ordering::SeqCst), "the slow work did not run on the caller");
     }
     #[test]
     fn dates_roundtrip() {

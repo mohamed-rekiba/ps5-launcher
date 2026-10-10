@@ -283,6 +283,8 @@ pub struct App {
     /// The emulator (addon id) and build of each game's last session in this run, by game ID,
     /// as the launch recorded them: the game's rating names them.
     pub played_on: HashMap<String, (String, crate::sessions::BuildCell)>,
+    /// `App::start` ran (it runs once).
+    started: bool,
     /// Library: show one console's games (None: every console).
     pub platform_filter: Option<crate::platform::Platform>,
     /// The Library catalog has games for more than one console (shows badges and a console chip).
@@ -339,6 +341,29 @@ fn post(f: impl FnOnce(&mut App) + Send + 'static) {
 }
 
 // ====================================================================== startup
+
+/// What `App::start` does with the catalog thread's result.
+#[derive(Debug, PartialEq)]
+pub(crate) struct StartPlan {
+    /// The welcome screen's first-start form: no catalog, or no config.json before this run.
+    pub first_run: bool,
+    /// Reload the catalog (it is stale); else go on to the artwork.
+    pub sync: bool,
+    /// Why there is no catalog, for the log and a toast.
+    pub problem: Option<String>,
+}
+
+/// The start's decisions; None when it already ran. A catalog thread that failed (`Err`) starts
+/// with no catalog and does not reload it, which would need another thread.
+pub(crate) fn plan_start(started: bool, loaded: &Result<(CatalogFile, bool), String>, new_config: bool) -> Option<StartPlan> {
+    if started {
+        return None;
+    }
+    Some(match loaded {
+        Ok((catalog, stale)) => StartPlan { first_run: catalog.games.is_empty() || new_config, sync: *stale, problem: None },
+        Err(problem) => StartPlan { first_run: true, sync: false, problem: Some(problem.clone()) },
+    })
+}
 
 /// Runs until the launcher quits, and returns the process exit code (`system::exit_code`).
 pub fn run(ui: AppWindow, monitors: Vec<Monitor>, target_monitor: Option<Monitor>, windowed: bool) -> i32 {
@@ -451,6 +476,7 @@ pub fn run(ui: AppWindow, monitors: Vec<Monitor>, target_monitor: Option<Monitor
         my_results: crate::results::load(),
         crash_logs: HashMap::new(),
         played_on: HashMap::new(),
+        started: false,
         platform_filter: None,
         mixed_consoles: false,
         status_count: 4,
@@ -469,7 +495,7 @@ pub fn run(ui: AppWindow, monitors: Vec<Monitor>, target_monitor: Option<Monitor
     app.relayout();
     app.push_all();
     // The welcome screen is up, and holds input, until the catalog is read.
-    app.boot.active = true;
+    app.boot = crate::boot::Boot::before_start();
     ui.set_overlay(crate::boot::OVERLAY_BOOT);
     let new_config = !Config::path().exists();
     if new_config {
@@ -486,7 +512,7 @@ pub fn run(ui: AppWindow, monitors: Vec<Monitor>, target_monitor: Option<Monitor
         let catalog = CatalogFile::load();
         let stale = catalog.stale();
         (catalog, stale)
-    }, move |(catalog, stale)| post(move |app| app.start(catalog, stale, new_config)));
+    }, move |loaded| post(move |app| app.start(loaded, new_config)));
 
     wire_callbacks(&ui);
     crate::gamepad::spawn(|p| post(move |app| app.on_pad(p)));
@@ -633,13 +659,21 @@ impl App {
 
     /// The rest of the start, once `run` has read the catalog off the UI thread: the catalog,
     /// the welcome screen, then the background checks, in the order they always ran.
-    fn start(&mut self, catalog: CatalogFile, stale: bool, new_config: bool) {
-        let first_run = catalog.games.is_empty() || new_config;
+    fn start(&mut self, loaded: Result<(CatalogFile, bool), String>, new_config: bool) {
+        let Some(plan) = plan_start(self.started, &loaded, new_config) else { return };
+        self.started = true;
+        if let Some(problem) = &plan.problem {
+            crate::log!("the catalog was not read at start: {problem}");
+        }
+        let catalog = loaded.map(|(catalog, _)| catalog).unwrap_or_default();
         self.catalog_updated = catalog.updated;
         self.set_catalog(catalog.games);
         self.relayout();
         self.push_all();
-        self.boot_start(first_run);
+        self.boot_start(plan.first_run);
+        if let Some(problem) = &plan.problem {
+            self.toast("Couldn't read the catalog", &format!("{problem}. You can reload it from Settings."), 2);
+        }
         let n = self.downloads.take_resumed();
         if n > 0 {
             self.toast(&format!("{n} download{} continued", if n == 1 { "" } else { "s" }), "They were running when the launcher last closed.", 0);
@@ -659,7 +693,7 @@ impl App {
         // and the boot health check's notice. Both show once the welcome screen is done.
         self.setup_start();
         self.notice_start();
-        if stale {
+        if plan.sync {
             self.start_sync();
         } else {
             self.start_enrich();
@@ -1778,7 +1812,7 @@ impl App {
 
     pub fn act(&mut self, a: Act) {
         if self.boot.active {
-            if a == Act::Confirm && (self.boot.first || self.boot.ready) {
+            if a == Act::Confirm && self.boot.confirm_allowed() {
                 self.boot_confirm();
             }
             return;
@@ -2961,5 +2995,49 @@ impl EmulatorProbe {
     /// The emulator's addon id and its build (`sessions::rating_identity`).
     fn identify(self) -> (String, String) {
         crate::sessions::rating_identity(self.played, self.platform, &self.cfg)
+    }
+}
+
+#[cfg(test)]
+mod start_tests {
+    use super::{plan_start, StartPlan};
+    use crate::boot::Boot;
+    use crate::catalog::{CatalogFile, Game};
+
+    fn catalog(games: usize) -> CatalogFile {
+        CatalogFile { games: (0..games).map(|i| Game { id: i as i64, ..Game::default() }).collect(), ..CatalogFile::default() }
+    }
+
+    #[test]
+    fn the_start_uses_the_catalog_the_thread_read() {
+        assert_eq!(plan_start(false, &Ok((catalog(2), false)), false), Some(StartPlan { first_run: false, sync: false, problem: None }));
+        assert_eq!(plan_start(false, &Ok((catalog(2), true)), false), Some(StartPlan { first_run: false, sync: true, problem: None }), "a stale catalog is reloaded");
+        assert_eq!(plan_start(false, &Ok((catalog(2), false)), true), Some(StartPlan { first_run: true, sync: false, problem: None }), "a new config is a first start");
+    }
+
+    #[test]
+    fn an_empty_catalog_is_a_first_start_that_reloads_it() {
+        assert_eq!(plan_start(false, &Ok((catalog(0), true)), false), Some(StartPlan { first_run: true, sync: true, problem: None }));
+    }
+
+    #[test]
+    fn a_catalog_thread_that_failed_starts_without_a_catalog() {
+        let plan = plan_start(false, &Err("could not start a thread for it (no threads left)".into()), false);
+        assert_eq!(plan, Some(StartPlan { first_run: true, sync: false, problem: Some("could not start a thread for it (no threads left)".into()) }),
+            "the app goes on with no catalog, and says why; no reload that needs another thread");
+    }
+
+    #[test]
+    fn the_start_runs_once() {
+        assert_eq!(plan_start(true, &Ok((catalog(2), false)), false), None);
+        assert_eq!(plan_start(true, &Err("late".into()), false), None);
+    }
+
+    #[test]
+    fn before_the_start_the_welcome_screen_holds_input() {
+        let boot = Boot::before_start();
+        assert!(boot.active, "keys, clicks and the power key see the welcome screen");
+        assert!(!boot.confirm_allowed(), "Confirm cannot dismiss it before the start");
+        assert!(boot.started.is_none(), "its timers have not started");
     }
 }
