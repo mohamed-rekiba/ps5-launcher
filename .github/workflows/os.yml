@@ -26,7 +26,6 @@ on:
 
 permissions:
   contents: read
-  packages: write
 
 # One run at a time, through promotion and the ISO upload. queue: max keeps every waiting run (up
 # to 100): with the default, a third release run would cancel the second one while it waits.
@@ -69,6 +68,9 @@ jobs:
     if: github.event_name == 'push'
     runs-on: ${{ vars.OS_RUNNER || 'ubuntu-24.04' }}
     timeout-minutes: 100
+    permissions:
+      contents: read
+      actions: read
     outputs:
       build: ${{ steps.release.outputs.build }}
     steps:
@@ -109,7 +111,8 @@ jobs:
 
   prepare:
     needs: wait
-    # After wait on a tag push; by hand, wait is skipped.
+    # After wait on a tag push; by hand, wait is skipped. Downstream jobs use explicit
+    # status checks too, so this skipped ancestor does not skip the manual build and its gates.
     if: ${{ !cancelled() && (needs.wait.result == 'skipped' || needs.wait.outputs.build == 'true') }}
     runs-on: ${{ vars.OS_RUNNER || 'ubuntu-24.04' }}
     timeout-minutes: 10
@@ -183,8 +186,12 @@ jobs:
 
   main:
     needs: prepare
+    if: ${{ !cancelled() && needs.prepare.result == 'success' }}
     runs-on: ${{ vars.OS_RUNNER || 'ubuntu-24.04' }}
     timeout-minutes: 90
+    permissions:
+      contents: read
+      packages: write
     outputs:
       digest: ${{ steps.push.outputs.digest }}
     env:
@@ -259,8 +266,12 @@ jobs:
 
   test-images:
     needs: [prepare, main]
+    if: ${{ !cancelled() && needs.prepare.result == 'success' && needs.main.result == 'success' }}
     runs-on: ${{ vars.OS_RUNNER || 'ubuntu-24.04' }}
     timeout-minutes: 60
+    permissions:
+      contents: read
+      packages: write
     outputs:
       upgrade: ${{ steps.push.outputs.upgrade }}
       unsigned: ${{ steps.push.outputs.unsigned }}
@@ -331,8 +342,12 @@ jobs:
   # keys "creator" or "timestamp", which containers/image parses itself.
   sign:
     needs: [prepare, main, test-images]
+    if: ${{ !cancelled() && needs.prepare.result == 'success' && needs.main.result == 'success' && needs.test-images.result == 'success' }}
     runs-on: ${{ vars.OS_RUNNER || 'ubuntu-24.04' }}
     timeout-minutes: 15
+    permissions:
+      contents: read
+      packages: write
     environment: os-fedora-signing
     outputs:
       attempt: ${{ steps.sign.outputs.attempt }}
@@ -385,8 +400,12 @@ jobs:
   boot-test:
     needs: [prepare, main]
     # A self-hosted runner with KVM can take over with the repository variable OS_VM_RUNNER.
+    if: ${{ !cancelled() && needs.prepare.result == 'success' && needs.main.result == 'success' }}
     runs-on: ${{ vars.OS_VM_RUNNER || vars.OS_RUNNER || 'ubuntu-24.04' }}
     timeout-minutes: 60
+    permissions:
+      contents: read
+      packages: read
     env:
       MAIN: ${{ needs.prepare.outputs.image }}@${{ needs.main.outputs.digest }}
     steps:
@@ -470,8 +489,12 @@ jobs:
 
   install-test:
     needs: [prepare, main, test-images, sign]
+    if: ${{ !cancelled() && needs.prepare.result == 'success' && needs.main.result == 'success' && needs.test-images.result == 'success' && needs.sign.result == 'success' }}
     runs-on: ${{ vars.OS_VM_RUNNER || vars.OS_RUNNER || 'ubuntu-24.04' }}
     timeout-minutes: 180
+    permissions:
+      contents: read
+      packages: write
     env:
       IMAGE: ${{ needs.prepare.outputs.image }}
       MAIN_DIGEST: ${{ needs.main.outputs.digest }}
@@ -597,7 +620,7 @@ jobs:
   #     only says so, and the run still builds and tests the candidates
   release-guard:
     needs: prepare
-    if: inputs.promote || inputs.attach_iso || github.event_name == 'push'
+    if: ${{ !cancelled() && needs.prepare.result == 'success' && (inputs.promote || inputs.attach_iso || github.event_name == 'push') }}
     runs-on: ${{ vars.OS_RUNNER || 'ubuntu-24.04' }}
     timeout-minutes: 5
     outputs:
@@ -623,11 +646,18 @@ jobs:
     needs: [prepare, main, sign, boot-test, install-test, release-guard]
     # By hand only from main; by itself only on a release tag (protected, like main).
     if: >-
+      !cancelled() &&
+      needs.prepare.result == 'success' && needs.main.result == 'success' &&
+      needs.sign.result == 'success' && needs.boot-test.result == 'success' &&
+      needs.install-test.result == 'success' && needs.release-guard.result == 'success' &&
       needs.release-guard.outputs.release == 'true' &&
       ((inputs.promote && github.ref == 'refs/heads/main') ||
        (github.event_name == 'push' && startsWith(github.ref, 'refs/tags/v')))
     runs-on: ${{ vars.OS_RUNNER || 'ubuntu-24.04' }}
     timeout-minutes: 60
+    permissions:
+      contents: read
+      packages: write
     # The owner adds required reviewers to this environment. They approve only with hardware
     # results (packaging/os/hardware-test.md) for this exact run id, attempt and digest.
     environment: os-fedora-release
@@ -732,11 +762,15 @@ jobs:
 
   iso:
     needs: [prepare, main, release-guard, promote]
-    if: needs.release-guard.outputs.release == 'true' && (inputs.attach_iso || github.event_name == 'push')
+    if: >-
+      !cancelled() && needs.prepare.result == 'success' && needs.main.result == 'success' &&
+      needs.release-guard.result == 'success' && needs.promote.result == 'success' &&
+      needs.release-guard.outputs.release == 'true' && (inputs.attach_iso || github.event_name == 'push')
     runs-on: ${{ vars.OS_RUNNER || 'ubuntu-24.04' }}
     timeout-minutes: 30
     permissions:
       contents: write
+      packages: read
     env:
       IMAGE: ${{ needs.prepare.outputs.image }}
       LAUNCHER_TAG: ${{ needs.prepare.outputs.launcher_tag }}

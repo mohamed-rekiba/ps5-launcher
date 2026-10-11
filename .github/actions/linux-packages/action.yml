@@ -57,6 +57,7 @@ runs:
       env:
         OUTPUT: ${{ inputs.output }}
       run: |
+        sudo apt-get update -qq
         sudo apt-get install -y --no-install-recommends rpm >/dev/null
         packaging/linux/check-packages.sh "$OUTPUT"
     - name: Check the AppImage

@@ -147,6 +147,7 @@ jobs:
         with:
           targets: aarch64-apple-darwin,x86_64-apple-darwin
           cache-key: macos-release
+      - run: node --test scripts/package-licenses.test.mjs
       - run: brew install libarchive sevenzip librsvg
       - run: cargo test --release --locked --target aarch64-apple-darwin
       - name: Build both architectures

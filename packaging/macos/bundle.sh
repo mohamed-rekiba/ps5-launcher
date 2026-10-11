@@ -55,8 +55,8 @@ codesign --verify --deep --strict "$APP"
 cp "$ROOT/README.md" "$STAGE/"
 # SKIP_LICENSES=1 skips the third-party notices (they need network access to GitHub).
 if [ -z "${SKIP_LICENSES:-}" ] && [ -f "$ROOT/scripts/package-licenses.mjs" ] && command -v node >/dev/null; then
-    # Both Mac architectures pull in the same crates; list the ones for Apple Silicon.
-    PS5_LICENSE_TARGET=aarch64-apple-darwin node "$ROOT/scripts/package-licenses.mjs" "$STAGE" --allow-upstream
+    # Include the union: Intel and Apple Silicon have some different dependencies.
+    PS5_LICENSE_TARGET=aarch64-apple-darwin,x86_64-apple-darwin node "$ROOT/scripts/package-licenses.mjs" "$STAGE" --allow-upstream
 fi
 
 # ditto keeps the bundle's permissions and structure intact (plain zip can break them).

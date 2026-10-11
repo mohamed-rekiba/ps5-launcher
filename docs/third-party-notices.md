@@ -4,8 +4,9 @@ This release contains third-party software. These notices do not set or change
 PS5 Launcher's own license and are not comprehensive legal certification.
 
 The adjacent `licenses/inventory.json` lists active default-feature Rust
-dependencies for `x86_64-unknown-linux-gnu`, using locked Cargo metadata and the
-normal/build dependency tree. Build-time dependencies are conservatively included;
+dependencies for the `targets` recorded in `licenses/inventory.json` (Linux or
+macOS), using locked Cargo metadata and the normal/build dependency tree. The
+universal macOS archive includes the union of Intel and Apple Silicon crates. Build-time dependencies are conservatively included;
 dev-only and unused optional dependencies are excluded. Original Cargo license
 fields and normalized SPDX expressions are recorded separately. Except for the
 Slint choice below, expressions are declarations, not a legal determination or
@@ -17,8 +18,8 @@ selection among alternatives. An `AND` must not be read as `OR`.
   AUTHORS and license-directory documents discovered recursively in cached
   source packages, including vendored native libraries. Texts are not rewritten.
 - Where a published crate omits its license documents, the helper retrieves
-  applicable documents from its official GitHub repository **at the published
-  crate's VCS commit**, not a moving default branch. The inventory records URLs
+  applicable documents from its reviewed official GitHub or GitLab repository
+  **at the published crate's VCS commit**, not a moving default branch. The inventory records URLs
   and SHA-256 hashes. A complete repository tree is checked for applicable
   standalone NOTICE files at the root, package ancestors and package subtree;
   an empty `noticePaths` means none was found in that scope, not that one was
@@ -31,6 +32,14 @@ selection among alternatives. An `AND` must not be read as `OR`.
 - For `option-ext` under MPL-2.0, `licenses/crates/option-ext@0.2.0/source/`
   contains its exact cached source package. That Covered Software source is
   available under MPL-2.0; this does not relicense the larger application.
+
+The macOS `dispatch@0.2.0` publication is an explicit exception: its published
+commit `82d6c7a5b75dc0c71c3f46f87bb6c16a476f7748` has no standalone LICENSE file.
+Its unchanged upstream Cargo manifest (MIT declaration and authors), exact cached
+source and a supplemental shared MIT text are retained. The inventory flags
+`missingUpstreamLicenseText` and records the supplemental text's provenance; that
+text is not represented as an original dispatch notice. Other versions do not
+receive this exception.
 
 Unknown missing license sources, incomplete repository listings, unreadable
 documents, unsafe paths and failed upstream requests stop packaging. Upstream

@@ -128,6 +128,13 @@ jobs:
       - name: Install tools the tests use
         run: brew install libarchive sevenzip
       - run: cargo test --profile ci --locked --target ${{ matrix.target }} 2>&1 | tee test.log
+      - name: Check third-party license packaging
+        env:
+          GITHUB_TOKEN: ${{ github.token }}
+          PS5_LICENSE_TARGET: ${{ matrix.target }}
+        run: |
+          notices=$(mktemp -d "$RUNNER_TEMP/license-notices.XXXXXX")
+          node scripts/package-licenses.mjs "$notices" --allow-upstream
       - name: Smoke test the binary
         run: scripts/smoke-test.sh target/${{ matrix.target }}/ci/ps5-launcher
       - if: failure()
@@ -186,4 +193,4 @@ jobs:
       - name: Every job passed
         run: |
           echo '${{ toJSON(needs.*.result) }}'
-          [ "${{ contains(needs.*.result, 'failure') || contains(needs.*.result, 'cancelled') }}" = false ]
+          [ "${{ contains(needs.*.result, 'failure') || contains(needs.*.result, 'cancelled') || contains(needs.*.result, 'skipped') }}" = false ]

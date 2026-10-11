@@ -8,8 +8,11 @@ runs:
   using: composite
   steps:
     - shell: bash
+      env:
+        LOGS: ${{ inputs.logs }}
       run: |
-        for f in ${{ inputs.logs }}; do
+        read -r -a log_files <<< "$LOGS"
+        for f in "${log_files[@]}"; do
           [ -f "$f" ] || continue
           # Colour codes would hide line starts from the pattern. grep exits 1 on no match; that's fine.
           msg=$(sed $'s/\x1b\\[[0-9;]*m//g' "$f" | grep -E -B1 -A12 '^error|panicked at|^---- ' | head -c 30000 || true)
