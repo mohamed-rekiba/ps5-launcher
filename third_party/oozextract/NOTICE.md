@@ -5,6 +5,13 @@ This is a copy of the `oozextract` crate, version 0.5.5, by lvlvllvlvllvlvl
 The crate declares the MIT license. It is a Rust port of `ooz` by powzix
 (<https://github.com/powzix/ooz>).
 
+The published crate's `.cargo_vcs_info.json` identifies upstream commit
+`b5b43a275a3f34c48b8ea92b3ac7588bb793fa94`. That publication declares
+`license = "MIT"` but includes no standalone license text. The adjacent
+`LICENSE` supplies the standard MIT terms with attribution to the upstream
+author named above; it is added here, not copied from an upstream license file.
+Release packaging retains both that text and this modification notice locally.
+
 Changes made here:
 
 - Removed the command line tool, the tests, benches and the optional `tokio`, `wasm` and `clap` dependencies.

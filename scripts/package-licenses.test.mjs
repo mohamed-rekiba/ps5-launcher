@@ -3,7 +3,18 @@ import { test } from 'node:test';
 import * as fs from 'node:fs/promises';
 import os from 'node:os';
 import path from 'node:path';
+import { fileURLToPath } from 'node:url';
 import { applicableUpstreamFiles, localDocuments, normalizeExpression, safeRelative, selectPackages } from './package-licenses.mjs';
+
+test('vendored oozextract packages MIT terms and its modification notice without upstream fallback', async () => {
+  const root = fileURLToPath(new URL('../third_party/oozextract/', import.meta.url));
+  const documents = await localDocuments(root);
+  const license = documents.find(d => /^(?:licen[cs]e|copying)/i.test(path.posix.basename(d.relative)));
+  assert.ok(license, 'vendored oozextract must include local license text');
+  assert.match(license.bytes.toString('utf8'), /Permission is hereby granted, free of charge/);
+  assert.match(license.bytes.toString('utf8'), /THE SOFTWARE IS PROVIDED "AS IS"/);
+  assert.ok(documents.some(d => d.relative === 'NOTICE.md'));
+});
 
 test('retain SPDX AND; normalize only legacy Cargo alternatives', () => {
   assert.equal(normalizeExpression('MIT/Apache-2.0'), 'MIT OR Apache-2.0');
