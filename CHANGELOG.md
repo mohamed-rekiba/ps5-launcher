@@ -1,5 +1,12 @@
 # Changelog
 
+## [1.15.1](https://github.com/mohamed-rekiba/ps5-launcher/compare/v1.15.0...v1.15.1) (2026-10-11)
+
+
+### Bug Fixes
+
+* **packaging:** include vendored oozextract MIT license ([3ef98b1](https://github.com/mohamed-rekiba/ps5-launcher/commit/3ef98b15ab3cd8d2c3b49f5f75d9ba31fc5549d8))
+
 ## [1.15.0](https://github.com/mohamed-rekiba/ps5-launcher/compare/v1.14.3...v1.15.0) (2026-10-10)
 
 
