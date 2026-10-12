@@ -1522,7 +1522,6 @@ impl App {
             .unwrap_or_else(|| gpu::fallback_name(&d.screen.card))
     }
 
-    /// `driver`: only the card and the NVIDIA driver (the setup's Graphics step: Skip is its Later).
     fn display_rows(&self, rows: &mut Vec<(Cat, SId, SettingData)>) {
         let Some(d) = &self.sys.display.state else {
             return;

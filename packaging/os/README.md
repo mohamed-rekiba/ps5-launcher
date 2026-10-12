@@ -88,7 +88,6 @@ The root helper verifies the channel by its exact digest before checking updates
 Every switch stores signature enforcement; later bootc upgrades obey that choice. There are
 no driver-key checks. The helper exposes status, update-check, update, rollback, switch main,
 one-time desktop login, time zone/NTP settings, and health-notice acknowledgment.
-`queue-key`, `key-state`, and `switch nvidia` are refused.
 
 ## Boot health, recovery and desktop
 

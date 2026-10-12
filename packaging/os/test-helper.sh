@@ -138,11 +138,9 @@ gate() {
     helper "$@" > "$work/out" || got=$?
     [ "$got" = "$want" ]
 }
-for removed in queue-key key-state; do
-    check "$removed is refused" gate 2 "$removed"
-    check "  without touching bootc" test ! -s "$work/bootc.log"
-done
-check "switch nvidia is refused" gate 2 switch nvidia
+check "an unknown task is refused" gate 2 no-such-task
+check "  without touching bootc" test ! -s "$work/bootc.log"
+check "a switch to an unknown image is refused" gate 2 switch other
 check "  without touching bootc" test ! -s "$work/bootc.log"
 # Image signatures: every image the helper trusts is checked by its exact digest first. An
 # unsigned image, or one signed with another key, stops the task before bootc runs.

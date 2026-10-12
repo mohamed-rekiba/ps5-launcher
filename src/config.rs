@@ -71,8 +71,7 @@ pub struct Config {
     /// PS5 Launcher OS: the first-start setup ran to its end ("Done"). Settings → About can run
     /// it again.
     pub setup_done: bool,
-    /// The setup's step on screen, so it comes back to it after a restart (the NVIDIA driver's
-    /// key restarts the PC in the middle of it).
+    /// The setup's step on screen, so it comes back to it after a restart.
     pub setup_step: Option<crate::setup::Step>,
     /// How this run read the file; None for a Config that was never read. Crate-visible only so
     /// tests elsewhere can build a Config with `..old`.

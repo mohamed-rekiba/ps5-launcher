@@ -5,12 +5,12 @@
 #
 #   sudo bash collect-hardware-logs.sh STAGE [OUTPUT_DIR]
 #
-# STAGE: a short name, for example install, first-start, upgrade, rollback, nvidia, main-again.
+# STAGE: a short name, for example install, first-start, upgrade, rollback.
 # OUTPUT_DIR: where the tarball goes (default: this script's folder, for example a USB stick).
 # It prints the booted digest at the end: write it in hardware-test.md.
 #
-# What it saves: bootc status, the kernel command line, the GPU lines of lspci, the NVIDIA and
-# nouveau modules, the GPU firmware diagnostics, the last 2000
+# What it saves: bootc status, the kernel command line, the GPU lines of lspci, the loaded GPU
+# kernel modules, the GPU firmware diagnostics, the last 2000
 # lines of this boot's journal, the session log, the list of the launcher's game logs with the
 # end of the newest one, and the OS marker. The launcher has no log file of its own: the session
 # wrapper writes its output into ~/.cache/ps5-launcher-session.log.
@@ -58,7 +58,7 @@ save hardware.txt 'echo "stage: $LOG_STAGE"; date -u; cat /sys/class/dmi/id/sys_
 save bootc-status.json 'bootc status --json'
 save cmdline.txt 'cat /proc/cmdline'
 save lspci-gpu.txt 'lspci -nnk | grep -A3 -E "VGA|3D|Display"'
-save lsmod-gpu.txt 'lsmod | grep -E "^(nvidia|nouveau)"'
+save lsmod-gpu.txt 'lsmod | grep -E "^(amdgpu|i915|xe|nouveau|nvidia)"'
 save journal.txt 'journalctl -b --no-pager | tail -n 2000'
 save os-marker.txt 'cat /usr/lib/ps5-launcher/os-release'
 save session.log 'tail -n 3000 "$LOG_HOME/.cache/ps5-launcher-session.log"'

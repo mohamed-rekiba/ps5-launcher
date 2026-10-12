@@ -159,7 +159,7 @@ check_gpu() {
         driver=$(basename "$(readlink "$drm_dir/$card/device/driver" 2>/dev/null)" 2>/dev/null)
         found="$found ${driver:-none}"
         case $driver in
-        "" | nvidia | simple-framebuffer | efi-framebuffer | vesa-framebuffer) ;;
+        "" | simple-framebuffer | efi-framebuffer | vesa-framebuffer) ;;
         *) gpu_problem=""; return ;;
         esac
     done

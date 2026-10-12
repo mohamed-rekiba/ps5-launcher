@@ -70,7 +70,6 @@ kver=$(uname -r)
 case $want in
 main)
     check "no NVIDIA or nouveau kernel arguments" not grep -Eq 'nvidia|nouveau' /proc/cmdline
-    check "no nouveau block" test ! -e /usr/lib/modprobe.d/ps5-launcher-os-nvidia.conf
     check "Fedora nouveau module" modinfo -k "$kver" nouveau
     check "Mesa NVK ICD" sh -c 'find /usr/share/vulkan/icd.d -name "*nouveau*.json" | grep -q .'
     check "NVIDIA firmware package" rpm -q nvidia-gpu-firmware

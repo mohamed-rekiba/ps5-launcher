@@ -24,7 +24,7 @@ impl Mode {
             return Mode::Desktop;
         }
         match os_marker.and_then(marker_image) {
-            Some("main" | "nvidia") => Mode::Os,
+            Some("main") => Mode::Os,
             _ => Mode::Session,
         }
     }
@@ -37,7 +37,7 @@ impl Mode {
     }
 }
 
-/// Written into PS5 Launcher OS images (packaging/os/): `IMAGE=main` or `IMAGE=nvidia`.
+/// Written into PS5 Launcher OS images (packaging/os/): `IMAGE=main`.
 const OS_MARKER: &str = "/usr/lib/ps5-launcher/os-release";
 
 /// The Fedora OS image named in the system marker.
@@ -584,14 +584,14 @@ mod tests {
     fn mode_is_the_os_with_a_valid_marker() {
         assert_eq!(Mode::detect(Some("1"), None), Mode::Session);
         assert_eq!(Mode::detect(Some("1"), Some("IMAGE=main\n")), Mode::Os);
-        assert_eq!(Mode::detect(Some("1"), Some("IMAGE=nvidia")), Mode::Os);
-        assert_eq!(Mode::detect(Some("1"), Some("# PS5 Launcher OS\n IMAGE=\"nvidia\" \n")), Mode::Os);
+        assert_eq!(Mode::detect(Some("1"), Some("# PS5 Launcher OS\n IMAGE=\"main\" \n")), Mode::Os);
+        assert_eq!(Mode::detect(Some("1"), Some("IMAGE=bazzite")), Mode::Session);
     }
 
     #[test]
     fn the_image_from_the_marker() {
         assert_eq!(image_of("IMAGE=main\n"), Some(Image::Main));
-        assert_eq!(image_of("# PS5 Launcher OS\n IMAGE=\"nvidia\" \n"), None);
+        assert_eq!(image_of("# PS5 Launcher OS\n IMAGE=\"main\" \n"), Some(Image::Main));
         assert_eq!(image_of("IMAGE=bazzite"), None);
         assert_eq!(image_of(""), None);
     }

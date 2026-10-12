@@ -146,7 +146,6 @@ kver=$(ls /usr/lib/modules)
 case $VARIANT in
 main)
     ! modinfo -k "$kver" nvidia >/dev/null 2>&1 || fail "main has the NVIDIA module"
-    [ ! -e /usr/lib/bootc/kargs.d/00-nvidia.toml ] || fail "main has the NVIDIA kernel arguments"
     modinfo -k "$kver" nouveau >/dev/null || fail "no Fedora nouveau module"
     rpm -q nvidia-gpu-firmware >/dev/null || fail "no NVIDIA firmware package"
     find /usr/share/vulkan/icd.d -name "*nouveau*.json" | grep -q . || fail "no Mesa NVK ICD"

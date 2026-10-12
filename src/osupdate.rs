@@ -214,7 +214,7 @@ mod tests {
     }
 
     #[test]
-    fn the_nvidia_check() {
+    fn the_update_check() {
         assert_eq!(parse_check("update-available sha256:0123abcd\n"), Some("sha256:0123abcd".into()));
         assert_eq!(parse_check("up-to-date\n"), None);
         assert_eq!(parse_check("No update available.\n"), None);

@@ -24,7 +24,7 @@ cleanup() {
 trap cleanup EXIT
 uid=$(id -u)
 python=$(python3 -c 'import os; print(os.path.realpath("/proc/self/exe"))')
-mkdir -p "$work/bin" "$work/drm" "$work/drivers/amdgpu" "$work/drivers/nvidia" "$work/run/$uid"
+mkdir -p "$work/bin" "$work/drm" "$work/drivers/amdgpu" "$work/drivers/simple-framebuffer" "$work/run/$uid"
 sed -e "s|^health_dir=/var/lib/ps5-launcher-os/health$|health_dir=$work/health|" \
     -e "s|^lock_file=/run/ps5-launcher-os.lock$|lock_file=$work/lock|" \
     -e "s|^os_release=/usr/lib/ps5-launcher/os-release$|os_release=$work/os-release|" \
@@ -309,9 +309,9 @@ check "a socket others can write to does not count" is "$(j "$(att "$A")" .resul
 fresh
 status "$A" ""
 launcher ok
-gpu nvidia
+gpu simple-framebuffer
 health
-check "the main image with the NVIDIA driver is unhealthy" has "$(j "$(att "$A")" .reason)" "no usable driver"
+check "a screen on the firmware framebuffer only is unhealthy" has "$(j "$(att "$A")" .reason)" "no usable driver"
 # A TV in standby: no connected screen says nothing about the new system. The start is neither
 # good nor bad, and the next start is still its first attempt.
 fresh
