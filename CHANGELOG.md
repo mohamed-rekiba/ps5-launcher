@@ -1,5 +1,12 @@
 # Changelog
 
+## [1.15.2](https://github.com/mohamed-rekiba/ps5-launcher/compare/v1.15.1...v1.15.2) (2026-10-12)
+
+
+### Bug Fixes
+
+* **ci:** repair macOS license packaging and workflow gates ([9652ef1](https://github.com/mohamed-rekiba/ps5-launcher/commit/9652ef1d45baeef0d66cc87b7ea5fffea069a9a5))
+
 ## [1.15.1](https://github.com/mohamed-rekiba/ps5-launcher/compare/v1.15.0...v1.15.1) (2026-10-11)
 
 
